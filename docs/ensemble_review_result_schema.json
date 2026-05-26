@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EnsembleReviewResult",
+  "description": "Strict schema for a single reviewer's output in the multi-model ensemble review pipeline.",
+  "type": "object",
+  "required": ["reviewer", "model", "findings", "overall_assessment"],
+  "additionalProperties": false,
+  "properties": {
+    "reviewer": {
+      "type": "string",
+      "description": "Review lens identifier. Standard lenses: security, correctness, readability_performance, spec_contract. Custom lenses (e.g. for a 5th Gemini/Grok reviewer) are allowed."
+    },
+    "model": {
+      "type": "string",
+      "description": "Model identifier and provider, e.g. 'claude-opus-4.6 (bedrock)'"
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["severity", "confidence", "category", "file", "issue", "rationale", "observed_or_inferred", "blocking"],
+        "additionalProperties": false,
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "warning", "suggestion"],
+            "description": "critical=bug/security/regulatory risk if shipped. warning=fix before merge. suggestion=nice to have."
+          },
+          "confidence": {
+            "type": "string",
+            "enum": ["high", "medium", "low"],
+            "description": "high=directly observed in diff/audit. medium=strong inference. low=possible but uncertain."
+          },
+          "category": {
+            "type": "string",
+            "enum": ["security", "correctness", "spec", "runtime", "test", "perf", "docs"],
+            "description": "Primary category of the finding."
+          },
+          "file": {
+            "type": "string",
+            "description": "Relative path to the file."
+          },
+          "line": {
+            "type": ["integer", "null"],
+            "description": "Line number in the file, or null if not applicable."
+          },
+          "issue": {
+            "type": "string",
+            "description": "One-line summary of the issue."
+          },
+          "rationale": {
+            "type": "string",
+            "description": "Why this matters. Include concrete evidence."
+          },
+          "observed_or_inferred": {
+            "type": "string",
+            "enum": ["observed_in_diff", "observed_in_audit", "inferred"],
+            "description": "Whether this finding is directly observed in the diff, observed in the runtime audit, or inferred from context."
+          },
+          "blocking": {
+            "type": "boolean",
+            "description": "True if this finding should block merge."
+          },
+          "suggested_fix": {
+            "type": ["string", "null"],
+            "description": "Optional short suggested fix."
+          },
+          "repro_command": {
+            "type": ["string", "null"],
+            "description": "Optional command to reproduce or verify the issue."
+          },
+          "contract_reference": {
+            "type": ["string", "null"],
+            "description": "Optional path to the spec, manifest, or artifact this finding relates to."
+          }
+        }
+      }
+    },
+    "overall_assessment": {
+      "type": "string",
+      "description": "2-3 sentence overall assessment."
+    }
+  }
+}

@@ -32,7 +32,11 @@ class TestScrubDiff:
         return result.stdout, result.stderr, result.returncode
 
     def test_clean_diff_passes_through(self) -> None:
-        diff = "diff --git a/foo.py b/foo.py\n+def hello():\n+    pass\n"
+        diff = (
+            "diff --git a/foo.py b/foo.py\n"
+            "+def hello():\n"
+            "+    pass\n"
+        )
         stdout, stderr, code = self._run_scrub(diff)
         assert stdout == diff
         assert code == 0
@@ -88,9 +92,22 @@ class TestScrubDiff:
 
     def test_does_not_self_redact(self) -> None:
         diff = (
-            "diff --git a/scripts/scrub_diff.py b/scripts/scrub_diff.py\n"
-            '+    re.compile(r"sk-[a-zA-Z0-9]{20,}"),\n'
-            '+    re.compile(r"(?i)(password|passwd|pwd)\\s*[:=]"),\n'
+            "diff --git a/scripts/scrub_diff.py"
+            " b/scripts/scrub_diff.py\n"
+            '+    re.compile(r"sk-[a-zA-Z0-9]{20,128}"),\n'
+            "+    re.compile("
+            'r"(?i)(password|passwd|pwd)\\s*[:=]"),\n'
+        )
+        stdout, _, code = self._run_scrub(diff)
+        assert "REDACTED" not in stdout
+        assert code == 0
+
+    def test_does_not_redact_test_file(self) -> None:
+        diff = (
+            "diff --git a/tests/test_review_scripts.py"
+            " b/tests/test_review_scripts.py\n"
+            "+        diff = '+API_KEY = \"abc123\"\\n'\n"
+            "+        diff = '+password = \"hunter2\"\\n'\n"
         )
         stdout, _, code = self._run_scrub(diff)
         assert "REDACTED" not in stdout
@@ -122,35 +139,51 @@ class TestScrubDiff:
         _, stderr, _ = self._run_scrub(diff)
         assert "3 line(s) redacted" in stderr
 
+    def test_does_not_match_dotenv_in_prose(self) -> None:
+        diff = "+# See the .environment docs for details\n"
+        stdout, _, code = self._run_scrub(diff)
+        assert "REDACTED" not in stdout
+        assert code == 0
+
+    def test_empty_input(self) -> None:
+        stdout, stderr, code = self._run_scrub("")
+        assert stdout == ""
+        assert code == 0
+
 
 class TestReviewPreflight:
     """Tests for scripts/review_preflight.py."""
 
-    def test_runs_successfully(self, tmp_path: Path) -> None:
+    def _run_preflight(
+        self, tmp_path: Path
+    ) -> tuple[dict, subprocess.CompletedProcess[str]]:
         output = tmp_path / "audit.json"
-        subprocess.run(
-            [sys.executable, str(PREFLIGHT_SCRIPT), "--output", str(output)],
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(PREFLIGHT_SCRIPT),
+                "--output",
+                str(output),
+            ],
             capture_output=True,
             text=True,
             timeout=30,
         )
-        assert output.exists()
-        audit = json.loads(output.read_text())
+        audit = json.loads(output.read_text()) if output.exists() else {}
+        return audit, proc
+
+    def test_runs_successfully(self, tmp_path: Path) -> None:
+        audit, _ = self._run_preflight(tmp_path)
         assert "git" in audit
         assert "signed_manifests" in audit
         assert "n_warnings" in audit
         assert isinstance(audit["git"]["branch"], str)
         assert isinstance(audit["git"]["commit"], str)
 
-    def test_output_has_required_sections(self, tmp_path: Path) -> None:
-        output = tmp_path / "audit.json"
-        subprocess.run(
-            [sys.executable, str(PREFLIGHT_SCRIPT), "--output", str(output)],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        audit = json.loads(output.read_text())
+    def test_output_has_required_sections(
+        self, tmp_path: Path
+    ) -> None:
+        audit, _ = self._run_preflight(tmp_path)
         required = {
             "timestamp",
             "git",
@@ -170,11 +203,36 @@ class TestReviewPreflight:
 
         warnings: list[str] = []
         _run_git(
-            ["diff", "--merge-base", "nonexistent/branch", "--name-only"],
+            [
+                "diff",
+                "--merge-base",
+                "nonexistent/branch",
+                "--name-only",
+            ],
             warnings,
         )
         assert len(warnings) > 0
         assert "git failed" in warnings[0]
+
+    def test_missing_manifest_reported(self) -> None:
+        from scripts.review_preflight import (
+            SIGNED_MANIFESTS,
+            audit_signed_manifests,
+        )
+
+        old = dict(SIGNED_MANIFESTS)
+        try:
+            SIGNED_MANIFESTS["test_missing"] = "nonexistent.json"
+            results = audit_signed_manifests()
+            missing = [
+                r for r in results if r["manifest"] == "test_missing"
+            ]
+            assert len(missing) == 1
+            assert "warning" in missing[0]
+            assert "missing" in missing[0]["warning"]
+        finally:
+            SIGNED_MANIFESTS.clear()
+            SIGNED_MANIFESTS.update(old)
 
 
 class TestValidateReviewResults:
@@ -212,7 +270,9 @@ class TestValidateReviewResults:
         assert proc.returncode == 0
         assert "PASS" in proc.stdout
 
-    def test_rejects_extra_top_level_field(self, tmp_path: Path) -> None:
+    def test_rejects_extra_top_level_field(
+        self, tmp_path: Path
+    ) -> None:
         data = self._make_valid_result()
         data["extra"] = True
         result_path = tmp_path / "result.json"
@@ -226,7 +286,9 @@ class TestValidateReviewResults:
         assert proc.returncode == 1
         assert "Additional properties" in proc.stdout
 
-    def test_rejects_extra_finding_field(self, tmp_path: Path) -> None:
+    def test_rejects_extra_finding_field(
+        self, tmp_path: Path
+    ) -> None:
         data = self._make_valid_result()
         data["findings"][0]["extra_field"] = "bad"
         result_path = tmp_path / "result.json"
@@ -253,7 +315,9 @@ class TestValidateReviewResults:
         )
         assert proc.returncode == 1
 
-    def test_allows_null_optional_fields(self, tmp_path: Path) -> None:
+    def test_allows_null_optional_fields(
+        self, tmp_path: Path
+    ) -> None:
         data = self._make_valid_result()
         data["findings"][0]["suggested_fix"] = None
         data["findings"][0]["repro_command"] = None
@@ -268,7 +332,9 @@ class TestValidateReviewResults:
         )
         assert proc.returncode == 0
 
-    def test_allows_custom_reviewer_name(self, tmp_path: Path) -> None:
+    def test_allows_custom_reviewer_name(
+        self, tmp_path: Path
+    ) -> None:
         data = self._make_valid_result()
         data["reviewer"] = "adversarial"
         result_path = tmp_path / "result.json"
@@ -281,7 +347,9 @@ class TestValidateReviewResults:
         )
         assert proc.returncode == 0
 
-    def test_rejects_missing_required_finding_field(self, tmp_path: Path) -> None:
+    def test_rejects_missing_required_finding_field(
+        self, tmp_path: Path
+    ) -> None:
         data = self._make_valid_result()
         del data["findings"][0]["blocking"]
         result_path = tmp_path / "result.json"
@@ -304,3 +372,50 @@ class TestValidateReviewResults:
         )
         assert proc.returncode == 1
         assert "file not found" in proc.stdout
+
+    def test_malformed_json_handled(self, tmp_path: Path) -> None:
+        result_path = tmp_path / "bad.json"
+        result_path.write_text("{not valid json")
+        proc = subprocess.run(
+            [sys.executable, str(VALIDATE_SCRIPT), str(result_path)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert proc.returncode == 1
+        assert "failed to parse" in proc.stdout
+
+    def test_empty_findings_passes(self, tmp_path: Path) -> None:
+        data = self._make_valid_result()
+        data["findings"] = []
+        result_path = tmp_path / "result.json"
+        result_path.write_text(json.dumps(data))
+        proc = subprocess.run(
+            [sys.executable, str(VALIDATE_SCRIPT), str(result_path)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert proc.returncode == 0
+        assert "0 findings" in proc.stdout
+
+    def test_omitted_optional_fields_passes(
+        self, tmp_path: Path
+    ) -> None:
+        data = self._make_valid_result()
+        for key in (
+            "suggested_fix",
+            "repro_command",
+            "contract_reference",
+            "line",
+        ):
+            data["findings"][0].pop(key, None)
+        result_path = tmp_path / "result.json"
+        result_path.write_text(json.dumps(data))
+        proc = subprocess.run(
+            [sys.executable, str(VALIDATE_SCRIPT), str(result_path)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert proc.returncode == 0

@@ -139,7 +139,7 @@ cp docs/ensemble-review.md .claude/agents/ensemble-review.md
 cp scripts/scrub_diff.py       your-project/scripts/
 cp scripts/review_preflight.py your-project/scripts/
 cp scripts/validate_review_results.py your-project/scripts/
-cp docs/ensemble_review_result_schema.json your-project/docs/review/
+cp docs/ensemble_review_result_schema.json your-project/docs/
 ```
 
 ### 3. Configure for your project
@@ -162,7 +162,7 @@ Say "run an ensemble review" or "ensemble review the current branch".
 | `scripts/scrub_diff.py` | Stdin credential scrubber (pipe, never writes raw to disk) |
 | `scripts/review_preflight.py` | Deterministic pre-review audit |
 | `scripts/validate_review_results.py` | JSON schema validator using `jsonschema` |
-| `tests/test_review_scripts.py` | 24 tests covering all 3 scripts |
+| `tests/test_review_scripts.py` | Test suite for all 3 scripts |
 
 ## Key design decisions
 

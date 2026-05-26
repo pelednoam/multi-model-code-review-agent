@@ -5,13 +5,13 @@ Collects git state, artifact metadata, and manifest comparisons
 into a machine-readable JSON file that every reviewer consumes.
 
 Usage:
-    python scripts/review_preflight.py \\
-        --output /tmp/ensemble-review-runtime-audit.json
+    python scripts/review_preflight.py --output audit.json
 """
 
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import re
 import subprocess
@@ -29,10 +29,11 @@ SIGNED_MANIFESTS: dict[str, str] = {
 }
 
 # Directories containing JSON artifacts. Changed files under these
-# directories are parsed and key fields extracted.
+# directories are parsed and key fields extracted. Uses os.sep-aware
+# prefix matching.
 ARTIFACT_DIRS: list[str] = [
-    "data",
-    "docs",
+    "data/",
+    "docs/",
 ]
 
 _SUSPICIOUS_COMPILED: list[tuple[re.Pattern[str], str]] = [
@@ -45,6 +46,8 @@ _SUSPICIOUS_COMPILED: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"Path\(\"/home/"), "hardcoded absolute Path"),
 ]
 
+# Excluded from suspicious-pattern scanning to avoid false positives
+# from its own regex definitions.
 _SELF_PATH = "scripts/review_preflight.py"
 
 MAX_ARTIFACT_BYTES = 50 * 1024 * 1024
@@ -62,20 +65,27 @@ def _run_git(
             if the command fails.
 
     Returns:
-        Stripped stdout. Empty string on failure.
+        Stripped stdout. Empty string on failure or timeout.
     """
-    result = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), *args],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), *args],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        cmd = " ".join(["git", *args])
+        warnings.append(f"git timed out (30s): {cmd}")
+        return ""
     if result.returncode != 0:
         cmd = " ".join(["git", *args])
         stderr_stripped = result.stderr.strip()
         stderr_lines = stderr_stripped.splitlines()
         first = stderr_lines[0] if stderr_lines else "(no stderr)"
-        warnings.append(f"git failed (exit {result.returncode}): {cmd} -- {first}")
+        warnings.append(
+            f"git failed (exit {result.returncode}): {cmd} -- {first}"
+        )
     return result.stdout.strip()
 
 
@@ -85,6 +95,16 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: f.read(8192), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _is_safe_relpath(relpath: str) -> bool:
+    """Check that a git-reported path stays inside the repo root."""
+    resolved = (REPO_ROOT / relpath).resolve()
+    try:
+        resolved.relative_to(REPO_ROOT.resolve())
+    except ValueError:
+        return False
+    return True
 
 
 def collect_git_state(
@@ -99,7 +119,9 @@ def collect_git_state(
     commit = _run_git(["rev-parse", "HEAD"], warnings)
     status_short = _run_git(["status", "--short"], warnings)
     cached = _run_git(["diff", "--cached", "--name-only"], warnings)
-    untracked = _run_git(["ls-files", "--others", "--exclude-standard"], warnings)
+    untracked = _run_git(
+        ["ls-files", "--others", "--exclude-standard"], warnings
+    )
     changed_vs_main = _run_git(
         ["diff", "--merge-base", "origin/main", "--name-only"], warnings
     )
@@ -109,8 +131,10 @@ def collect_git_state(
         "commit": commit[:12],
         "status_short": status_short.splitlines() if status_short else [],
         "cached_files": cached.splitlines() if cached else [],
-        "untracked_files": (untracked.splitlines() if untracked else []),
-        "changed_vs_main": (changed_vs_main.splitlines() if changed_vs_main else []),
+        "untracked_files": untracked.splitlines() if untracked else [],
+        "changed_vs_main": changed_vs_main.splitlines()
+        if changed_vs_main
+        else [],
     }
 
 
@@ -126,7 +150,9 @@ def collect_changed_artifacts(
         if path.suffix != ".json" or not path.exists():
             continue
 
-        is_artifact = any(f.startswith(d) for d in ARTIFACT_DIRS)
+        is_artifact = any(
+            f == d.rstrip("/") or f.startswith(d) for d in ARTIFACT_DIRS
+        )
         if not is_artifact:
             continue
 
@@ -167,9 +193,13 @@ def collect_changed_artifacts(
                     if role in cell_data:
                         cell_info[role] = len(cell_data[role])
                 if "test_final" in cell_data:
-                    cell_info["n_test_final"] = len(cell_data["test_final"])
+                    cell_info["n_test_final"] = len(
+                        cell_data["test_final"]
+                    )
                 if "per_patient" in cell_data:
-                    cell_info["n_per_patient"] = len(cell_data["per_patient"])
+                    cell_info["n_per_patient"] = len(
+                        cell_data["per_patient"]
+                    )
                 cells[cell_name] = cell_info
             summary["cells"] = cells
 
@@ -196,7 +226,9 @@ def collect_changed_artifacts(
             summary["cells_array"] = cells_list
 
         if "admitted_csv_columns" in data:
-            summary["n_admitted_columns"] = len(data["admitted_csv_columns"])
+            summary["n_admitted_columns"] = len(
+                data["admitted_csv_columns"]
+            )
 
         artifacts.append(summary)
 
@@ -218,6 +250,10 @@ def audit_signed_manifests() -> list[dict[str, Any]]:
     for name, rel_path in SIGNED_MANIFESTS.items():
         path = REPO_ROOT / rel_path
         if not path.exists():
+            results.append({
+                "manifest": name,
+                "warning": f"configured but missing: {rel_path}",
+            })
             continue
         data = _safe_read_json(path)
         if data is None:
@@ -230,27 +266,15 @@ def audit_signed_manifests() -> list[dict[str, Any]]:
             "manifest": name,
             "sha256": _sha256_file(path)[:16],
         }
-        for key in list(data.keys())[:20]:
+        for key in itertools.islice(data.keys(), 20):
             val = data[key]
             if isinstance(val, (str, int, float, bool)):
                 entry[key] = val
-            elif isinstance(val, list):
-                entry[f"n_{key}"] = len(val)
-            elif isinstance(val, dict):
+            elif isinstance(val, (list, dict)):
                 entry[f"n_{key}"] = len(val)
         results.append(entry)
 
     return results
-
-
-def _is_safe_relpath(relpath: str) -> bool:
-    """Check that a git-reported path stays inside the repo root."""
-    resolved = (REPO_ROOT / relpath).resolve()
-    try:
-        resolved.relative_to(REPO_ROOT.resolve())
-    except ValueError:
-        return False
-    return True
 
 
 def scan_suspicious_patterns(
@@ -269,8 +293,8 @@ def scan_suspicious_patterns(
         except OSError:
             continue
 
-        for compiled, description in _SUSPICIOUS_COMPILED:
-            for i, line in enumerate(lines, 1):
+        for i, line in enumerate(lines, 1):
+            for compiled, description in _SUSPICIOUS_COMPILED:
                 if compiled.search(line):
                     findings.append(
                         {
@@ -280,6 +304,7 @@ def scan_suspicious_patterns(
                             "text": line.strip()[:120],
                         }
                     )
+                    break
     return findings
 
 
@@ -291,22 +316,26 @@ def check_test_coverage_alignment(
     impl_files = {
         f
         for f in changed_files
-        if f.startswith("research/")
+        if (f.startswith("src/") or f.startswith("research/"))
         and f.endswith(".py")
         and "/test" not in f
         and "__init__" not in f
     }
     test_files = {
-        f for f in changed_files if f.startswith("tests/") and f.endswith(".py")
+        f
+        for f in changed_files
+        if f.startswith("tests/") and f.endswith(".py")
     }
 
     if impl_files and not test_files:
         warnings.append(
-            f"{len(impl_files)} implementation files changed but no test files"
+            f"{len(impl_files)} implementation files changed "
+            f"but no test files"
         )
     if test_files and not impl_files:
         warnings.append(
-            f"{len(test_files)} test files changed but no implementation files"
+            f"{len(test_files)} test files changed "
+            f"but no implementation files"
         )
 
     return warnings
@@ -325,7 +354,9 @@ def run_preflight() -> dict[str, Any]:
         "signed_manifests": audit_signed_manifests(),
         "changed_artifacts": collect_changed_artifacts(all_changed),
         "suspicious_patterns": scan_suspicious_patterns(all_changed),
-        "test_coverage_alignment": check_test_coverage_alignment(all_changed),
+        "test_coverage_alignment": check_test_coverage_alignment(
+            all_changed
+        ),
     }
 
     audit["n_warnings"] = (
@@ -346,7 +377,8 @@ def main() -> None:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("/tmp/ensemble-review-runtime-audit.json"),
+        required=True,
+        help="Path to write the audit JSON output",
     )
     args = parser.parse_args()
 

@@ -28,10 +28,10 @@ Claude Code (dev pipeline)
   |
   |  "run an ensemble review"
   v
-ensemble-review agent (.claude/agents/ensemble-review.md)
+ensemble-review agent (docs/ensemble-review.md)
   |
   |  1. git diff + status + untracked files
-  |  2. scrub for secrets
+  |  2. scrub for secrets (piped, never hits disk)
   |  3. run scripts/review_preflight.py --> runtime-audit.json
   |  4. build repo-aware context bundle (docs, manifests, specs)
   |
@@ -39,7 +39,7 @@ ensemble-review agent (.claude/agents/ensemble-review.md)
   |-- hermes -z <correctness prompt>    -m gpt-5.5     --provider openai-codex --> result-2.json
   |-- hermes -z <readability prompt>    -m sonnet-4.6   --provider bedrock     --> result-3.json
   |-- hermes -z <spec-contract prompt>  -m opus-4.6    --provider bedrock      --> result-4.json
-  |   (all four run IN PARALLEL)
+  |   (all four run IN PARALLEL, 10min timeout each)
   |
   |  5. validate results against JSON schema
   |  6. persist review packet to data/reviews/<timestamp>_<branch>/
@@ -48,65 +48,33 @@ ensemble-review agent (.claude/agents/ensemble-review.md)
 User sees: preflight audit, blocking findings, grouped criticals/warnings, convergence analysis
 ```
 
-## Prerequisites
-
-1. **Hermes Agent** installed and in PATH (`hermes --version`)
-2. **AWS Bedrock** authenticated (`hermes auth status bedrock`) with
-   access to Claude Opus 4.6 and Sonnet 4.6
-3. **OpenAI Codex OAuth** authenticated (`hermes auth status openai-codex`)
-   for GPT-5.5
-4. **Python venv** with project deps installed (`pip install -e ".[dev]"`)
-
-## How to use
-
-### From Claude Code
-
-Say any of:
-- "run an ensemble review"
-- "use the ensemble-review agent on the current branch"
-- "ensemble review these files: research/alphafold_backbone/data/*.py"
-
-The agent will:
-1. Collect the diff, git status, and untracked files
-2. Scrub for credential patterns
-3. Run the deterministic preflight audit
-4. Build a repo-aware context bundle with relevant specs and manifests
-5. Launch four parallel Hermes sessions
-6. Validate and persist results
-7. Synthesize a convergence report
-
 ## Review lenses
 
 | Reviewer | Model | Focus |
 |---|---|---|
-| Security & robustness | Claude Opus 4.6 (Bedrock) | Injection, auth, unsafe deserialization, secrets, race conditions, swallowed exceptions, PHI/FDA-path scrutiny |
+| Security & robustness | Claude Opus 4.6 (Bedrock) | Injection, auth, unsafe deserialization, secrets, race conditions, swallowed exceptions |
 | Correctness & edge cases | GPT-5.5 (Codex OAuth) | Off-by-one, null paths, shape mismatches, contract violations, logic errors, missing coverage |
-| Readability & performance | Claude Sonnet 4.6 (Bedrock) | Naming, function length, abstraction leaks, dead code, N+1 I/O, memory growth, GPU leaks |
-| Spec-contract compliance | Claude Opus 4.6 (Bedrock) | Code vs signed artifacts, manifest drift, feature count mismatches, fallback/zero-fill that changes cohorts, tests that assert current vs signed behavior |
+| Readability & performance | Claude Sonnet 4.6 (Bedrock) | Naming, function length, abstraction leaks, dead code, N+1 I/O, memory growth |
+| Spec-contract compliance | Claude Opus 4.6 (Bedrock) | Code vs signed artifacts, manifest drift, feature count mismatches, fallback/zero-fill that changes cohorts |
 
 ## Runtime audit inputs
 
 The preflight script (`scripts/review_preflight.py`) runs before any
 LLM review. It collects:
 
-- **Git state**: branch, commit, status --short, untracked files, cached changes
-- **Signed manifest metadata**: column counts (expected 662), split counts
-  (train/dev/test per cell), SHA comparisons against signed artifacts
-- **Changed artifact fields**: n_features, seeds, cell counts from any
-  modified JSON under data/runs/, data/splits/, docs/proposals/
-- **Suspicious patterns**: fill_value=0, bare except, hardcoded absolute
-  paths, silent NaN fills
+- **Git state**: branch, commit, status, untracked files, cached changes
+- **Signed manifest metadata**: SHA, top-level fields for each
+  configured manifest (configure `SIGNED_MANIFESTS` for your project)
+- **Changed artifact fields**: key fields from any modified JSON under
+  configured `ARTIFACT_DIRS`
+- **Suspicious patterns**: fill_value=0, bare except, hardcoded paths
 - **Test/implementation alignment**: implementation changes without test
   changes and vice versa
-
-This audit JSON is given to every reviewer alongside the diff. Reviewers
-are instructed to treat mismatches between runtime artifacts and signed
-manifests as potential blocking findings.
 
 ## JSON schema
 
 Reviewer output follows the strict schema at
-`docs/review/ensemble_review_result_schema.json`. Each finding includes:
+`docs/ensemble_review_result_schema.json`. Each finding includes:
 
 | Field | Required | Description |
 |---|---|---|
@@ -115,6 +83,7 @@ Reviewer output follows the strict schema at
 | category | yes | security / correctness / spec / runtime / test / perf / docs |
 | observed_or_inferred | yes | observed_in_diff / observed_in_audit / inferred |
 | blocking | yes | true if this should block merge |
+| line | no | line number (int or null) |
 | contract_reference | no | path to the spec/manifest this finding relates to |
 | repro_command | no | command to reproduce or verify |
 
@@ -152,30 +121,25 @@ total. For a large branch (5000+ lines), expect ~$15-40.
 
 - Bedrock calls stay within your AWS account boundary
 - Codex OAuth calls go through ChatGPT's backend API
-- For FDA-path code where cross-provider exposure is a concern, drop
-  GPT-5.5 and run 3 Bedrock-only models (Opus security, Opus
-  spec-contract, Sonnet readability+perf)
+- For sensitive code, drop GPT-5.5 and run 3 Bedrock-only models
 
 ## Files
 
-| File | Purpose | Tracked in git? |
-|---|---|---|
-| `docs/agents/ensemble-review.md` | Canonical agent definition (source of truth) | yes |
-| `.claude/agents/ensemble-review.md` | Active agent loaded by Claude Code | no (`.claude/` is gitignored) |
-| `scripts/review_preflight.py` | Deterministic preflight audit script | yes |
-| `scripts/validate_review_results.py` | JSON schema validator for reviewer output | yes |
-| `docs/review/ensemble_review_result_schema.json` | Strict JSON schema for reviewer output | yes |
-| `data/reviews/` | Persisted review packets | no (gitignored) |
+| File | Purpose |
+|---|---|
+| `docs/ensemble-review.md` | Claude Code agent definition (copy to `.claude/agents/`) |
+| `scripts/review_preflight.py` | Deterministic preflight audit script |
+| `scripts/scrub_diff.py` | Stdin credential scrubber |
+| `scripts/validate_review_results.py` | JSON schema validator |
+| `docs/ensemble_review_result_schema.json` | Strict reviewer output schema |
+| `tests/test_review_scripts.py` | Test suite |
+| `data/reviews/` | Persisted review packets (gitignored) |
 
-### Agent definition sync
+### Agent definition setup
 
-`.claude/` is gitignored so the agent definition is not tracked. The
-canonical copy lives at `docs/agents/ensemble-review.md` (tracked).
-To sync after pulling:
+Copy the agent definition to your project's `.claude/agents/` directory:
 
 ```bash
 mkdir -p .claude/agents
-cp docs/agents/ensemble-review.md .claude/agents/ensemble-review.md
+cp docs/ensemble-review.md .claude/agents/ensemble-review.md
 ```
-
-When editing the agent, edit `docs/agents/ensemble-review.md` and re-copy.

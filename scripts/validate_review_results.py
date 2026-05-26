@@ -1,13 +1,12 @@
 """Validate ensemble review result JSON files against the strict schema.
 
 Uses jsonschema.Draft202012Validator against
-docs/review/ensemble_review_result_schema.json. The schema has
+docs/ensemble_review_result_schema.json. The schema has
 additionalProperties: false at both top and finding level, so extra
 fields are rejected.
 
 Usage:
-    python scripts/validate_review_results.py /tmp/ensemble-review-result-*.json
-    python scripts/validate_review_results.py data/reviews/20260526_*/result-*.json
+    python scripts/validate_review_results.py result-1.json result-2.json
 """
 
 from __future__ import annotations
@@ -32,20 +31,32 @@ def _load_schema() -> dict:
 
 def validate_result(
     path: Path,
-    schema: dict,
+    validator: Draft202012Validator,
     data: dict | None = None,
 ) -> list[str]:
-    """Validate one result JSON file. Returns list of error messages."""
+    """Validate one result JSON file.
+
+    Args:
+        path: Path to the result file (used for error messages).
+        validator: Pre-built schema validator instance.
+        data: Pre-parsed JSON data. If None, reads from path.
+
+    Returns:
+        List of error messages. Empty means valid.
+    """
     if data is None:
         try:
             data = json.loads(path.read_text())
         except (json.JSONDecodeError, OSError) as e:
             return [f"{path.name}: failed to parse: {e}"]
 
-    validator = Draft202012Validator(schema)
     errors = []
-    for error in sorted(validator.iter_errors(data), key=lambda e: list(e.path)):
-        field_path = ".".join(str(p) for p in error.absolute_path) or "(root)"
+    for error in sorted(
+        validator.iter_errors(data), key=lambda e: list(e.path)
+    ):
+        field_path = (
+            ".".join(str(p) for p in error.absolute_path) or "(root)"
+        )
         errors.append(f"{path.name}:{field_path}: {error.message}")
     return errors
 
@@ -58,6 +69,7 @@ def main() -> None:
 
     schema = _load_schema()
     Draft202012Validator.check_schema(schema)
+    validator = Draft202012Validator(schema)
 
     all_errors: list[str] = []
     n_valid = 0
@@ -73,7 +85,7 @@ def main() -> None:
         except (json.JSONDecodeError, OSError) as e:
             all_errors.append(f"{arg}: failed to parse: {e}")
             continue
-        errors = validate_result(path, schema, data)
+        errors = validate_result(path, validator, data)
         if errors:
             all_errors.extend(errors)
         else:

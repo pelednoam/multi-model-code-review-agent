@@ -1,11 +1,17 @@
 # Multi-Model Code Review Agent
 
-A review-only pipeline that runs multiple frontier LLMs in parallel
-through [Hermes Agent](https://github.com/NousResearch/hermes-agent),
-each with a different review lens, preceded by a deterministic
-preflight audit. Designed for research and production codebases where
-static diff review alone misses contract violations between code and
-signed artifacts.
+A two-tier code review pipeline with a deterministic preflight audit:
+
+- **Quick mode** (free): 2 Claude Code subagents with clean context.
+  ~30 seconds. Use for every commit.
+- **Full mode** (paid): 4 parallel
+  [Hermes Agent](https://github.com/NousResearch/hermes-agent) sessions
+  across providers (Opus, GPT-5.5, Sonnet). ~5 minutes. Use for
+  pre-merge gates.
+
+Both modes run the same preflight audit and spec-contract review lens.
+Designed for codebases where static diff review alone misses contract
+violations between code and signed artifacts.
 
 ## Why not just ask Claude Code to review?
 
@@ -52,29 +58,29 @@ feature count mismatch that three rounds of same-session review missed.
 
 ### What this pipeline adds
 
-| Capability | Same-session review | Subagent review | This pipeline |
+| Capability | Same-session review | Quick mode | Full mode |
 |---|---|---|---|
-| Model diversity | no | no (Anthropic only) | yes (any provider via Hermes) |
-| Clean context | no | partial | yes (separate process, no history) |
+| Clean context | no | yes | yes |
+| Deterministic preflight | no | yes | yes |
+| Artifact/manifest audit | no | yes | yes |
+| Per-reviewer attribution | no | yes (2 lenses) | yes (4 lenses) |
+| Model diversity | no | no (Anthropic only) | yes (cross-provider) |
 | Write isolation | no | no | yes (`-t file` only) |
-| Cross-provider models | no | no | yes |
-| Deterministic preflight | no | no | yes |
-| Artifact/manifest audit | no | no | yes |
-| Structured output schema | no | no | yes (jsonschema enforced) |
-| Per-reviewer attribution | no | possible | yes (convergence scoring) |
+| Structured JSON schema | no | no | yes (jsonschema enforced) |
+| Cost | free | free | ~$5-40 |
+| Latency | instant | ~30s | ~5 min |
 | Review packet persistence | no | no | yes |
 
-The tradeoff is cost and latency: four frontier model calls take 3-8
-minutes and cost $5-40 depending on diff size. Use same-session review
-for rapid iteration, this pipeline for pre-merge gates and high-stakes
-changes.
+Quick mode gives you 80% of the value (clean context + preflight +
+spec-contract lens) at zero cost. Full mode adds cross-provider model
+diversity for the remaining 20%.
 
 ## Architecture
 
 ```
-Claude Code (or any dev tool)
+Claude Code
   |
-  |  "run an ensemble review"
+  |  "review this" (quick) or "full review" (full)
   v
 ensemble-review agent (docs/ensemble-review.md)
   |
@@ -82,15 +88,14 @@ ensemble-review agent (docs/ensemble-review.md)
   |  2. review_preflight.py       (deterministic audit)
   |  3. build context bundle      (docs, manifests, specs)
   |
-  |-- hermes -z <security prompt>       -m opus-4.6    --> result-1.json
-  |-- hermes -z <correctness prompt>    -m gpt-5.5     --> result-2.json
-  |-- hermes -z <readability prompt>    -m sonnet-4.6  --> result-3.json
-  |-- hermes -z <spec-contract prompt>  -m opus-4.6    --> result-4.json
-  |   (all four run IN PARALLEL, 10min timeout each)
+  |  QUICK MODE:                         FULL MODE:
+  |  Agent(opus, spec-contract)          hermes -z ... -m opus-4.6
+  |  Agent(sonnet, correctness)          hermes -z ... -m gpt-5.5
+  |  (2 subagents, free)                 hermes -z ... -m sonnet-4.6
+  |                                      hermes -z ... -m opus-4.6
+  |                                      (4 sessions, paid)
   |
-  |  4. validate results against JSON schema
-  |  5. persist review packet
-  |  6. synthesize convergence report
+  |  4. synthesize convergence report
   v
 User sees: preflight audit, blocking findings, convergence analysis
 ```
@@ -112,17 +117,11 @@ behavior instead of specified behavior.
 
 ## Prerequisites
 
-1. **[Hermes Agent](https://github.com/NousResearch/hermes-agent)** installed
-2. **At least 2 LLM providers** authenticated (e.g. AWS Bedrock + OpenAI Codex)
-3. **Python 3.11+** with `jsonschema` installed
+**Quick mode** (free): just Claude Code. No additional setup.
 
-Verify models work:
-
-```bash
-hermes -z "Say PONG" -m us.anthropic.claude-opus-4-6-v1 --provider bedrock --yolo
-hermes -z "Say PONG" -m gpt-5.5 --provider openai-codex --yolo
-hermes -z "Say PONG" -m us.anthropic.claude-sonnet-4-6 --provider bedrock --yolo
-```
+**Full mode** (paid): additionally requires:
+1. [Hermes Agent](https://github.com/NousResearch/hermes-agent) installed
+2. At least 2 LLM providers authenticated (e.g. AWS Bedrock + OpenAI Codex)
 
 ## Quick start
 
@@ -150,7 +149,9 @@ Edit `scripts/review_preflight.py` to set:
 
 ### 4. Run from Claude Code
 
-Say "run an ensemble review" or "ensemble review the current branch".
+Say any of:
+- "review this" or "quick review" -- quick mode (free, 2 subagents)
+- "full review" or "full ensemble review" -- full mode (paid, 4 Hermes sessions)
 
 ## Files
 

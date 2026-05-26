@@ -7,6 +7,68 @@ preflight audit. Designed for research and production codebases where
 static diff review alone misses contract violations between code and
 signed artifacts.
 
+## Why not just ask Claude Code to review?
+
+When you ask Claude Code to review its own work -- or spawn a subagent
+to do it -- you get a fast, convenient review. But it has structural
+limitations that matter for high-stakes code:
+
+**Same model, same blind spots.** Claude Code and its subagents all run
+on the same model family. Every model has systematic blind spots shaped
+by its training data, architecture, and RLHF tuning. Running the same
+model twice doesn't find what it can't see. Running Opus, GPT-5.5, and
+Sonnet on the same diff surfaces findings that no single model catches
+alone. In our testing, the spec-contract reviewer (Opus) caught manifest
+drift that the correctness reviewer (GPT-5.5) missed, while GPT-5.5
+caught dtype coercion bugs that Opus didn't flag.
+
+**Contaminated context.** When the dev agent reviews its own output, it
+has seen the implementation rationale, the rejected alternatives, and
+the conversation leading to each decision. It is structurally biased
+toward confirming its own choices. A reviewer with a clean context --
+seeing only the diff, the spec, and the audit output -- evaluates the
+code as a future reader would, not as the author.
+
+**No separation of concerns.** The dev agent has write access, tool
+access, and conversational momentum. A review-only agent with read-only
+file access (`-t file`) and no terminal cannot accidentally fix what it
+finds, cannot be influenced by prior conversation, and cannot be
+prompted into leniency by the author's explanations. It can only report.
+
+**Single-model subagents don't solve this.** Claude Code's `Agent` tool
+spawns subagents on Anthropic models only (Opus, Sonnet, Haiku). You
+can't route a subagent to GPT-5.5 or Gemini. And even within Anthropic
+models, all subagents share the same training lineage -- they disagree
+on difficulty and detail level, not on fundamental reasoning patterns.
+True model diversity requires crossing provider boundaries.
+
+**No artifact awareness.** A code review in the same session sees the
+diff but not the repo's signed manifests, artifact SHAs, or runtime
+state. This pipeline runs a deterministic preflight audit that
+machine-verifies manifest counts, feature dimensions, and artifact
+integrity _before_ any LLM runs. Every reviewer gets this audit as
+evidence, not inference. In our testing, this caught a 782-vs-662
+feature count mismatch that three rounds of same-session review missed.
+
+### What this pipeline adds
+
+| Capability | Same-session review | Subagent review | This pipeline |
+|---|---|---|---|
+| Model diversity | no | no (Anthropic only) | yes (any provider via Hermes) |
+| Clean context | no | partial | yes (separate process, no history) |
+| Write isolation | no | no | yes (`-t file` only) |
+| Cross-provider models | no | no | yes |
+| Deterministic preflight | no | no | yes |
+| Artifact/manifest audit | no | no | yes |
+| Structured output schema | no | no | yes (jsonschema enforced) |
+| Per-reviewer attribution | no | possible | yes (convergence scoring) |
+| Review packet persistence | no | no | yes |
+
+The tradeoff is cost and latency: four frontier model calls take 3-8
+minutes and cost $5-40 depending on diff size. Use same-session review
+for rapid iteration, this pipeline for pre-merge gates and high-stakes
+changes.
+
 ## Architecture
 
 ```

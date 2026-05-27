@@ -345,7 +345,9 @@ def run_preflight() -> dict[str, Any]:
     """Run all preflight checks and return the audit dict."""
     git_warnings: list[str] = []
     git = collect_git_state(git_warnings)
-    all_changed = git["changed_vs_main"] + git["untracked_files"]
+    all_changed = list(
+        dict.fromkeys(git["changed_vs_main"] + git["untracked_files"])
+    )
 
     audit: dict[str, Any] = {
         "timestamp": datetime.now(tz=UTC).isoformat(),

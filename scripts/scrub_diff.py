@@ -21,7 +21,7 @@ import sys
 CREDENTIAL_PATTERNS = [
     re.compile(r"(?i)(api[_-]?key|secret[_-]?key|access[_-]?key)\s*[:=]"),
     re.compile(r"(?i)(password|passwd|pwd)\s*[:=]"),
-    re.compile(r"(?i)(token|bearer)\s*[:=]"),
+    re.compile(r"(?i)\b(token|bearer)\s*[:=]"),
     re.compile(r"(?i)BEGIN\s+(RSA\s+)?PRIVATE\s+KEY"),
     re.compile(r"(?i)(^|/)\.env(\.[a-z]+)?$"),
     re.compile(r"AKIA[0-9A-Z]{16}"),

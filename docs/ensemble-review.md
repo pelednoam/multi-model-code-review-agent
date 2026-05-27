@@ -269,8 +269,10 @@ Two launch functions. Hermes is preferred for Anthropic models (better isolation
 
 ```bash
 # Launch via Hermes (best isolation: -t file, consistent JSON output).
-# Hermes -z takes prompt as argument (no stdin). Subject to ARG_MAX
-# for very large diffs -- for those, use Claude CLI instead.
+# Hermes -z takes prompt as argument (no stdin mode). This means:
+# - Subject to ARG_MAX for very large diffs (use Claude CLI instead)
+# - Prompt content visible in /proc/PID/cmdline to local users
+# For sensitive reviews with large diffs, prefer Claude CLI.
 launch_hermes() {
   local num=$1 hermes_model=$2 prompt_file=$3
   timeout 600 hermes -z "$(cat "$prompt_file")" \
@@ -281,12 +283,18 @@ launch_hermes() {
 }
 
 # Launch via a coding agent CLI (free, stdin-based).
+# Callers pass 'claude-<model>' (e.g. claude-opus, claude-sonnet,
+# claude-haiku), 'codex', or 'gemini'.
 launch_cli() {
   local num=$1 cli=$2 prompt_file=$3
 
   case "$cli" in
     claude-*)
       local model="${cli#claude-}"
+      if [[ ! "$model" =~ ^(opus|sonnet|haiku)$ ]]; then
+        echo "R$num: SKIPPED (invalid Claude model: $model)"
+        return 1
+      fi
       timeout 600 claude -p --model "$model" \
         --allowedTools "Read Grep Glob" \
         --output-format json < "$prompt_file" \
@@ -303,8 +311,10 @@ launch_cli() {
       echo "R$num: Codex CLI (GPT-5.5) [free]"
       ;;
     gemini)
+      # Gemini CLI: -p "appended to input on stdin". Omit -p flag
+      # entirely and pipe stdin so the prompt IS the input.
       timeout 600 gemini \
-        -p "" --approval-mode plan --skip-trust \
+        --approval-mode plan --skip-trust \
         < "$prompt_file" \
         1>"$REVIEW_TMP/stdout-$num.txt" \
         2>"$REVIEW_TMP/stderr-$num.txt" &
@@ -369,25 +379,28 @@ fi
 # a launcher SKIPs without backgrounding a process).
 wait
 
-# Shared extraction: find first { to last } in text, parse as JSON.
-# Handles markdown fences, preamble, Claude CLI wrappers.
+# Extract review JSON from raw output. Handles Claude CLI wrappers,
+# markdown fences, and preamble. Validates required schema keys.
 extract_json() {
   python3 -c "
 import json, sys
 text = open(sys.argv[1]).read()
 try:
     wrapper = json.loads(text)
-    if 'result' in wrapper:
+    if isinstance(wrapper.get('result'), str):
         text = wrapper['result']
 except (json.JSONDecodeError, ValueError):
     pass
 start = text.find('{')
 end = text.rfind('}')
-if start >= 0 and end > start:
-    d = json.loads(text[start:end+1])
-    json.dump(d, open(sys.argv[2], 'w'), indent=2)
-else:
+if start < 0 or end <= start:
     sys.exit(1)
+d = json.loads(text[start:end+1])
+required = {'reviewer', 'model', 'findings', 'overall_assessment'}
+if not required.issubset(d.keys()):
+    print(f'Missing keys: {required - set(d.keys())}', file=sys.stderr)
+    sys.exit(1)
+json.dump(d, open(sys.argv[2], 'w'), indent=2)
 " "$1" "$2" 2>"$REVIEW_TMP/extract-$(basename "$2" .json).err"
 }
 
@@ -407,7 +420,7 @@ for num in 1 2 3 4; do
 import json, sys
 json.dump({
     'reviewer': 'unknown', 'model': 'unknown', 'findings': [],
-    'overall_assessment': 'Reviewer ' + sys.argv[2] + ' failed.'
+    'overall_assessment': 'Reviewer ' + sys.argv[2] + ' failed: no parseable JSON output. Check extract-result-' + sys.argv[2] + '.err and stderr-' + sys.argv[2] + '.txt.'
 }, open(sys.argv[1], 'w'), indent=2)
 " "$result" "$num"
     echo "WARNING: Reviewer $num produced no parseable output"

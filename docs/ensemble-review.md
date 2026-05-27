@@ -35,7 +35,7 @@ For non-Anthropic models (reviewer 2 correctness, reviewer 3 readability), CLIs 
 | Reviewer | 1st: Hermes (best isolation) | 2nd: CLI (free) | 3rd: CLI fallback |
 |---|---|---|---|
 | Security (Opus) | `hermes -m opus --provider bedrock` | `claude -p --model opus` | -- |
-| Correctness | `hermes -m gpt-5.5` (if configured) | `codex exec` (GPT-5.5) | `claude -p --model haiku` |
+| Correctness | -- | `codex exec` (GPT-5.5) | `hermes haiku` or `claude haiku` |
 | Readability | `hermes -m sonnet --provider bedrock` | `gemini -p` (Gemini 2.x) | `claude -p --model sonnet` |
 | Spec-contract (Opus) | `hermes -m opus --provider bedrock` | `claude -p --model opus` | -- |
 
@@ -47,12 +47,14 @@ For non-Anthropic models (reviewer 2 correctness, reviewer 3 readability), CLIs 
 
 ### CLI flags reference
 
-| CLI | Non-interactive | Read-only | Output |
-|---|---|---|---|
-| `claude` | `-p` | `--allowedTools "Read Grep Glob"` | `--output-format json` (wraps in `{"result":"..."}`) |
-| `codex` | `codex exec` | default sandbox | `-o <file>` (writes last message) |
-| `gemini` | `-p "prompt"` | `--approval-mode plan` | stdout (text) |
-| `hermes` | `-z "prompt" --yolo` | `-t file` | reviewer writes file directly |
+| CLI | Non-interactive | Read-only | Input | Output |
+|---|---|---|---|---|
+| `claude` | `-p` | `--allowedTools "Read Grep Glob"` | stdin (`< prompt.txt`) | `--output-format json` wraps in `{"result":"..."}` |
+| `codex` | `codex exec` | default sandbox | stdin (pipe) | `-o <file>` writes last message |
+| `gemini` | `-p` | `--approval-mode plan --skip-trust` | stdin (pipe) | stdout (text, may have fences) |
+| `hermes` | `-z --yolo` | `-t file` | `-z` flag (has ARG_MAX risk for large prompts) | reviewer writes file directly |
+
+All CLIs receive prompts via stdin (pipe) to avoid ARG_MAX overflow. Hermes uses `-z` which has a size limit -- for very large diffs, consider writing the prompt to a temp file and using Hermes's file-based input if available.
 
 # Steps shared by both modes
 
@@ -267,6 +269,7 @@ Three helper functions for each backend type. Hermes is preferred for Anthropic 
 
 ```bash
 # Launch via Hermes (best isolation: -t file, consistent JSON output).
+# Hermes -z requires the prompt as an argument (no stdin mode).
 launch_hermes() {
   local num=$1 hermes_model=$2 prompt_file=$3
   timeout 600 hermes -z "$(cat "$prompt_file")" \
@@ -277,32 +280,54 @@ launch_hermes() {
 }
 
 # Launch via a coding agent CLI (free but needs output extraction).
+# All CLIs receive prompts via stdin to avoid ARG_MAX overflow.
 launch_cli() {
-  local num=$1 cli=$2 model=$3 prompt_file=$4
+  local num=$1 cli=$2 prompt_file=$3
 
   case "$cli" in
-    claude)
-      timeout 600 claude -p --model "$model" \
+    claude-opus)
+      timeout 600 claude -p --model opus \
         --allowedTools "Read Grep Glob" \
         --output-format json < "$prompt_file" \
         1>"$REVIEW_TMP/claude-raw-$num.json" \
         2>"$REVIEW_TMP/stderr-$num.txt" &
-      echo "R$num: Claude CLI ($model) [free]"
+      echo "R$num: Claude CLI (opus) [free]"
+      ;;
+    claude-sonnet)
+      timeout 600 claude -p --model sonnet \
+        --allowedTools "Read Grep Glob" \
+        --output-format json < "$prompt_file" \
+        1>"$REVIEW_TMP/claude-raw-$num.json" \
+        2>"$REVIEW_TMP/stderr-$num.txt" &
+      echo "R$num: Claude CLI (sonnet) [free]"
+      ;;
+    claude-haiku)
+      timeout 600 claude -p --model haiku \
+        --allowedTools "Read Grep Glob" \
+        --output-format json < "$prompt_file" \
+        1>"$REVIEW_TMP/claude-raw-$num.json" \
+        2>"$REVIEW_TMP/stderr-$num.txt" &
+      echo "R$num: Claude CLI (haiku) [free]"
       ;;
     codex)
       timeout 600 codex exec \
         -o "$REVIEW_TMP/result-$num.json" \
-        "$(cat "$prompt_file")" \
+        - < "$prompt_file" \
         1>"$REVIEW_TMP/stdout-$num.txt" \
         2>"$REVIEW_TMP/stderr-$num.txt" &
       echo "R$num: Codex CLI (GPT-5.5) [free]"
       ;;
     gemini)
-      timeout 600 gemini -p "$(cat "$prompt_file")" \
-        --approval-mode plan --skip-trust \
+      timeout 600 gemini \
+        -p - --approval-mode plan --skip-trust \
+        < "$prompt_file" \
         1>"$REVIEW_TMP/stdout-$num.txt" \
         2>"$REVIEW_TMP/stderr-$num.txt" &
       echo "R$num: Gemini CLI [free]"
+      ;;
+    *)
+      echo "R$num: SKIPPED (unknown backend: $cli)"
+      return 1
       ;;
   esac
 }
@@ -327,32 +352,32 @@ echo "Provider diversity: $N_PROVIDERS provider(s)"
 if $HAS_HERMES; then
   launch_hermes 1 us.anthropic.claude-opus-4-6-v1 "$REVIEW_TMP/prompt-1.txt"
 else
-  launch_cli 1 claude opus "$REVIEW_TMP/prompt-1.txt"
+  launch_cli 1 claude-opus "$REVIEW_TMP/prompt-1.txt"
 fi
 
 # R2: Correctness -- Codex (GPT-5.5) preferred for cross-provider diversity
 if $HAS_CODEX; then
-  launch_cli 2 codex "" "$REVIEW_TMP/prompt-2.txt"
+  launch_cli 2 codex "$REVIEW_TMP/prompt-2.txt"
 elif $HAS_HERMES; then
   launch_hermes 2 us.anthropic.claude-haiku-4-5-20251001-v1:0 "$REVIEW_TMP/prompt-2.txt"
 else
-  launch_cli 2 claude haiku "$REVIEW_TMP/prompt-2.txt"
+  launch_cli 2 claude-haiku "$REVIEW_TMP/prompt-2.txt"
 fi
 
 # R3: Readability -- Gemini preferred (3rd provider), then Hermes, then Claude CLI
 if $HAS_GEMINI; then
-  launch_cli 3 gemini "" "$REVIEW_TMP/prompt-3.txt"
+  launch_cli 3 gemini "$REVIEW_TMP/prompt-3.txt"
 elif $HAS_HERMES; then
   launch_hermes 3 us.anthropic.claude-sonnet-4-6 "$REVIEW_TMP/prompt-3.txt"
 else
-  launch_cli 3 claude sonnet "$REVIEW_TMP/prompt-3.txt"
+  launch_cli 3 claude-sonnet "$REVIEW_TMP/prompt-3.txt"
 fi
 
 # R4: Spec-contract (Opus) -- Hermes preferred, Claude CLI fallback
 if $HAS_HERMES; then
   launch_hermes 4 us.anthropic.claude-opus-4-6-v1 "$REVIEW_TMP/prompt-4.txt"
 else
-  launch_cli 4 claude opus "$REVIEW_TMP/prompt-4.txt"
+  launch_cli 4 claude-opus "$REVIEW_TMP/prompt-4.txt"
 fi
 
 # Wait for ALL background children (avoids stale-PID issues when
@@ -367,31 +392,44 @@ for num in 1 2 3 4; do
   result="$REVIEW_TMP/result-$num.json"
   [ -f "$result" ] && continue  # already produced (Codex path)
 
-  # Try Claude CLI wrapper extraction
+  # Shared extraction helper: find the JSON object in text that may
+  # have markdown fences, preamble, or other wrapper content.
+  extract_json() {
+    python3 -c "
+import json, sys
+text = open(sys.argv[1]).read()
+# Find the first { to last } -- handles fences, preamble, postamble
+start = text.find('{')
+end = text.rfind('}')
+if start >= 0 and end > start:
+    d = json.loads(text[start:end+1])
+    json.dump(d, open(sys.argv[2], 'w'), indent=2)
+else:
+    sys.exit(1)
+" "$1" "$2" 2>"$REVIEW_TMP/extract-$num.err"
+  }
+
+  # Try Claude CLI wrapper extraction ({"result": "<JSON text>"})
   raw="$REVIEW_TMP/claude-raw-$num.json"
   if [ -f "$raw" ]; then
     python3 -c "
-import json, sys, re
+import json, sys
 wrapper = json.load(open(sys.argv[1]))
 text = wrapper.get('result', '')
-text = re.sub(r'^\s*\`\`\`json?\s*', '', text)
-text = re.sub(r'\s*\`\`\`\s*$', '', text)
-inner = json.loads(text)
-json.dump(inner, open(sys.argv[2], 'w'), indent=2)
+start = text.find('{')
+end = text.rfind('}')
+if start >= 0 and end > start:
+    inner = json.loads(text[start:end+1])
+    json.dump(inner, open(sys.argv[2], 'w'), indent=2)
+else:
+    sys.exit(1)
 " "$raw" "$result" 2>"$REVIEW_TMP/extract-$num.err" && continue
   fi
 
-  # Try Hermes/Gemini stdout (raw text, may have markdown fences)
+  # Try Hermes/Gemini/Codex stdout (raw text, may have fences)
   stdout="$REVIEW_TMP/stdout-$num.txt"
   if [ -f "$stdout" ]; then
-    python3 -c "
-import json, sys, re
-text = open(sys.argv[1]).read()
-text = re.sub(r'^\s*\`\`\`json?\s*', '', text)
-text = re.sub(r'\s*\`\`\`\s*$', '', text)
-d = json.loads(text)
-json.dump(d, open(sys.argv[2], 'w'), indent=2)
-" "$stdout" "$result" 2>"$REVIEW_TMP/extract-$num.err" && continue
+    extract_json "$stdout" "$result" && continue
   fi
 
   # If extraction failed, write a synthetic error result
@@ -399,11 +437,12 @@ json.dump(d, open(sys.argv[2], 'w'), indent=2)
     python3 -c "
 import json, sys
 json.dump({
-  'reviewer': 'unknown', 'model': 'unknown',
-  'findings': [],
-  'overall_assessment': 'Reviewer $num failed: no parseable output.'
+    'reviewer': 'unknown',
+    'model': 'unknown',
+    'findings': [],
+    'overall_assessment': 'Reviewer ' + sys.argv[2] + ' failed: no parseable output.'
 }, open(sys.argv[1], 'w'), indent=2)
-" "$result"
+" "$result" "$num"
     echo "WARNING: Reviewer $num produced no parseable output"
   fi
 done

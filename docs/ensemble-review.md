@@ -215,6 +215,10 @@ marked required MUST be present:
   ],
   "overall_assessment": "<2-3 sentences>"
 }
+
+Output ONLY the JSON result object. No prose, no markdown, no
+explanation before or after the JSON. If you have no findings,
+return the JSON with an empty findings array.
 ```
 
 ### Reviewer 1 -- Security & robustness (Opus 4.6 via Bedrock)
@@ -245,60 +249,93 @@ Lens: code vs signed artifacts, manifest drift, feature count mismatches, fallba
 
 ## 6. Launch four reviewer sessions in parallel
 
-Helper function to run a reviewer with the best available CLI:
+Two helper functions -- one to launch a single Anthropic reviewer, one for the GPT-5.5 correctness reviewer (separate because GPT-5.5 is not an Anthropic model and must never be passed to Claude CLI):
 
 ```bash
-run_reviewer() {
-  # Args: $1=reviewer_num $2=model $3=prompt_file
-  local num=$1 model=$2 prompt="$(cat "$3")"
+# Launch an Anthropic-model reviewer (opus/sonnet/haiku).
+# Tries Claude CLI first (free), then Hermes+Bedrock (paid).
+launch_anthropic() {
+  local num=$1 model=$2 prompt_file=$3
 
-  if [ "$model" = "gpt-5.5" ] && $HAS_CODEX; then
-    # GPT-5.5 via Codex CLI (free)
-    timeout 600 codex exec -o "$REVIEW_TMP/result-$num.json" "$prompt" \
-      1>"$REVIEW_TMP/stdout-$num.txt" 2>"$REVIEW_TMP/stderr-$num.txt" &
-    echo "R$num: Codex CLI (GPT-5.5)"
-  elif $HAS_CLAUDE; then
-    # Anthropic model via Claude Code CLI (free)
-    timeout 600 claude -p --model "$model" --dangerously-skip-permissions \
-      --output-format json "$prompt" \
-      1>"$REVIEW_TMP/stdout-$num.txt" 2>"$REVIEW_TMP/stderr-$num.txt" &
+  if $HAS_CLAUDE; then
+    timeout 600 claude -p --model "$model" \
+      --allowedTools "Read Grep Glob" \
+      --output-format json < "$prompt_file" \
+      1>"$REVIEW_TMP/claude-raw-$num.json" \
+      2>"$REVIEW_TMP/stderr-$num.txt" &
     echo "R$num: Claude CLI ($model)"
   elif $HAS_HERMES; then
-    # Fallback: Hermes + Bedrock (paid)
-    local hermes_model
+    local bedrock_id
     case "$model" in
-      opus)  hermes_model="us.anthropic.claude-opus-4-6-v1" ;;
-      sonnet) hermes_model="us.anthropic.claude-sonnet-4-6" ;;
-      haiku) hermes_model="us.anthropic.claude-haiku-4-5-20251001-v1:0" ;;
+      opus)   bedrock_id="us.anthropic.claude-opus-4-6-v1" ;;
+      sonnet) bedrock_id="us.anthropic.claude-sonnet-4-6" ;;
+      haiku)  bedrock_id="us.anthropic.claude-haiku-4-5-20251001-v1:0" ;;
+      *)      echo "R$num: SKIPPED (unknown model $model)"; return 1 ;;
     esac
-    timeout 600 hermes -z "$prompt" -m "$hermes_model" --provider bedrock \
-      -t file --yolo \
-      1>"$REVIEW_TMP/stdout-$num.txt" 2>"$REVIEW_TMP/stderr-$num.txt" &
-    echo "R$num: Hermes ($hermes_model)"
+    timeout 600 hermes -z "$(cat "$prompt_file")" \
+      -m "$bedrock_id" --provider bedrock -t file --yolo \
+      1>"$REVIEW_TMP/stdout-$num.txt" \
+      2>"$REVIEW_TMP/stderr-$num.txt" &
+    echo "R$num: Hermes ($bedrock_id)"
   else
-    echo "R$num: SKIPPED (no CLI available for $model)"
+    echo "R$num: SKIPPED (no Anthropic CLI available)"
     return 1
   fi
 }
 
-run_reviewer 1 opus "$REVIEW_TMP/prompt-1.txt"   # Security
+# Launch the GPT-5.5 correctness reviewer.
+# Tries Codex CLI first (free), then falls back to Anthropic haiku.
+launch_correctness() {
+  local num=$1 prompt_file=$2
+
+  if $HAS_CODEX; then
+    timeout 600 codex exec \
+      -o "$REVIEW_TMP/result-$num.json" \
+      "$(cat "$prompt_file")" \
+      1>"$REVIEW_TMP/stdout-$num.txt" \
+      2>"$REVIEW_TMP/stderr-$num.txt" &
+    echo "R$num: Codex CLI (GPT-5.5)"
+  else
+    echo "R$num: Codex not installed, falling back to haiku"
+    launch_anthropic "$num" haiku "$prompt_file"
+  fi
+}
+
+# Pre-check: at least one CLI must be available
+if ! $HAS_CLAUDE && ! $HAS_CODEX && ! $HAS_HERMES; then
+  echo "ERROR: no CLI available (claude, codex, hermes). Use quick mode instead."
+  exit 1
+fi
+
+launch_anthropic 1 opus "$REVIEW_TMP/prompt-1.txt"     # Security
 PID1=$!
-run_reviewer 2 gpt-5.5 "$REVIEW_TMP/prompt-2.txt" || \
-  run_reviewer 2 haiku "$REVIEW_TMP/prompt-2.txt"  # Correctness
+launch_correctness 2 "$REVIEW_TMP/prompt-2.txt"        # Correctness
 PID2=$!
-run_reviewer 3 sonnet "$REVIEW_TMP/prompt-3.txt"  # Readability
+launch_anthropic 3 sonnet "$REVIEW_TMP/prompt-3.txt"   # Readability
 PID3=$!
-run_reviewer 4 opus "$REVIEW_TMP/prompt-4.txt"    # Spec-contract
+launch_anthropic 4 opus "$REVIEW_TMP/prompt-4.txt"     # Spec-contract
 PID4=$!
 
 wait $PID1 $PID2 $PID3 $PID4
+
+# Post-process: extract review JSON from Claude CLI's wrapper format.
+# Claude CLI with --output-format json produces {"result": "<text>"}.
+# Codex and Hermes write result files directly.
+for num in 1 2 3 4; do
+  raw="$REVIEW_TMP/claude-raw-$num.json"
+  result="$REVIEW_TMP/result-$num.json"
+  if [ -f "$raw" ] && [ ! -f "$result" ]; then
+    python3 -c "
+import json, sys
+wrapper = json.load(open('$raw'))
+inner = json.loads(wrapper['result'])
+json.dump(inner, open('$result', 'w'), indent=2)
+" 2>/dev/null || cp "$raw" "$result"
+  fi
+done
 ```
 
-**When using Claude Code CLI**, the output is JSON with a `result` key. Extract the review JSON: `python3 -c "import json,sys; d=json.load(sys.stdin); print(d['result'])" < stdout-N.txt > result-N.json`.
-
-**When using Codex CLI**, `-o` writes the last message directly to the result file.
-
-**When using Hermes**, the reviewer writes the result file via `-t file`.
+**Tool restriction**: Claude CLI uses `--allowedTools "Read Grep Glob"` (read-only, no Bash/Edit/Write). Hermes uses `-t file`. Codex runs in its default sandbox.
 
 ## 7. Collect and validate results
 
@@ -366,23 +403,26 @@ Do NOT auto-apply fixes. The user decides what to act on.
 
 # Error handling
 
-- If Hermes is not installed and full mode requested: suggest quick mode as fallback
-- If a reviewer crashes: report failure, present remaining results
+- If no CLIs are installed (no claude, codex, or hermes): abort full mode, suggest quick mode
+- If a reviewer crashes or times out: report failure, present remaining results
 - If the preflight script is missing: warn and proceed without audit (degraded mode)
 
 # Model configuration (full mode)
 
 | Reviewer | Model | Free (CLI) | Paid (Hermes+Bedrock) |
 |---|---|---|---|
-| Security | Opus | `claude -p --model opus` | `hermes -m opus --provider bedrock` |
-| Correctness | GPT-5.5 or Haiku | `codex exec` or `claude -p --model haiku` | `hermes -m haiku --provider bedrock` |
-| Readability | Sonnet | `claude -p --model sonnet` | `hermes -m sonnet --provider bedrock` |
-| Spec-contract | Opus | `claude -p --model opus` | `hermes -m opus --provider bedrock` |
+| Security | Opus | `claude -p --model opus --allowedTools "Read Grep Glob"` | `hermes -m opus --provider bedrock` |
+| Correctness | GPT-5.5 / Haiku | `codex exec` / `claude -p --model haiku` | `hermes -m haiku --provider bedrock` |
+| Readability | Sonnet | `claude -p --model sonnet --allowedTools "Read Grep Glob"` | `hermes -m sonnet --provider bedrock` |
+| Spec-contract | Opus | `claude -p --model opus --allowedTools "Read Grep Glob"` | `hermes -m opus --provider bedrock` |
 
-With both `claude` and `codex` installed, the full review is **completely free** (uses your existing subscriptions, no API credits).
+With both `claude` and `codex` installed, the full review is **completely free**.
+
+Claude CLI uses `--allowedTools "Read Grep Glob"` for read-only access (no Bash, Edit, or Write). Hermes uses `-t file`. Codex runs in its default sandbox.
 
 # Privacy
 
 - **Quick mode**: all processing stays within Anthropic (Claude Code subagents).
-- **Full mode with CLIs**: Anthropic reviewers use your Claude subscription; Codex reviewer goes through OpenAI's ChatGPT. For sensitive code, skip Codex and use `claude -p --model haiku` for reviewer 2.
-- **Full mode with Hermes**: all 4 on Bedrock (your AWS account).
+- **Full mode with Claude CLI**: uses your Claude Code subscription. Note that data retention policies may differ from Bedrock; for FDA-path code where you need data-at-rest guarantees, use Hermes+Bedrock instead.
+- **Full mode with Codex CLI**: correctness reviewer goes through OpenAI's ChatGPT. For sensitive code, the agent falls back to `claude -p --model haiku` instead.
+- **Full mode with Hermes**: all 4 on Bedrock (your AWS account, your data retention policy).

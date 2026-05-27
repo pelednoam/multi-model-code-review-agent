@@ -90,7 +90,7 @@ ensemble-review agent (docs/ensemble-review.md)
   |
   |  QUICK MODE:                         FULL MODE:
   |  Agent(opus, spec-contract)          hermes -z ... -m opus-4.6
-  |  Agent(sonnet, correctness)          hermes -z ... -m gpt-5.5
+  |  Agent(sonnet, correctness)          codex exec (or hermes -m haiku)
   |  (2 subagents, free)                 hermes -z ... -m sonnet-4.6
   |                                      hermes -z ... -m opus-4.6
   |                                      (4 sessions, paid)
@@ -121,7 +121,7 @@ behavior instead of specified behavior.
 
 **Full mode** (paid): additionally requires:
 1. [Hermes Agent](https://github.com/NousResearch/hermes-agent) installed
-2. At least 2 LLM providers authenticated (e.g. AWS Bedrock + OpenAI Codex)
+2. AWS Bedrock authenticated. Optional: Codex CLI for GPT-5.5 (uses ChatGPT subscription, no API credits)
 
 ## Quick start
 
@@ -198,7 +198,7 @@ working combinations:
 |---|---|
 | Claude Opus 4.6 | `-m us.anthropic.claude-opus-4-6-v1 --provider bedrock` |
 | Claude Opus 4.7 | `-m us.anthropic.claude-opus-4-7 --provider bedrock` |
-| GPT-5.5 | `-m gpt-5.5 --provider openai-codex` |
+| GPT-5.5 (via Codex CLI) | `codex exec -o result.json "prompt"` (auto-detected) |
 | Claude Sonnet 4.6 | `-m us.anthropic.claude-sonnet-4-6 --provider bedrock` |
 | Gemini 3.1 Pro | `-m google/gemini-3.1-pro-preview --provider nous` |
 | Grok 4.3 | `-m x-ai/grok-4.3 --provider nous` |

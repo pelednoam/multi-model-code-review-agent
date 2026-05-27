@@ -10,10 +10,24 @@ You are a review orchestrator. You run a deterministic preflight audit, package 
 # Choosing the mode
 
 - **Quick mode** (default): spawns 2 Claude Code subagents (Opus spec-contract + Sonnet correctness) with clean context. Free, ~30 seconds. Use for every commit, routine changes, rapid iteration.
-- **Full mode**: spawns 4 parallel Hermes sessions across providers (Opus, GPT-5.5, Sonnet). Paid (~$5-40), ~5 minutes. Use for pre-merge gates, high-stakes changes, FDA-path code.
+- **Full mode**: spawns 4 parallel Hermes sessions (Opus, Haiku/Codex, Sonnet). Paid via Bedrock (~$5-40) or free via Codex CLI if installed. ~3-5 minutes. Use for pre-merge gates, high-stakes changes.
 
 If the user says "quick review", "review this", or just "ensemble review" -- use quick mode.
 If the user says "full review", "full ensemble review", or "hermes review" -- use full mode.
+
+# Codex CLI detection
+
+Before launching full mode, check if Codex CLI is installed:
+
+```bash
+if command -v codex &>/dev/null; then
+    USE_CODEX=true
+else
+    USE_CODEX=false
+fi
+```
+
+If Codex CLI is available, use it for the correctness reviewer (reviewer 2) instead of Hermes+Haiku. Codex uses GPT-5.5 via your ChatGPT subscription -- no API credits needed. The other 3 reviewers still run via Hermes on Bedrock.
 
 # Steps shared by both modes
 
@@ -155,11 +169,11 @@ Apply the same convergence scoring: a single finding with artifact evidence is h
 
 ## 5. Build the four reviewer prompts
 
-Write four prompt files to `$REVIEW_TMP/prompt-{1,2,3,4}.txt`. Each must include the common schema instructions:
+Write four prompt files to `$REVIEW_TMP/prompt-{1,2,3,4}.txt`. Each prompt must embed the diff content, context bundle, and audit JSON directly in the prompt text (Hermes sessions read files via `-t file`, but embedding avoids reliance on temp directory paths). Each must also include these common schema instructions:
 
 ```
-Also read $REVIEW_TMP/runtime-audit.json. Treat mismatches between
-runtime artifacts and signed docs/manifests as potential blocking findings.
+Treat mismatches between runtime artifacts and signed docs/manifests
+as potential blocking findings.
 
 For each finding, state whether it is:
 - "observed_in_diff": directly visible in the code changes
@@ -198,9 +212,11 @@ Output: `$REVIEW_TMP/result-1.json`
 
 Lens: injection vectors, auth gaps, unsafe deserialization, secrets, race conditions, swallowed exceptions, input validation.
 
-### Reviewer 2 -- Correctness & edge cases (GPT-5.5 via Codex)
+### Reviewer 2 -- Correctness & edge cases (Codex GPT-5.5 or Haiku 4.5)
 
 Output: `$REVIEW_TMP/result-2.json`
+
+If Codex CLI is installed, this reviewer runs via `codex exec -o $REVIEW_TMP/result-2.json "prompt"`. The `-o` flag captures the last agent message as the result file. The prompt must end with: "Output ONLY the JSON result object, no other text." Otherwise falls back to Hermes+Haiku on Bedrock (which writes the file via `-t file`).
 
 Lens: off-by-one, null paths, shape/dtype mismatches, contract violations, logic errors, missing test coverage. For numpy/torch: shape broadcasting, device placement, gradient flow.
 
@@ -216,29 +232,43 @@ Output: `$REVIEW_TMP/result-4.json`
 
 Lens: code vs signed artifacts, manifest drift, feature count mismatches, fallback/zero-fill changes, tests asserting current vs specified behavior.
 
-## 6. Launch four Hermes sessions in parallel
+## 6. Launch four reviewer sessions in parallel
 
 ```bash
 HERMES_TIMEOUT=600
 
+# Reviewer 1: Security (Opus via Bedrock)
 timeout $HERMES_TIMEOUT hermes -z "$(cat "$REVIEW_TMP/prompt-1.txt")" \
   -m us.anthropic.claude-opus-4-6-v1 --provider bedrock \
   -t file --yolo \
   1>"$REVIEW_TMP/stdout-1.txt" 2>"$REVIEW_TMP/stderr-1.txt" &
 PID1=$!
 
-timeout $HERMES_TIMEOUT hermes -z "$(cat "$REVIEW_TMP/prompt-2.txt")" \
-  -m gpt-5.5 --provider openai-codex \
-  -t file --yolo \
-  1>"$REVIEW_TMP/stdout-2.txt" 2>"$REVIEW_TMP/stderr-2.txt" &
-PID2=$!
+# Reviewer 2: Correctness (Codex CLI if available, else Haiku via Bedrock)
+if command -v codex &>/dev/null; then
+  timeout $HERMES_TIMEOUT codex exec \
+    -o "$REVIEW_TMP/result-2.json" \
+    "$(cat "$REVIEW_TMP/prompt-2.txt")" \
+    1>"$REVIEW_TMP/stdout-2.txt" 2>"$REVIEW_TMP/stderr-2.txt" &
+  PID2=$!
+  echo "Reviewer 2: Codex CLI (GPT-5.5)"
+else
+  timeout $HERMES_TIMEOUT hermes -z "$(cat "$REVIEW_TMP/prompt-2.txt")" \
+    -m us.anthropic.claude-haiku-4-5-20251001-v1:0 --provider bedrock \
+    -t file --yolo \
+    1>"$REVIEW_TMP/stdout-2.txt" 2>"$REVIEW_TMP/stderr-2.txt" &
+  PID2=$!
+  echo "Reviewer 2: Haiku 4.5 (Codex not installed)"
+fi
 
+# Reviewer 3: Readability+perf (Sonnet via Bedrock)
 timeout $HERMES_TIMEOUT hermes -z "$(cat "$REVIEW_TMP/prompt-3.txt")" \
   -m us.anthropic.claude-sonnet-4-6 --provider bedrock \
   -t file --yolo \
   1>"$REVIEW_TMP/stdout-3.txt" 2>"$REVIEW_TMP/stderr-3.txt" &
 PID3=$!
 
+# Reviewer 4: Spec-contract (Opus via Bedrock)
 timeout $HERMES_TIMEOUT hermes -z "$(cat "$REVIEW_TMP/prompt-4.txt")" \
   -m us.anthropic.claude-opus-4-6-v1 --provider bedrock \
   -t file --yolo \
@@ -323,14 +353,16 @@ Do NOT auto-apply fixes. The user decides what to act on.
 
 # Model configuration (full mode)
 
-| Reviewer | Model | Hermes flags |
+| Reviewer | Model | How it runs |
 |---|---|---|
-| Security | Opus 4.6 | `-m us.anthropic.claude-opus-4-6-v1 --provider bedrock` |
-| Correctness | GPT-5.5 | `-m gpt-5.5 --provider openai-codex` |
-| Readability | Sonnet 4.6 | `-m us.anthropic.claude-sonnet-4-6 --provider bedrock` |
-| Spec-contract | Opus 4.6 | `-m us.anthropic.claude-opus-4-6-v1 --provider bedrock` |
+| Security | Opus 4.6 | Hermes: `-m us.anthropic.claude-opus-4-6-v1 --provider bedrock` |
+| Correctness | GPT-5.5 (preferred) or Haiku 4.5 (fallback) | Codex CLI: `codex exec -o result.json "prompt"` / Hermes: `-m ...haiku...` |
+| Readability | Sonnet 4.6 | Hermes: `-m us.anthropic.claude-sonnet-4-6 --provider bedrock` |
+| Spec-contract | Opus 4.6 | Hermes: `-m us.anthropic.claude-opus-4-6-v1 --provider bedrock` |
+
+Codex CLI uses GPT-5.5 via your ChatGPT subscription (no API credits). If Codex is not installed, reviewer 2 falls back to Haiku 4.5 on Bedrock.
 
 # Privacy
 
 - **Quick mode**: all processing stays within Anthropic (Claude Code subagents).
-- **Full mode**: Bedrock stays in your AWS. Codex goes through ChatGPT OAuth. Drop GPT-5.5 for sensitive code.
+- **Full mode**: 3 reviewers run via Bedrock (your AWS). If Codex CLI is used for reviewer 2, that call goes through OpenAI's ChatGPT infrastructure. For sensitive code, set `USE_CODEX=false` to keep all 4 on Bedrock.

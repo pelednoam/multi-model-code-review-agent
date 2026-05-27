@@ -388,7 +388,7 @@ if start >= 0 and end > start:
     json.dump(d, open(sys.argv[2], 'w'), indent=2)
 else:
     sys.exit(1)
-" "$1" "$2" 2>"$REVIEW_TMP/extract-err.txt"
+" "$1" "$2" 2>"$REVIEW_TMP/extract-$(basename "$2" .json).err"
 }
 
 # Post-process: normalize all output to result-N.json.

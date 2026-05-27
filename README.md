@@ -58,22 +58,35 @@ feature count mismatch that three rounds of same-session review missed.
 
 ### What this pipeline adds
 
-| Capability | Same-session review | Quick mode | Full mode |
-|---|---|---|---|
-| Clean context | no | yes | yes |
-| Deterministic preflight | no | yes | yes |
-| Artifact/manifest audit | no | yes | yes |
-| Per-reviewer attribution | no | yes (2 lenses) | yes (4 lenses) |
-| Model diversity | no | no (Anthropic only) | yes (cross-provider) |
-| Write isolation | no | no | yes (`-t file` only) |
-| Structured JSON schema | no | no | yes (jsonschema enforced) |
-| Cost | free | free | ~$5-40 |
-| Latency | instant | ~30s | ~5 min |
-| Review packet persistence | no | no | yes |
+Full mode runs on three possible backends (Claude CLI, Codex CLI,
+Hermes+Bedrock). The capabilities differ:
 
-Quick mode gives you 80% of the value (clean context + preflight +
-spec-contract lens) at zero cost. Full mode adds cross-provider model
-diversity for the remaining 20%.
+| Capability | Same-session | Quick mode | Full: CLIs only | Full: Hermes |
+|---|---|---|---|---|
+| Clean context | no | yes | yes | yes |
+| Deterministic preflight | no | yes | yes | yes |
+| Artifact/manifest audit | no | yes | yes | yes |
+| Per-reviewer attribution | no | 2 lenses | 4 lenses | 4 lenses |
+| Write isolation | no | no | yes (`--allowedTools`) | yes (`-t file`) |
+| Structured JSON schema | no | no | yes | yes |
+| Review packet persistence | no | no | yes | yes |
+| Cross-provider models | no | no | **only with Codex** | yes (any) |
+| Model diversity | no | no | Anthropic + OpenAI* | any provider |
+| Cost | free | free | free | ~$5-40 |
+| Latency | instant | ~30s | ~3 min | ~5 min |
+
+*Cross-provider diversity requires Codex CLI. With only Claude CLI
+installed, all 4 reviewers are Anthropic models -- same model family
+as Claude Code subagents. The agent warns when running in single-
+provider mode. For maximum model diversity, use Hermes with providers
+like Bedrock, Codex OAuth, and Nous Portal.
+
+**When to use which:**
+- **Quick mode**: every commit, rapid iteration (free, 30s)
+- **Full mode with CLIs**: pre-merge gates when cost matters (free, 3min)
+- **Full mode with Hermes**: high-stakes changes where cross-provider
+  diversity is worth paying for, or FDA-path code where Bedrock's
+  data-at-rest guarantees matter
 
 ## Architecture
 

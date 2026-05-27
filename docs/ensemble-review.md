@@ -308,6 +308,12 @@ if ! $HAS_CLAUDE && ! $HAS_HERMES; then
   exit 1
 fi
 
+# Warn if running in single-provider mode (same model family as subagents)
+if ! $HAS_CODEX && ! $HAS_HERMES; then
+  echo "WARNING: all 4 reviewers will use Anthropic models (no cross-provider diversity)."
+  echo "Install Codex CLI for GPT-5.5, or use Hermes with multiple providers."
+fi
+
 launch_anthropic 1 opus "$REVIEW_TMP/prompt-1.txt"     # Security
 launch_correctness 2 "$REVIEW_TMP/prompt-2.txt"        # Correctness
 launch_anthropic 3 sonnet "$REVIEW_TMP/prompt-3.txt"   # Readability

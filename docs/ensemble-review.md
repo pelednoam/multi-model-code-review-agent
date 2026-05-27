@@ -15,30 +15,44 @@ You are a review orchestrator. You run a deterministic preflight audit, package 
 If the user says "quick review", "review this", or just "ensemble review" -- use quick mode.
 If the user says "full review", "full ensemble review", or "hermes review" -- use full mode.
 
-# CLI detection
+# CLI and provider detection
 
-Before launching full mode, detect which CLIs are available:
+Before launching full mode, detect which backends are available:
 
 ```bash
-HAS_CLAUDE=false; command -v claude &>/dev/null && HAS_CLAUDE=true
-HAS_CODEX=false; command -v codex &>/dev/null && HAS_CODEX=true
 HAS_HERMES=false; command -v hermes &>/dev/null && HAS_HERMES=true
+HAS_CLAUDE=false; command -v claude &>/dev/null && HAS_CLAUDE=true
+HAS_CODEX=false;  command -v codex  &>/dev/null && HAS_CODEX=true
+HAS_GEMINI=false; command -v gemini &>/dev/null && HAS_GEMINI=true
 ```
 
-**Priority order for each reviewer:**
+**Priority order for each reviewer -- Hermes first (better isolation), CLIs as fallback (free):**
 
-| Reviewer | 1st choice (free) | 2nd choice (free) | 3rd choice (paid) |
+For Anthropic models (reviewers 1, 3, 4), Hermes gives better isolation: the reviewer writes JSON directly to a file via `-t file`, output format is consistent, and data stays in your AWS account (Bedrock). CLI mode is free but output needs extraction and data goes through Anthropic's infrastructure.
+
+For non-Anthropic models (reviewer 2 correctness, reviewer 3 readability), CLIs are the only free path. Hermes can also route to these providers if configured.
+
+| Reviewer | 1st: Hermes (best isolation) | 2nd: CLI (free) | 3rd: CLI fallback |
 |---|---|---|---|
-| Security (Opus) | `claude -p --model opus` | -- | `hermes -m opus --provider bedrock` |
-| Correctness | `codex exec` (GPT-5.5) | `claude -p --model haiku` | `hermes -m haiku --provider bedrock` |
-| Readability (Sonnet) | `claude -p --model sonnet` | -- | `hermes -m sonnet --provider bedrock` |
-| Spec-contract (Opus) | `claude -p --model opus` | -- | `hermes -m opus --provider bedrock` |
+| Security (Opus) | `hermes -m opus --provider bedrock` | `claude -p --model opus` | -- |
+| Correctness | `hermes -m gpt-5.5` (if configured) | `codex exec` (GPT-5.5) | `claude -p --model haiku` |
+| Readability | `hermes -m sonnet --provider bedrock` | `gemini -p` (Gemini 2.x) | `claude -p --model sonnet` |
+| Spec-contract (Opus) | `hermes -m opus --provider bedrock` | `claude -p --model opus` | -- |
 
-If Claude Code CLI is installed, use it for reviewers 1, 3, and 4 (Anthropic models). Uses your Claude Code subscription -- no Bedrock API credits. If Codex CLI is installed, use it for reviewer 2 (GPT-5.5 via ChatGPT subscription). Fall back to Hermes+Bedrock only when neither CLI is available.
+**Why Hermes first**: consistent JSON output (no extraction fragility), true `-t file` toolset restriction, data stays in your AWS (Bedrock). Worth the cost for high-stakes reviews.
 
-**When both CLIs are installed, the entire full-mode review is free** -- no API calls at all.
+**Why CLIs as fallback**: free (uses existing subscriptions), and for Gemini there is no Hermes provider configured so CLI is the only option.
 
-Claude Code CLI flags for review: `claude -p --model <model> --allowedTools "Read Grep Glob" --output-format json < prompt.txt`. The `-p` flag runs non-interactively, `--allowedTools` restricts to read-only tools (no Bash/Edit/Write), `--output-format json` wraps output in `{"result": "..."}` for parsing. Prompt is piped via stdin to avoid shell argument limits.
+**Maximum diversity for free** (all CLIs installed): Anthropic (Claude CLI) + OpenAI (Codex CLI) + Google (Gemini CLI) = 3 provider families.
+
+### CLI flags reference
+
+| CLI | Non-interactive | Read-only | Output |
+|---|---|---|---|
+| `claude` | `-p` | `--allowedTools "Read Grep Glob"` | `--output-format json` (wraps in `{"result":"..."}`) |
+| `codex` | `codex exec` | default sandbox | `-o <file>` (writes last message) |
+| `gemini` | `-p "prompt"` | `--approval-mode plan` | stdout (text) |
+| `hermes` | `-z "prompt" --yolo` | `-t file` | reviewer writes file directly |
 
 # Steps shared by both modes
 
@@ -249,75 +263,97 @@ Lens: code vs signed artifacts, manifest drift, feature count mismatches, fallba
 
 ## 6. Launch four reviewer sessions in parallel
 
-Two helper functions -- one to launch a single Anthropic reviewer, one for the GPT-5.5 correctness reviewer (separate because GPT-5.5 is not an Anthropic model and must never be passed to Claude CLI):
+Three helper functions for each backend type. Hermes is preferred for Anthropic models (better isolation, consistent output, data stays in AWS). CLIs are fallbacks (free but fragile output parsing).
 
 ```bash
-# Launch an Anthropic-model reviewer (opus/sonnet/haiku).
-# Tries Claude CLI first (free), then Hermes+Bedrock (paid).
-launch_anthropic() {
-  local num=$1 model=$2 prompt_file=$3
-
-  if $HAS_CLAUDE; then
-    timeout 600 claude -p --model "$model" \
-      --allowedTools "Read Grep Glob" \
-      --output-format json < "$prompt_file" \
-      1>"$REVIEW_TMP/claude-raw-$num.json" \
-      2>"$REVIEW_TMP/stderr-$num.txt" &
-    echo "R$num: Claude CLI ($model)"
-  elif $HAS_HERMES; then
-    local bedrock_id
-    case "$model" in
-      opus)   bedrock_id="us.anthropic.claude-opus-4-6-v1" ;;
-      sonnet) bedrock_id="us.anthropic.claude-sonnet-4-6" ;;
-      haiku)  bedrock_id="us.anthropic.claude-haiku-4-5-20251001-v1:0" ;;
-      *)      echo "R$num: SKIPPED (unknown model $model)"; return 1 ;;
-    esac
-    timeout 600 hermes -z "$(cat "$prompt_file")" \
-      -m "$bedrock_id" --provider bedrock -t file --yolo \
-      1>"$REVIEW_TMP/stdout-$num.txt" \
-      2>"$REVIEW_TMP/stderr-$num.txt" &
-    echo "R$num: Hermes ($bedrock_id)"
-  else
-    echo "R$num: SKIPPED (no Anthropic CLI available)"
-    return 1
-  fi
+# Launch via Hermes (best isolation: -t file, consistent JSON output).
+launch_hermes() {
+  local num=$1 hermes_model=$2 prompt_file=$3
+  timeout 600 hermes -z "$(cat "$prompt_file")" \
+    -m "$hermes_model" --provider bedrock -t file --yolo \
+    1>"$REVIEW_TMP/stdout-$num.txt" \
+    2>"$REVIEW_TMP/stderr-$num.txt" &
+  echo "R$num: Hermes ($hermes_model) [Bedrock]"
 }
 
-# Launch the GPT-5.5 correctness reviewer.
-# Tries Codex CLI first (free), then falls back to Anthropic haiku.
-launch_correctness() {
-  local num=$1 prompt_file=$2
+# Launch via a coding agent CLI (free but needs output extraction).
+launch_cli() {
+  local num=$1 cli=$2 model=$3 prompt_file=$4
 
-  if $HAS_CODEX; then
-    timeout 600 codex exec \
-      -o "$REVIEW_TMP/result-$num.json" \
-      "$(cat "$prompt_file")" \
-      1>"$REVIEW_TMP/stdout-$num.txt" \
-      2>"$REVIEW_TMP/stderr-$num.txt" &
-    echo "R$num: Codex CLI (GPT-5.5)"
-  else
-    echo "R$num: Codex not installed, falling back to haiku"
-    launch_anthropic "$num" haiku "$prompt_file"
-  fi
+  case "$cli" in
+    claude)
+      timeout 600 claude -p --model "$model" \
+        --allowedTools "Read Grep Glob" \
+        --output-format json < "$prompt_file" \
+        1>"$REVIEW_TMP/claude-raw-$num.json" \
+        2>"$REVIEW_TMP/stderr-$num.txt" &
+      echo "R$num: Claude CLI ($model) [free]"
+      ;;
+    codex)
+      timeout 600 codex exec \
+        -o "$REVIEW_TMP/result-$num.json" \
+        "$(cat "$prompt_file")" \
+        1>"$REVIEW_TMP/stdout-$num.txt" \
+        2>"$REVIEW_TMP/stderr-$num.txt" &
+      echo "R$num: Codex CLI (GPT-5.5) [free]"
+      ;;
+    gemini)
+      timeout 600 gemini -p "$(cat "$prompt_file")" \
+        --approval-mode plan --skip-trust \
+        1>"$REVIEW_TMP/stdout-$num.txt" \
+        2>"$REVIEW_TMP/stderr-$num.txt" &
+      echo "R$num: Gemini CLI [free]"
+      ;;
+  esac
 }
 
-# Pre-check: need at least claude or hermes for Anthropic reviewers
+# Pre-check
 if ! $HAS_CLAUDE && ! $HAS_HERMES; then
-  echo "ERROR: neither claude nor hermes installed. Cannot run Anthropic reviewers."
-  echo "Install Claude Code CLI or Hermes Agent, or use quick mode instead."
+  echo "ERROR: neither claude nor hermes installed. Use quick mode."
   exit 1
 fi
 
-# Warn if running in single-provider mode (same model family as subagents)
-if ! $HAS_CODEX && ! $HAS_HERMES; then
-  echo "WARNING: all 4 reviewers will use Anthropic models (no cross-provider diversity)."
-  echo "Install Codex CLI for GPT-5.5, or use Hermes with multiple providers."
+# Count provider diversity
+N_PROVIDERS=1  # Anthropic is always available (claude or hermes)
+$HAS_CODEX && N_PROVIDERS=$((N_PROVIDERS + 1))
+$HAS_GEMINI && N_PROVIDERS=$((N_PROVIDERS + 1))
+if [ $N_PROVIDERS -eq 1 ]; then
+  echo "WARNING: single-provider mode (Anthropic only)."
+  echo "Install codex and/or gemini for cross-provider diversity."
+fi
+echo "Provider diversity: $N_PROVIDERS provider(s)"
+
+# R1: Security (Opus) -- Hermes preferred, Claude CLI fallback
+if $HAS_HERMES; then
+  launch_hermes 1 us.anthropic.claude-opus-4-6-v1 "$REVIEW_TMP/prompt-1.txt"
+else
+  launch_cli 1 claude opus "$REVIEW_TMP/prompt-1.txt"
 fi
 
-launch_anthropic 1 opus "$REVIEW_TMP/prompt-1.txt"     # Security
-launch_correctness 2 "$REVIEW_TMP/prompt-2.txt"        # Correctness
-launch_anthropic 3 sonnet "$REVIEW_TMP/prompt-3.txt"   # Readability
-launch_anthropic 4 opus "$REVIEW_TMP/prompt-4.txt"     # Spec-contract
+# R2: Correctness -- Codex (GPT-5.5) preferred for cross-provider diversity
+if $HAS_CODEX; then
+  launch_cli 2 codex "" "$REVIEW_TMP/prompt-2.txt"
+elif $HAS_HERMES; then
+  launch_hermes 2 us.anthropic.claude-haiku-4-5-20251001-v1:0 "$REVIEW_TMP/prompt-2.txt"
+else
+  launch_cli 2 claude haiku "$REVIEW_TMP/prompt-2.txt"
+fi
+
+# R3: Readability -- Gemini preferred (3rd provider), then Hermes, then Claude CLI
+if $HAS_GEMINI; then
+  launch_cli 3 gemini "" "$REVIEW_TMP/prompt-3.txt"
+elif $HAS_HERMES; then
+  launch_hermes 3 us.anthropic.claude-sonnet-4-6 "$REVIEW_TMP/prompt-3.txt"
+else
+  launch_cli 3 claude sonnet "$REVIEW_TMP/prompt-3.txt"
+fi
+
+# R4: Spec-contract (Opus) -- Hermes preferred, Claude CLI fallback
+if $HAS_HERMES; then
+  launch_hermes 4 us.anthropic.claude-opus-4-6-v1 "$REVIEW_TMP/prompt-4.txt"
+else
+  launch_cli 4 claude opus "$REVIEW_TMP/prompt-4.txt"
+fi
 
 # Wait for ALL background children (avoids stale-PID issues when
 # a launcher SKIPs without backgrounding a process).
@@ -345,12 +381,15 @@ json.dump(inner, open(sys.argv[2], 'w'), indent=2)
 " "$raw" "$result" 2>"$REVIEW_TMP/extract-$num.err" && continue
   fi
 
-  # Try Hermes stdout (raw JSON written by reviewer)
+  # Try Hermes/Gemini stdout (raw text, may have markdown fences)
   stdout="$REVIEW_TMP/stdout-$num.txt"
   if [ -f "$stdout" ]; then
     python3 -c "
-import json, sys
-d = json.load(open(sys.argv[1]))
+import json, sys, re
+text = open(sys.argv[1]).read()
+text = re.sub(r'^\s*\`\`\`json?\s*', '', text)
+text = re.sub(r'\s*\`\`\`\s*$', '', text)
+d = json.loads(text)
 json.dump(d, open(sys.argv[2], 'w'), indent=2)
 " "$stdout" "$result" 2>"$REVIEW_TMP/extract-$num.err" && continue
   fi
@@ -370,7 +409,7 @@ json.dump({
 done
 ```
 
-**Tool restriction**: Claude CLI uses `--allowedTools "Read Grep Glob"` (read-only, no Bash/Edit/Write). Hermes uses `-t file`. Codex runs in its default sandbox. Extraction errors are logged to `$REVIEW_TMP/extract-N.err` (not swallowed).
+**Tool restriction**: Hermes uses `-t file` (best isolation). Claude CLI uses `--allowedTools "Read Grep Glob"` (read-only). Codex uses its default sandbox. Gemini uses `--approval-mode plan` (read-only). Extraction errors logged to `$REVIEW_TMP/extract-N.err`.
 
 ## 7. Collect and validate results
 
@@ -444,20 +483,24 @@ Do NOT auto-apply fixes. The user decides what to act on.
 
 # Model configuration (full mode)
 
-| Reviewer | Model | Free (CLI) | Paid (Hermes+Bedrock) |
+| Reviewer | 1st choice (Hermes, best) | 2nd choice (CLI, free) | 3rd choice (CLI fallback) |
 |---|---|---|---|
-| Security | Opus | `claude -p --model opus --allowedTools "Read Grep Glob"` | `hermes -m opus --provider bedrock` |
-| Correctness | GPT-5.5 / Haiku | `codex exec` / `claude -p --model haiku` | `hermes -m haiku --provider bedrock` |
-| Readability | Sonnet | `claude -p --model sonnet --allowedTools "Read Grep Glob"` | `hermes -m sonnet --provider bedrock` |
-| Spec-contract | Opus | `claude -p --model opus --allowedTools "Read Grep Glob"` | `hermes -m opus --provider bedrock` |
+| Security (Opus) | `hermes -m opus --provider bedrock` | `claude -p --model opus` | -- |
+| Correctness | `hermes -m gpt-5.5` (if configured) | `codex exec` (GPT-5.5) | `claude -p --model haiku` |
+| Readability | `hermes -m sonnet --provider bedrock` | `gemini -p` (Gemini 2.x) | `claude -p --model sonnet` |
+| Spec-contract (Opus) | `hermes -m opus --provider bedrock` | `claude -p --model opus` | -- |
 
-With both `claude` and `codex` installed, the full review is **completely free**.
+**Maximum diversity with all backends**: Hermes (Bedrock Opus) + Codex CLI (GPT-5.5) + Gemini CLI (Gemini 2.x) = 3 providers, best isolation on the Hermes reviewers.
 
-Claude CLI uses `--allowedTools "Read Grep Glob"` for read-only access (no Bash, Edit, or Write). Hermes uses `-t file`. Codex runs in its default sandbox.
+# Privacy and isolation
 
-# Privacy
+| Backend | Data path | Isolation | Cost |
+|---|---|---|---|
+| Hermes+Bedrock | Your AWS account | Best (`-t file`) | Bedrock API pricing |
+| Claude CLI | Anthropic infrastructure | Good (`--allowedTools`) | Claude subscription |
+| Codex CLI | OpenAI infrastructure | Good (sandbox) | ChatGPT subscription |
+| Gemini CLI | Google infrastructure | Good (`--approval-mode plan`) | Google AI Studio (free tier) |
 
-- **Quick mode**: all processing stays within Anthropic (Claude Code subagents).
-- **Full mode with Claude CLI**: uses your Claude Code subscription. Note that data retention policies may differ from Bedrock; for FDA-path code where you need data-at-rest guarantees, use Hermes+Bedrock instead.
-- **Full mode with Codex CLI**: correctness reviewer goes through OpenAI's ChatGPT. For sensitive code, the agent falls back to `claude -p --model haiku` instead.
-- **Full mode with Hermes**: all 4 on Bedrock (your AWS account, your data retention policy).
+- **Quick mode**: stays within Anthropic (Claude Code subagents).
+- **Full mode**: Hermes reviewers stay in your AWS. CLI reviewers go through their respective provider's infrastructure.
+- **For sensitive/FDA-path code**: use Hermes+Bedrock for all 4 reviewers (data-at-rest in your AWS account, consistent isolation via `-t file`).

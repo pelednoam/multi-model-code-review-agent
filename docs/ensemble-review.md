@@ -38,7 +38,7 @@ If Claude Code CLI is installed, use it for reviewers 1, 3, and 4 (Anthropic mod
 
 **When both CLIs are installed, the entire full-mode review is free** -- no API calls at all.
 
-Claude Code CLI flags for review: `claude -p --model <model> --dangerously-skip-permissions --output-format json "prompt"`. The `-p` flag runs non-interactively, `--dangerously-skip-permissions` skips permission prompts (safe for read-only review), `--output-format json` wraps output in `{"result": "..."}` for parsing.
+Claude Code CLI flags for review: `claude -p --model <model> --allowedTools "Read Grep Glob" --output-format json < prompt.txt`. The `-p` flag runs non-interactively, `--allowedTools` restricts to read-only tools (no Bash/Edit/Write), `--output-format json` wraps output in `{"result": "..."}` for parsing. Prompt is piped via stdin to avoid shell argument limits.
 
 # Steps shared by both modes
 
@@ -301,41 +301,70 @@ launch_correctness() {
   fi
 }
 
-# Pre-check: at least one CLI must be available
-if ! $HAS_CLAUDE && ! $HAS_CODEX && ! $HAS_HERMES; then
-  echo "ERROR: no CLI available (claude, codex, hermes). Use quick mode instead."
+# Pre-check: need at least claude or hermes for Anthropic reviewers
+if ! $HAS_CLAUDE && ! $HAS_HERMES; then
+  echo "ERROR: neither claude nor hermes installed. Cannot run Anthropic reviewers."
+  echo "Install Claude Code CLI or Hermes Agent, or use quick mode instead."
   exit 1
 fi
 
 launch_anthropic 1 opus "$REVIEW_TMP/prompt-1.txt"     # Security
-PID1=$!
 launch_correctness 2 "$REVIEW_TMP/prompt-2.txt"        # Correctness
-PID2=$!
 launch_anthropic 3 sonnet "$REVIEW_TMP/prompt-3.txt"   # Readability
-PID3=$!
 launch_anthropic 4 opus "$REVIEW_TMP/prompt-4.txt"     # Spec-contract
-PID4=$!
 
-wait $PID1 $PID2 $PID3 $PID4
+# Wait for ALL background children (avoids stale-PID issues when
+# a launcher SKIPs without backgrounding a process).
+wait
 
-# Post-process: extract review JSON from Claude CLI's wrapper format.
-# Claude CLI with --output-format json produces {"result": "<text>"}.
-# Codex and Hermes write result files directly.
+# Post-process: normalize all output to result-N.json.
+# - Claude CLI: claude-raw-N.json contains {"result": "<JSON text>"}
+# - Hermes: stdout-N.txt contains the raw JSON review
+# - Codex: result-N.json already written via -o
 for num in 1 2 3 4; do
-  raw="$REVIEW_TMP/claude-raw-$num.json"
   result="$REVIEW_TMP/result-$num.json"
-  if [ -f "$raw" ] && [ ! -f "$result" ]; then
+  [ -f "$result" ] && continue  # already produced (Codex path)
+
+  # Try Claude CLI wrapper extraction
+  raw="$REVIEW_TMP/claude-raw-$num.json"
+  if [ -f "$raw" ]; then
+    python3 -c "
+import json, sys, re
+wrapper = json.load(open(sys.argv[1]))
+text = wrapper.get('result', '')
+text = re.sub(r'^\s*\`\`\`json?\s*', '', text)
+text = re.sub(r'\s*\`\`\`\s*$', '', text)
+inner = json.loads(text)
+json.dump(inner, open(sys.argv[2], 'w'), indent=2)
+" "$raw" "$result" 2>"$REVIEW_TMP/extract-$num.err" && continue
+  fi
+
+  # Try Hermes stdout (raw JSON written by reviewer)
+  stdout="$REVIEW_TMP/stdout-$num.txt"
+  if [ -f "$stdout" ]; then
     python3 -c "
 import json, sys
-wrapper = json.load(open('$raw'))
-inner = json.loads(wrapper['result'])
-json.dump(inner, open('$result', 'w'), indent=2)
-" 2>/dev/null || cp "$raw" "$result"
+d = json.load(open(sys.argv[1]))
+json.dump(d, open(sys.argv[2], 'w'), indent=2)
+" "$stdout" "$result" 2>"$REVIEW_TMP/extract-$num.err" && continue
+  fi
+
+  # If extraction failed, write a synthetic error result
+  if [ ! -f "$result" ]; then
+    python3 -c "
+import json, sys
+json.dump({
+  'reviewer': 'unknown', 'model': 'unknown',
+  'findings': [],
+  'overall_assessment': 'Reviewer $num failed: no parseable output.'
+}, open(sys.argv[1], 'w'), indent=2)
+" "$result"
+    echo "WARNING: Reviewer $num produced no parseable output"
   fi
 done
 ```
 
-**Tool restriction**: Claude CLI uses `--allowedTools "Read Grep Glob"` (read-only, no Bash/Edit/Write). Hermes uses `-t file`. Codex runs in its default sandbox.
+**Tool restriction**: Claude CLI uses `--allowedTools "Read Grep Glob"` (read-only, no Bash/Edit/Write). Hermes uses `-t file`. Codex runs in its default sandbox. Extraction errors are logged to `$REVIEW_TMP/extract-N.err` (not swallowed).
 
 ## 7. Collect and validate results
 

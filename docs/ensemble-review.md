@@ -32,12 +32,12 @@ For Anthropic models (reviewers 1, 3, 4), Hermes gives better isolation: the rev
 
 For non-Anthropic models (reviewer 2 correctness, reviewer 3 readability), CLIs are the only free path. Hermes can also route to these providers if configured.
 
-| Reviewer | 1st: Hermes (best isolation) | 2nd: CLI (free) | 3rd: CLI fallback |
+| Reviewer | 1st choice | 2nd choice | 3rd choice |
 |---|---|---|---|
-| Security (Opus) | `hermes -m opus --provider bedrock` | `claude -p --model opus` | -- |
-| Correctness | -- | `codex exec` (GPT-5.5) | `hermes haiku` or `claude haiku` |
-| Readability | `hermes -m sonnet --provider bedrock` | `gemini -p` (Gemini 2.x) | `claude -p --model sonnet` |
-| Spec-contract (Opus) | `hermes -m opus --provider bedrock` | `claude -p --model opus` | -- |
+| Security (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
+| Correctness | Codex CLI GPT-5.5 (free) | Hermes Haiku (Bedrock) | Claude CLI haiku (free) |
+| Readability | Gemini CLI (free) | Hermes Sonnet (Bedrock) | Claude CLI sonnet (free) |
+| Spec-contract (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
 
 **Why Hermes first**: consistent JSON output (no extraction fragility), true `-t file` toolset restriction, data stays in your AWS (Bedrock). Worth the cost for high-stakes reviews.
 
@@ -265,11 +265,12 @@ Lens: code vs signed artifacts, manifest drift, feature count mismatches, fallba
 
 ## 6. Launch four reviewer sessions in parallel
 
-Three helper functions for each backend type. Hermes is preferred for Anthropic models (better isolation, consistent output, data stays in AWS). CLIs are fallbacks (free but fragile output parsing).
+Two launch functions. Hermes is preferred for Anthropic models (better isolation). CLIs are fallbacks (free).
 
 ```bash
 # Launch via Hermes (best isolation: -t file, consistent JSON output).
-# Hermes -z requires the prompt as an argument (no stdin mode).
+# Hermes -z takes prompt as argument (no stdin). Subject to ARG_MAX
+# for very large diffs -- for those, use Claude CLI instead.
 launch_hermes() {
   local num=$1 hermes_model=$2 prompt_file=$3
   timeout 600 hermes -z "$(cat "$prompt_file")" \
@@ -279,35 +280,19 @@ launch_hermes() {
   echo "R$num: Hermes ($hermes_model) [Bedrock]"
 }
 
-# Launch via a coding agent CLI (free but needs output extraction).
-# All CLIs receive prompts via stdin to avoid ARG_MAX overflow.
+# Launch via a coding agent CLI (free, stdin-based).
 launch_cli() {
   local num=$1 cli=$2 prompt_file=$3
 
   case "$cli" in
-    claude-opus)
-      timeout 600 claude -p --model opus \
+    claude-*)
+      local model="${cli#claude-}"
+      timeout 600 claude -p --model "$model" \
         --allowedTools "Read Grep Glob" \
         --output-format json < "$prompt_file" \
         1>"$REVIEW_TMP/claude-raw-$num.json" \
         2>"$REVIEW_TMP/stderr-$num.txt" &
-      echo "R$num: Claude CLI (opus) [free]"
-      ;;
-    claude-sonnet)
-      timeout 600 claude -p --model sonnet \
-        --allowedTools "Read Grep Glob" \
-        --output-format json < "$prompt_file" \
-        1>"$REVIEW_TMP/claude-raw-$num.json" \
-        2>"$REVIEW_TMP/stderr-$num.txt" &
-      echo "R$num: Claude CLI (sonnet) [free]"
-      ;;
-    claude-haiku)
-      timeout 600 claude -p --model haiku \
-        --allowedTools "Read Grep Glob" \
-        --output-format json < "$prompt_file" \
-        1>"$REVIEW_TMP/claude-raw-$num.json" \
-        2>"$REVIEW_TMP/stderr-$num.txt" &
-      echo "R$num: Claude CLI (haiku) [free]"
+      echo "R$num: Claude CLI ($model) [free]"
       ;;
     codex)
       timeout 600 codex exec \
@@ -319,7 +304,7 @@ launch_cli() {
       ;;
     gemini)
       timeout 600 gemini \
-        -p - --approval-mode plan --skip-trust \
+        -p "" --approval-mode plan --skip-trust \
         < "$prompt_file" \
         1>"$REVIEW_TMP/stdout-$num.txt" \
         2>"$REVIEW_TMP/stderr-$num.txt" &
@@ -384,21 +369,18 @@ fi
 # a launcher SKIPs without backgrounding a process).
 wait
 
-# Post-process: normalize all output to result-N.json.
-# - Claude CLI: claude-raw-N.json contains {"result": "<JSON text>"}
-# - Hermes: stdout-N.txt contains the raw JSON review
-# - Codex: result-N.json already written via -o
-for num in 1 2 3 4; do
-  result="$REVIEW_TMP/result-$num.json"
-  [ -f "$result" ] && continue  # already produced (Codex path)
-
-  # Shared extraction helper: find the JSON object in text that may
-  # have markdown fences, preamble, or other wrapper content.
-  extract_json() {
-    python3 -c "
+# Shared extraction: find first { to last } in text, parse as JSON.
+# Handles markdown fences, preamble, Claude CLI wrappers.
+extract_json() {
+  python3 -c "
 import json, sys
 text = open(sys.argv[1]).read()
-# Find the first { to last } -- handles fences, preamble, postamble
+try:
+    wrapper = json.loads(text)
+    if 'result' in wrapper:
+        text = wrapper['result']
+except (json.JSONDecodeError, ValueError):
+    pass
 start = text.find('{')
 end = text.rfind('}')
 if start >= 0 and end > start:
@@ -406,41 +388,26 @@ if start >= 0 and end > start:
     json.dump(d, open(sys.argv[2], 'w'), indent=2)
 else:
     sys.exit(1)
-" "$1" "$2" 2>"$REVIEW_TMP/extract-$num.err"
-  }
+" "$1" "$2" 2>"$REVIEW_TMP/extract-err.txt"
+}
 
-  # Try Claude CLI wrapper extraction ({"result": "<JSON text>"})
-  raw="$REVIEW_TMP/claude-raw-$num.json"
-  if [ -f "$raw" ]; then
-    python3 -c "
-import json, sys
-wrapper = json.load(open(sys.argv[1]))
-text = wrapper.get('result', '')
-start = text.find('{')
-end = text.rfind('}')
-if start >= 0 and end > start:
-    inner = json.loads(text[start:end+1])
-    json.dump(inner, open(sys.argv[2], 'w'), indent=2)
-else:
-    sys.exit(1)
-" "$raw" "$result" 2>"$REVIEW_TMP/extract-$num.err" && continue
-  fi
+# Post-process: normalize all output to result-N.json.
+for num in 1 2 3 4; do
+  result="$REVIEW_TMP/result-$num.json"
+  [ -f "$result" ] && continue  # already produced (Codex -o path)
 
-  # Try Hermes/Gemini/Codex stdout (raw text, may have fences)
-  stdout="$REVIEW_TMP/stdout-$num.txt"
-  if [ -f "$stdout" ]; then
-    extract_json "$stdout" "$result" && continue
-  fi
+  # Try each possible output file (Claude raw wrapper, then stdout)
+  for src in "$REVIEW_TMP/claude-raw-$num.json" "$REVIEW_TMP/stdout-$num.txt"; do
+    [ -f "$src" ] && extract_json "$src" "$result" && break
+  done
 
-  # If extraction failed, write a synthetic error result
+  # If no result produced, write a synthetic error
   if [ ! -f "$result" ]; then
     python3 -c "
 import json, sys
 json.dump({
-    'reviewer': 'unknown',
-    'model': 'unknown',
-    'findings': [],
-    'overall_assessment': 'Reviewer ' + sys.argv[2] + ' failed: no parseable output.'
+    'reviewer': 'unknown', 'model': 'unknown', 'findings': [],
+    'overall_assessment': 'Reviewer ' + sys.argv[2] + ' failed.'
 }, open(sys.argv[1], 'w'), indent=2)
 " "$result" "$num"
     echo "WARNING: Reviewer $num produced no parseable output"
@@ -522,14 +489,7 @@ Do NOT auto-apply fixes. The user decides what to act on.
 
 # Model configuration (full mode)
 
-| Reviewer | 1st choice (Hermes, best) | 2nd choice (CLI, free) | 3rd choice (CLI fallback) |
-|---|---|---|---|
-| Security (Opus) | `hermes -m opus --provider bedrock` | `claude -p --model opus` | -- |
-| Correctness | `hermes -m gpt-5.5` (if configured) | `codex exec` (GPT-5.5) | `claude -p --model haiku` |
-| Readability | `hermes -m sonnet --provider bedrock` | `gemini -p` (Gemini 2.x) | `claude -p --model sonnet` |
-| Spec-contract (Opus) | `hermes -m opus --provider bedrock` | `claude -p --model opus` | -- |
-
-**Maximum diversity with all backends**: Hermes (Bedrock Opus) + Codex CLI (GPT-5.5) + Gemini CLI (Gemini 2.x) = 3 providers, best isolation on the Hermes reviewers.
+See the priority table in the "CLI and provider detection" section above. Both tables are identical.
 
 # Privacy and isolation
 

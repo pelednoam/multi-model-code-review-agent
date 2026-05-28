@@ -143,6 +143,11 @@ For each finding, report:
 - rationale with concrete evidence
 - whether observed_in_diff, observed_in_audit, or inferred
 - whether it should block merge
+- suggested_fix: a CONCRETE code-level fix. Show the exact code
+  change (before/after), not just "consider fixing this." The
+  orchestrator will use your fix to implement the change, so it
+  must be specific enough to apply without additional context.
+  Include the file path and the exact lines to change.
 
 If you have no findings, say so honestly. Do not fabricate findings.
 ```
@@ -180,6 +185,11 @@ For each finding, report:
 - rationale with concrete evidence
 - whether observed_in_diff, observed_in_audit, or inferred
 - whether it should block merge
+- suggested_fix: a CONCRETE code-level fix. Show the exact code
+  change (before/after), not just "consider fixing this." The
+  orchestrator will use your fix to implement the change, so it
+  must be specific enough to apply without additional context.
+  Include the file path and the exact lines to change.
 
 If you have no findings, say so honestly. Do not fabricate findings.
 ```
@@ -224,7 +234,7 @@ marked required MUST be present:
       "rationale": "<why this matters, with concrete evidence>",
       "observed_or_inferred": "observed_in_diff" | "observed_in_audit" | "inferred",
       "blocking": true | false,
-      "suggested_fix": "<optional>",
+      "suggested_fix": "<REQUIRED: concrete code change. Show the file path, the exact lines to change, and the before/after code. Must be specific enough that the orchestrator can apply it without additional context.>",
       "repro_command": "<optional command to verify>",
       "contract_reference": "<optional doc/artifact path>"
     }
@@ -474,16 +484,20 @@ Findings from multiple reviewers are high-signal. Inferred findings from one rev
 <manifest counts, SHA matches, suspicious patterns, untracked files>
 
 ## Blocking Findings
-<blocking=true, grouped by file>
+<blocking=true, grouped by file, with suggested_fix from each reviewer>
 
 ## Critical
-<severity=critical non-blocking>
+<severity=critical non-blocking, with suggested_fix>
 
 ## Warnings
-<severity=warning, noting reviewer agreement>
+<severity=warning, noting reviewer agreement, with suggested_fix>
 
-## Suggestions
-<condensed>
+## Suggested Fixes Summary
+For each finding with severity >= warning, present the reviewer's
+suggested fix as a concrete before/after code block that the user
+(or the orchestrator) can apply directly. Group by file. When
+multiple reviewers suggest different fixes for the same issue,
+show all alternatives and note which reviewer proposed each.
 
 ## Convergence Summary
 <agreement, evidence-backed singles, disagreements>
@@ -492,7 +506,11 @@ Findings from multiple reviewers are high-signal. Inferred findings from one rev
 <verbatim overall_assessment from each>
 ```
 
-Do NOT auto-apply fixes. The user decides what to act on.
+Do NOT auto-apply fixes. Present the suggested fixes from the
+reviewers so the user can apply them, but let the user decide
+which to act on. The suggested fixes come from the reviewers
+(clean context, independent reasoning), not from the orchestrator
+(which has the contaminated dev context).
 
 # Error handling
 

@@ -18,7 +18,7 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["severity", "confidence", "category", "file", "issue", "rationale", "observed_or_inferred", "blocking"],
+        "required": ["severity", "confidence", "category", "file", "issue", "rationale", "observed_or_inferred", "blocking", "suggested_fix"],
         "additionalProperties": false,
         "properties": {
           "severity": {
@@ -62,8 +62,8 @@
             "description": "True if this finding should block merge."
           },
           "suggested_fix": {
-            "type": ["string", "null"],
-            "description": "Optional short suggested fix."
+            "type": "string",
+            "description": "Concrete code-level fix: file path, exact lines to change, before/after code. Must be specific enough for the orchestrator to apply without additional context."
           },
           "repro_command": {
             "type": ["string", "null"],

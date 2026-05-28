@@ -506,11 +506,35 @@ show all alternatives and note which reviewer proposed each.
 <verbatim overall_assessment from each>
 ```
 
-Do NOT auto-apply fixes. Present the suggested fixes from the
-reviewers so the user can apply them, but let the user decide
-which to act on. The suggested fixes come from the reviewers
-(clean context, independent reasoning), not from the orchestrator
-(which has the contaminated dev context).
+## Applying fixes
+
+After presenting the report, ask the user:
+
+> "N findings have concrete suggested fixes. Want me to apply them?
+> Options: (1) apply all non-blocking fixes, (2) let me pick which
+> to apply, (3) don't apply any -- I'll do it manually."
+
+**When the user chooses to apply fixes**:
+
+- Use the REVIEWER'S suggested_fix verbatim, not your own
+  interpretation. The reviewer had clean context; you (the
+  orchestrator) have contaminated dev context. The reviewer's
+  fix is more trustworthy.
+- For each fix, show the before/after diff and the reviewer
+  attribution before applying.
+- If multiple reviewers suggested different fixes for the same
+  issue, present all alternatives and ask which to apply.
+- After applying, re-run the test suite to verify.
+- If a reviewer's fix doesn't apply cleanly (wrong line numbers,
+  stale context), tell the user rather than guessing.
+
+**What NOT to do**:
+
+- Do NOT rewrite or "improve" the reviewer's fix using your own
+  context. Apply it as-is or ask the user.
+- Do NOT auto-apply blocking/critical fixes without confirmation.
+- Do NOT merge conflicting fixes from different reviewers without
+  asking.
 
 # Error handling
 

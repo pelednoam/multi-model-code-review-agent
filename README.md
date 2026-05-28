@@ -1,5 +1,7 @@
 # Multi-Model Code Review Agent
 
+![Multi-Model Code Review Agent](docs/img/multi-model-review-agent.png)
+
 A code review pipeline that runs multiple frontier LLMs in parallel,
 each with a different review lens, preceded by a deterministic
 preflight audit. Three modes:
@@ -9,10 +11,14 @@ preflight audit. Three modes:
 - **Full mode** (free or paid): 4 parallel reviewers using native CLIs
   (Claude Code, Codex, Gemini) or Hermes+Bedrock. ~3-5 minutes. Use
   for pre-merge gates.
+- **Convergence loop** (free or paid): runs full mode repeatedly,
+  applying fixes via a clean-context merge agent, until no blocking
+  findings remain (or the same findings appear twice -- "stuck"). Each
+  round enforces a mandatory four-step CI gate before commit.
 
-Both modes run the same preflight audit and spec-contract review lens.
-Designed for codebases where static diff review alone misses contract
-violations between code and signed artifacts.
+All three modes run the same preflight audit and spec-contract review
+lens. Designed for codebases where static diff review alone misses
+contract violations between code and signed artifacts.
 
 ## Why not just ask Claude Code to review?
 
@@ -55,11 +61,13 @@ review missed.
 | Clean context | no | yes | yes | yes |
 | Deterministic preflight | no | yes | yes | yes |
 | Artifact/manifest audit | no | yes | yes | yes |
+| Coverage-gap detection | no | yes | yes | yes |
 | Per-reviewer attribution | no | 2 lenses | 4 lenses | 4 lenses |
 | Write isolation | no | no | `--allowedTools` | `-t file` |
 | Structured JSON schema | no | no | yes | yes |
 | Review packet persistence | no | no | yes | yes |
 | Cross-provider models | no | no | with Codex+Gemini | any provider |
+| Mandatory CI gate before commit | no | no | yes | yes |
 | Cost | free | free | free | ~$5-40 |
 | Latency | instant | ~30s | ~3 min | ~5 min |
 
@@ -120,6 +128,42 @@ subscription directly -- same as opening a new terminal tab.
 **With all CLIs installed** (claude + codex + gemini): the full review
 is free, 3 provider families (Anthropic + OpenAI + Google).
 
+## Coverage-gap detection
+
+The preflight audit runs `pytest --cov-branch` against changed source
+files (anything under `src/` or `research/` in the diff) and emits a
+per-file `coverage_gaps` list with the actual uncovered line numbers
+and branch arcs. The correctness reviewer is instructed to turn each
+gap into a concrete test-case finding with `suggested_fix` containing
+the runnable test code -- not a description.
+
+The merge agent applies those test cases verbatim, so a single
+convergence round closes the loop: detect uncovered code -> write the
+test -> verify coverage rises -> pass the gate -> commit.
+
+Coverage target is configurable (default 100%) via `COVERAGE_TARGET`
+at the top of `scripts/review_preflight.py`. Set it to your project's
+policy. Per-file opt-out is the standard `# pragma: no cover`.
+
+## Mandatory CI gate
+
+The convergence loop (`scripts/review_until_converged.py`) enforces a
+four-step gate after the merge agent applies fixes. **All four must
+pass before commit**:
+
+1. `ruff check .`
+2. `ruff format --check .`
+3. `mypy scripts/` (or the project's target)
+4. `pytest tests/ -x -q`
+
+If any step fails, the loop stops without committing -- the round's
+`gate-output.txt` captures which step failed and why. Missing tools
+(e.g. mypy not installed in the venv) cause a graceful skip with a
+note rather than a failure, so the gate works in minimal environments.
+
+This closes the lint/type/test loop: no review can recommend a fix
+that breaks the gate without the loop catching it on the same round.
+
 ## Why four lenses?
 
 | Reviewer | Focus |
@@ -160,8 +204,9 @@ cp docs/ensemble-review.md .claude/agents/ensemble-review.md
 ### 2. Copy the scripts
 
 ```bash
-cp scripts/scrub_diff.py       your-project/scripts/
-cp scripts/review_preflight.py your-project/scripts/
+cp scripts/scrub_diff.py             your-project/scripts/
+cp scripts/review_preflight.py       your-project/scripts/
+cp scripts/review_until_converged.py your-project/scripts/   # optional, for the loop
 cp scripts/validate_review_results.py your-project/scripts/
 cp docs/ensemble_review_result_schema.json your-project/docs/
 ```
@@ -177,6 +222,20 @@ Edit `scripts/review_preflight.py` to set:
 Say any of:
 - "review this" or "quick review" -- quick mode (free, 2 subagents)
 - "full review" or "full ensemble review" -- full mode (4 reviewers)
+- "run until converged" -- convergence loop (full mode + merge agent +
+  mandatory gate, runs until no blocking findings remain)
+
+Or run the convergence loop directly from the shell:
+
+```bash
+python scripts/review_until_converged.py \
+    --repo /path/to/repo \
+    --max-rounds 5 \
+    --auto-commit
+```
+
+Each round writes `data/reviews/<round>/` with the diff, audit JSON,
+reviewer prompts/results, merge output, and `gate-output.txt`.
 
 ## Files
 
@@ -186,7 +245,8 @@ Say any of:
 | `docs/ENSEMBLE_REVIEW.md` | Detailed usage guide |
 | `docs/ensemble_review_result_schema.json` | Strict JSON schema for reviewer output |
 | `scripts/scrub_diff.py` | Stdin credential scrubber |
-| `scripts/review_preflight.py` | Deterministic pre-review audit |
+| `scripts/review_preflight.py` | Deterministic pre-review audit (now includes coverage-gap detection) |
+| `scripts/review_until_converged.py` | Convergence loop: review -> merge -> mandatory gate -> commit, until convergence |
 | `scripts/validate_review_results.py` | JSON schema validator |
 | `tests/test_review_scripts.py` | Test suite |
 

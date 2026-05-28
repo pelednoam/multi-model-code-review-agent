@@ -1,13 +1,14 @@
 # Multi-Model Code Review Agent
 
-A two-tier code review pipeline with a deterministic preflight audit:
+A code review pipeline that runs multiple frontier LLMs in parallel,
+each with a different review lens, preceded by a deterministic
+preflight audit. Three modes:
 
 - **Quick mode** (free): 2 Claude Code subagents with clean context.
   ~30 seconds. Use for every commit.
-- **Full mode** (paid): 4 parallel
-  [Hermes Agent](https://github.com/NousResearch/hermes-agent) sessions
-  across providers (Opus, GPT-5.5, Sonnet). ~5 minutes. Use for
-  pre-merge gates.
+- **Full mode** (free or paid): 4 parallel reviewers using native CLIs
+  (Claude Code, Codex, Gemini) or Hermes+Bedrock. ~3-5 minutes. Use
+  for pre-merge gates.
 
 Both modes run the same preflight audit and spec-contract review lens.
 Designed for codebases where static diff review alone misses contract
@@ -21,74 +22,57 @@ limitations that matter for high-stakes code:
 
 **Same model, same blind spots.** Claude Code and its subagents all run
 on the same model family. Every model has systematic blind spots shaped
-by its training data, architecture, and RLHF tuning. Running the same
-model twice doesn't find what it can't see. Running Opus, GPT-5.5, and
-Sonnet on the same diff surfaces findings that no single model catches
+by its training data and RLHF tuning. Running Opus, GPT-5.5, and
+Gemini on the same diff surfaces findings that no single model catches
 alone. In our testing, the spec-contract reviewer (Opus) caught manifest
 drift that the correctness reviewer (GPT-5.5) missed, while GPT-5.5
 caught dtype coercion bugs that Opus didn't flag.
 
 **Contaminated context.** When the dev agent reviews its own output, it
 has seen the implementation rationale, the rejected alternatives, and
-the conversation leading to each decision. It is structurally biased
-toward confirming its own choices. A reviewer with a clean context --
-seeing only the diff, the spec, and the audit output -- evaluates the
-code as a future reader would, not as the author.
+the conversation leading to each decision. A reviewer with a clean
+context -- seeing only the diff, the spec, and the audit output --
+evaluates the code as a future reader would, not as the author.
 
 **No separation of concerns.** The dev agent has write access, tool
 access, and conversational momentum. A review-only agent with read-only
-file access (`-t file`) and no terminal cannot accidentally fix what it
-finds, cannot be influenced by prior conversation, and cannot be
-prompted into leniency by the author's explanations. It can only report.
-
-**Single-model subagents don't solve this.** Claude Code's `Agent` tool
-spawns subagents on Anthropic models only (Opus, Sonnet, Haiku). You
-can't route a subagent to GPT-5.5 or Gemini. And even within Anthropic
-models, all subagents share the same training lineage -- they disagree
-on difficulty and detail level, not on fundamental reasoning patterns.
-True model diversity requires crossing provider boundaries.
+file access and no terminal cannot accidentally fix what it finds,
+cannot be influenced by prior conversation, and cannot be prompted into
+leniency by the author's explanations.
 
 **No artifact awareness.** A code review in the same session sees the
 diff but not the repo's signed manifests, artifact SHAs, or runtime
 state. This pipeline runs a deterministic preflight audit that
 machine-verifies manifest counts, feature dimensions, and artifact
-integrity _before_ any LLM runs. Every reviewer gets this audit as
-evidence, not inference. In our testing, this caught a 782-vs-662
-feature count mismatch that three rounds of same-session review missed.
+integrity _before_ any LLM runs. In our testing, this caught a
+782-vs-662 feature count mismatch that three rounds of same-session
+review missed.
 
 ### What this pipeline adds
 
-Full mode runs on three possible backends (Claude CLI, Codex CLI,
-Hermes+Bedrock). The capabilities differ:
-
-| Capability | Same-session | Quick mode | Full: CLIs only | Full: Hermes |
+| Capability | Same-session | Quick mode | Full: CLIs | Full: Hermes |
 |---|---|---|---|---|
 | Clean context | no | yes | yes | yes |
 | Deterministic preflight | no | yes | yes | yes |
 | Artifact/manifest audit | no | yes | yes | yes |
 | Per-reviewer attribution | no | 2 lenses | 4 lenses | 4 lenses |
-| Write isolation | no | no | yes (`--allowedTools`) | yes (`-t file`) |
+| Write isolation | no | no | `--allowedTools` | `-t file` |
 | Structured JSON schema | no | no | yes | yes |
 | Review packet persistence | no | no | yes | yes |
-| Cross-provider models | no | no | **only with Codex** | yes (any) |
-| Model diversity | no | no | Anthropic + OpenAI* | any provider |
+| Cross-provider models | no | no | with Codex+Gemini | any provider |
 | Cost | free | free | free | ~$5-40 |
 | Latency | instant | ~30s | ~3 min | ~5 min |
-
-*Cross-provider diversity requires Codex CLI. With only Claude CLI
-installed, all 4 reviewers are Anthropic models -- same model family
-as Claude Code subagents. The agent warns when running in single-
-provider mode. For maximum model diversity, use Hermes with providers
-like Bedrock, Codex OAuth, and Nous Portal.
 
 **When to use which:**
 - **Quick mode**: every commit, rapid iteration (free, 30s)
 - **Full mode with CLIs**: pre-merge gates when cost matters (free, 3min)
-- **Full mode with Hermes**: high-stakes changes where cross-provider
-  diversity is worth paying for, or FDA-path code where Bedrock's
+- **Full mode with Hermes**: high-stakes changes where Bedrock's
   data-at-rest guarantees matter
 
 ## Architecture
+
+Each reviewer runs as a **separate OS process** with clean context --
+no conversation history, no author bias.
 
 ```
 Claude Code
@@ -102,16 +86,39 @@ ensemble-review agent (docs/ensemble-review.md)
   |  3. build context bundle      (docs, manifests, specs)
   |
   |  QUICK MODE:                         FULL MODE:
-  |  Agent(opus, spec-contract)          hermes -z ... -m opus-4.6
-  |  Agent(sonnet, correctness)          codex exec (or hermes -m haiku)
-  |  (2 subagents, free)                 hermes -z ... -m sonnet-4.6
-  |                                      hermes -z ... -m opus-4.6
-  |                                      (4 sessions, paid)
+  |  Agent(opus, spec-contract)          R1: hermes opus  OR  claude -p opus
+  |  Agent(sonnet, correctness)          R2: codex exec   (GPT-5.5)
+  |  (2 subagents, free)                 R3: gemini       OR  claude -p sonnet
+  |                                      R4: hermes opus  OR  claude -p opus
+  |                                      (4 sessions, free or paid)
   |
   |  4. synthesize convergence report
   v
 User sees: preflight audit, blocking findings, convergence analysis
 ```
+
+### Full mode routing
+
+The agent auto-detects installed CLIs and picks the best backend for
+each reviewer. **Native CLIs are preferred** because each CLI manages
+its own auth reliably (no stale OAuth tokens), and they're free.
+Hermes is preferred for Anthropic models only when Bedrock isolation
+matters.
+
+| Reviewer | 1st choice | 2nd choice | 3rd choice |
+|---|---|---|---|
+| Security (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
+| Correctness | Codex CLI GPT-5.5 (free) | Hermes Haiku (Bedrock) | Claude CLI haiku (free) |
+| Readability | Gemini CLI (free) | Hermes Sonnet (Bedrock) | Claude CLI sonnet (free) |
+| Spec-contract (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
+
+**Why native CLIs over Hermes API proxying**: each CLI manages its own
+auth session. Hermes's OAuth proxying (e.g. Codex OAuth) can have
+stale tokens and intermittent failures. `codex exec` uses your ChatGPT
+subscription directly -- same as opening a new terminal tab.
+
+**With all CLIs installed** (claude + codex + gemini): the full review
+is free, 3 provider families (Anthropic + OpenAI + Google).
 
 ## Why four lenses?
 
@@ -132,9 +139,14 @@ behavior instead of specified behavior.
 
 **Quick mode** (free): just Claude Code. No additional setup.
 
-**Full mode** (paid): additionally requires:
-1. [Hermes Agent](https://github.com/NousResearch/hermes-agent) installed
-2. AWS Bedrock authenticated. Optional: Codex CLI for GPT-5.5 (uses ChatGPT subscription, no API credits)
+**Full mode**: at least `claude` or `hermes` must be installed for
+Anthropic reviewers. For cross-provider diversity, also install:
+- [Codex CLI](https://github.com/openai/codex) for GPT-5.5
+  (uses ChatGPT subscription, no API credits)
+- [Gemini CLI](https://www.npmjs.com/package/@google/gemini-cli) for
+  Gemini (uses Google AI Studio, free tier available)
+- [Hermes Agent](https://github.com/NousResearch/hermes-agent) +
+  AWS Bedrock for best isolation (data stays in your AWS account)
 
 ## Quick start
 
@@ -164,63 +176,63 @@ Edit `scripts/review_preflight.py` to set:
 
 Say any of:
 - "review this" or "quick review" -- quick mode (free, 2 subagents)
-- "full review" or "full ensemble review" -- full mode (paid, 4 Hermes sessions)
+- "full review" or "full ensemble review" -- full mode (4 reviewers)
 
 ## Files
 
 | File | Purpose |
 |---|---|
 | `docs/ensemble-review.md` | Claude Code agent definition |
-| `docs/ENSEMBLE_REVIEW.md` | Detailed usage guide and architecture |
+| `docs/ENSEMBLE_REVIEW.md` | Detailed usage guide |
 | `docs/ensemble_review_result_schema.json` | Strict JSON schema for reviewer output |
-| `scripts/scrub_diff.py` | Stdin credential scrubber (pipe, never writes raw to disk) |
+| `scripts/scrub_diff.py` | Stdin credential scrubber |
 | `scripts/review_preflight.py` | Deterministic pre-review audit |
-| `scripts/validate_review_results.py` | JSON schema validator using `jsonschema` |
-| `tests/test_review_scripts.py` | Test suite for all 3 scripts |
+| `scripts/validate_review_results.py` | JSON schema validator |
+| `tests/test_review_scripts.py` | Test suite (31 tests) |
 
 ## Key design decisions
 
-- **Claude Code orchestrates, not Hermes delegation**: Hermes `delegate_task`
-  cannot route children to different models. Claude Code spawns 4 parallel
-  `hermes -z` processes instead.
-- **Secrets never touch disk**: `scrub_diff.py` reads from stdin via pipe.
+- **Native CLIs preferred over API proxying**: `codex exec` manages
+  its own ChatGPT auth reliably; `claude -p` manages Anthropic auth;
+  `gemini` manages Google auth. Hermes API proxying (e.g. Codex OAuth)
+  has intermittent token expiry issues. Use native CLIs by default,
+  Hermes only when you need Bedrock isolation.
+- **Claude Code orchestrates**: Hermes `delegate_task` cannot route
+  children to different models. Claude Code spawns parallel processes.
+- **Secrets never touch disk**: `scrub_diff.py` reads stdin via pipe.
   Exits non-zero on redaction, blocking the review until secrets are
-  removed from the branch and rotated.
-- **Evidence-based convergence**: a single finding with concrete artifact
-  evidence is high-priority even if only one reviewer flags it. Inferred
-  findings from one reviewer with no evidence are lower priority.
-- **Strict schema**: `additionalProperties: false` at both top and finding
-  levels. Validator uses `jsonschema.Draft202012Validator`.
-- **Private temp directory**: `mktemp -d` instead of world-readable `/tmp/`.
-- **Review packets persisted**: diff, context, audit, prompts, raw results,
-  and report saved to `data/reviews/` for reproducibility.
+  removed and rotated.
+- **Evidence-based convergence**: a single finding with artifact
+  evidence is high-priority even if only one reviewer flags it.
+- **Strict schema**: `additionalProperties: false` at both levels.
+  Extracted JSON is validated for required keys before writing.
+- **Private temp directory**: `mktemp -d`, not world-readable `/tmp/`.
+
+## Privacy and isolation
+
+| Backend | Data path | Isolation | Cost |
+|---|---|---|---|
+| Hermes+Bedrock | Your AWS account | Best (`-t file`) | Bedrock pricing |
+| Claude CLI | Anthropic infrastructure | Good (`--allowedTools`) | Claude subscription |
+| Codex CLI | OpenAI infrastructure | Good (sandbox) | ChatGPT subscription |
+| Gemini CLI | Google infrastructure | Good (`--approval-mode plan`) | AI Studio free tier |
+
+For sensitive/FDA-path code where data-at-rest guarantees matter, use
+Hermes+Bedrock for all reviewers.
 
 ## Customization
 
 ### Add/remove review lenses
 
-Edit the agent definition to add a 5th reviewer or remove one. The JSON
-schema accepts any string for the `reviewer` field -- no enum constraint.
-
-### Change models
-
-Update the `-m` and `--provider` flags in the agent's step 6. Verified
-working combinations:
-
-| Model | Hermes flags |
-|---|---|
-| Claude Opus 4.6 | `-m us.anthropic.claude-opus-4-6-v1 --provider bedrock` |
-| Claude Opus 4.7 | `-m us.anthropic.claude-opus-4-7 --provider bedrock` |
-| GPT-5.5 (via Codex CLI) | `codex exec -o result.json "prompt"` (auto-detected) |
-| Claude Sonnet 4.6 | `-m us.anthropic.claude-sonnet-4-6 --provider bedrock` |
-| Gemini 3.1 Pro | `-m google/gemini-3.1-pro-preview --provider nous` |
-| Grok 4.3 | `-m x-ai/grok-4.3 --provider nous` |
+Edit the agent definition. The JSON schema accepts any string for the
+`reviewer` field -- no enum constraint.
 
 ### Add credential patterns
 
-Edit `CREDENTIAL_PATTERNS` in `scripts/scrub_diff.py`. Current coverage:
-API keys, passwords, tokens, private keys, AWS keys, OpenAI keys, GitHub
-PATs, GitLab tokens, GCP service accounts, Azure connection strings.
+Edit `CREDENTIAL_PATTERNS` in `scripts/scrub_diff.py`. Current
+coverage: API keys, passwords, tokens, private keys, AWS keys, OpenAI
+keys, GitHub PATs, GitLab tokens, GCP service accounts, Azure
+connection strings.
 
 ## License
 

@@ -471,6 +471,9 @@ def commit_and_push(round_num: int, n_fixes: int, repo: Path) -> bool:
 
 def main() -> int:
     """CLI entry point."""
+    # Force line-buffered stdout so progress is visible when output
+    # is redirected to a file or pipe (e.g. background invocations).
+    sys.stdout.reconfigure(line_buffering=True)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", type=Path, default=REPO_ROOT)
     parser.add_argument("--max-rounds", type=int, default=5)

@@ -561,40 +561,7 @@ After the merge agent returns:
 - Run the test suite: `pytest tests/ -x -q`
 - Run lint: `ruff check . && ruff format --check .`
 - If tests or lint fail, report which fix likely caused it
-- If tests and lint pass, ask the user: "Tests pass. Commit and push?"
-- If the reviewed code also lives in another repo (e.g. the project
-  repo has copies at `docs/agents/`, `scripts/`, etc.), sync the
-  fixed files there too
-
-### Syncing fixes to other repos
-
-If the reviewed files exist in multiple locations (e.g. a standalone
-public repo AND a project repo), the orchestrator should:
-
-1. After committing to the current repo, identify which fixed files
-   also exist in the other repo
-2. Copy the fixed files to the corresponding paths in the other repo
-3. Commit and push there too
-4. Report both commits to the user
-
-For example, if the public repo at `/tmp/multi-model-code-review-agent`
-was reviewed and fixes were applied, sync the changed files back to the
-project repo:
-
-```bash
-# Copy fixed files to the project repo
-cp scripts/scrub_diff.py       $PROJECT_REPO/scripts/
-cp scripts/review_preflight.py $PROJECT_REPO/scripts/
-cp docs/ensemble-review.md     $PROJECT_REPO/docs/agents/
-
-# Commit and push the project repo
-cd $PROJECT_REPO
-git add scripts/ docs/agents/
-git commit -m "Sync review fixes from public repo"
-git push
-```
-
-This keeps both repos in sync without manual copy-paste.
+- If tests and lint pass, commit and push to the current repo
 
 ### Why a merge subagent instead of applying directly?
 

@@ -337,6 +337,153 @@ Say any of:
 - "run until converged" -- convergence loop, see [The convergence
   loop](#the-convergence-loop-external-loop) for details
 
+## Example: input and output
+
+To show what the loop actually consumes and produces, here's a small
+end-to-end example.
+
+### Input: the diff under review
+
+```diff
+diff --git a/src/utils/parse_duration.py b/src/utils/parse_duration.py
+new file mode 100644
+--- /dev/null
++++ b/src/utils/parse_duration.py
+@@ -0,0 +1,12 @@
++def parse_duration(text: str) -> int:
++    """Parse a duration like '5m' or '2h' into seconds."""
++    unit = text[-1]
++    value = int(text[:-1])
++    if unit == "s":
++        return value
++    if unit == "m":
++        return value * 60
++    if unit == "h":
++        return value * 60 * 60
++    return value
+```
+
+The author added a new function but no test file.
+
+### Step 1: preflight audit (excerpt of `audit.json`)
+
+```json
+{
+  "timestamp": "2026-05-28T12:04:11Z",
+  "git": {
+    "branch": "feature/duration-parser",
+    "commit": "a1b2c3d4e5f6",
+    "changed_vs_main": ["src/utils/parse_duration.py"]
+  },
+  "suspicious_patterns": [],
+  "coverage_target_pct": 100,
+  "coverage_gaps": [
+    {
+      "file": "src/utils/parse_duration.py",
+      "percent_covered": 0.0,
+      "n_statements": 8,
+      "n_missing": 8,
+      "uncovered_lines": [1, 2, 3, 4, 5, 6, 7, 8],
+      "uncovered_branches": [[5, 6], [7, 8], [9, 10], [11, 12]]
+    }
+  ],
+  "coverage_warnings": [],
+  "n_warnings": 1
+}
+```
+
+The audit flags `parse_duration.py` as 0% covered with eight statements
+and four uncovered branch arcs. No tests exist for the new code.
+
+### Step 2: a correctness reviewer finding (excerpt of `result-2.json`)
+
+The correctness reviewer (GPT-5.5) reads the audit, sees the coverage
+gap, and emits a finding with runnable test code:
+
+```json
+{
+  "reviewer": "correctness",
+  "model": "gpt-5.5-codex",
+  "findings": [
+    {
+      "severity": "warning",
+      "confidence": "high",
+      "category": "test",
+      "file": "tests/utils/test_parse_duration.py",
+      "line": null,
+      "issue": "parse_duration has 0% test coverage; missing tests for the 4 unit branches and the fallthrough case",
+      "rationale": "audit.coverage_gaps shows src/utils/parse_duration.py at 0.0% with 8 uncovered statements and uncovered branches at lines (5,6), (7,8), (9,10), (11,12). The fallthrough on line 12 silently returns the raw value for unknown units, which is almost certainly a bug rather than intended behavior.",
+      "observed_or_inferred": "observed_in_audit",
+      "blocking": true,
+      "suggested_fix": "Create tests/utils/test_parse_duration.py:\n\nimport pytest\nfrom src.utils.parse_duration import parse_duration\n\ndef test_seconds(): assert parse_duration('5s') == 5\ndef test_minutes(): assert parse_duration('5m') == 300\ndef test_hours(): assert parse_duration('2h') == 7200\ndef test_unknown_unit_raises():\n    with pytest.raises(ValueError):\n        parse_duration('5d')\n\nAlso change parse_duration to raise ValueError on unknown units instead of silently returning the raw int.",
+      "repro_command": "pytest --cov=src/utils/parse_duration --cov-branch",
+      "contract_reference": null
+    }
+  ],
+  "overall_assessment": "One blocking coverage gap. The fallthrough on line 12 also reveals a latent bug -- a corrected version should raise on unknown units."
+}
+```
+
+The spec-contract reviewer and security reviewer return zero findings;
+the readability reviewer suggests a minor docstring expansion (a
+non-blocking `suggestion`).
+
+### Step 3: the merge agent applies the fix
+
+The merge agent (a separate Claude Code session, clean context) sees
+the one blocking finding and applies its `suggested_fix` verbatim:
+
+- Creates `tests/utils/test_parse_duration.py` with four tests
+- Edits `src/utils/parse_duration.py` to raise `ValueError` on unknown units
+
+It writes `merge-output.json`:
+
+```json
+{
+  "fixes_applied": 1,
+  "fixes_skipped": 0,
+  "files_changed": [
+    "src/utils/parse_duration.py",
+    "tests/utils/test_parse_duration.py"
+  ]
+}
+```
+
+### Step 4: the mandatory gate (excerpt of `gate-output.txt`)
+
+```
+=== ruff check ===
+All checks passed!
+
+=== ruff format --check ===
+2 files already formatted
+
+=== mypy ===
+Success: no issues found in 1 source file
+
+=== pytest ===
+tests/utils/test_parse_duration.py ....                              [100%]
+4 passed in 0.04s
+```
+
+All four steps pass. The loop commits and proceeds to round 2.
+
+### Step 5: round 2 confirms convergence
+
+Round 2 re-runs the full pipeline against the new HEAD. The audit now
+shows `coverage_gaps: []` (100% covered) and reviewers return only
+suggestions. The loop terminates with exit code 0:
+
+```
+ROUND 2: 0 blocking, 1 suggestion
+CONVERGED -- no blocking findings remain.
+```
+
+If round 2 had returned the **same** blocking finding as round 1 (e.g.
+the merge agent silently failed to apply the fix), the loop would
+have detected it via fingerprint matching and exited with code 2
+("stuck") instead of looping forever.
+
 ## Files
 
 | File | Purpose |

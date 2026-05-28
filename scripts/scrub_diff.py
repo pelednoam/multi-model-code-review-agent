@@ -55,17 +55,18 @@ def _is_safe_file(diff_header: str) -> bool:
     """Check if a diff --git header names a safe file.
 
     Parses both the a/ and b/ paths from the header and checks
-    whether either (stripped of the a/ or b/ prefix) is in the
-    safe-file set.
+    that BOTH (stripped of the a/ or b/ prefix) are in the
+    safe-file set. This prevents rename-based bypass where one
+    side is a safe file but the other is attacker-controlled.
     """
     parts = diff_header.split()
+    ab_paths = []
     for part in parts:
-        stripped = part
-        if stripped.startswith("a/") or stripped.startswith("b/"):
-            stripped = stripped[2:]
-        if stripped in _SCRUBBER_SAFE_FILES:
-            return True
-    return False
+        if part.startswith("a/") or part.startswith("b/"):
+            ab_paths.append(part[2:])
+    if not ab_paths:
+        return False
+    return all(p in _SCRUBBER_SAFE_FILES for p in ab_paths)
 
 
 def _is_intentional_fixture_line(line: str) -> bool:

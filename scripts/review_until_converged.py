@@ -212,10 +212,14 @@ def launch_reviewers(
             result_path = round_dir / f"result-{i}.json"
             cmd = ["codex", "exec", "-o", str(result_path), "-"]
         elif i == 2 and backends["hermes"]:
+            # The prompt was already built with the codex model label;
+            # rebuild with correct label for hermes haiku fallback
+            prompt = build_reviewer_prompt(lens, focus, rv, 'claude-haiku-4.5', diff, audit, context)
+            prompt_path.write_text(prompt)
             cmd = [
                 "hermes",
                 "-z",
-                prompt,
+                f"@{prompt_path}",
                 "-m",
                 "us.anthropic.claude-haiku-4-5-20251001-v1:0",
                 "--provider",
@@ -227,12 +231,16 @@ def launch_reviewers(
         elif i == 3 and backends["gemini"]:
             cmd = ["gemini", "--approval-mode", "plan", "--skip-trust"]
         elif i == 3 and backends["hermes"]:
+            # The prompt was already built with the gemini model label;
+            # rebuild with correct label for hermes sonnet fallback
+            prompt = build_reviewer_prompt(lens, focus, rv, 'claude-sonnet-4.6', diff, audit, context)
+            prompt_path.write_text(prompt)
             cmd = [
                 "hermes",
                 "-z",
-                prompt,
+                f"@{prompt_path}",
                 "-m",
-                "us.anthropic.claude-sonnet-4-6",
+                "us.anthropic.claude-sonnet-4-6-v1",
                 "--provider",
                 "bedrock",
                 "-t",
@@ -279,6 +287,19 @@ def launch_reviewers(
             err_f.close()
 
 
+def validate_result(d: object, i: int, expected_reviewers: dict[int, str]) -> dict | None:
+    """Validate result dict has required keys and a findings list. Pin reviewer ID."""
+    if not isinstance(d, dict):
+        return None
+    required = {"reviewer", "model", "findings", "overall_assessment"}
+    if not required.issubset(d.keys()):
+        return None
+    d["reviewer"] = expected_reviewers[i]
+    if not isinstance(d["findings"], list):
+        return None
+    return d
+
+
 def extract_results(round_dir: Path) -> list[dict | None]:
     """Extract and validate result JSON from each reviewer's output."""
     # Expected reviewer IDs for each slot, used to prevent spoofing
@@ -293,8 +314,11 @@ def extract_results(round_dir: Path) -> list[dict | None]:
         result_path = round_dir / f"result-{i}.json"
         if result_path.exists():
             try:
-                results.append(json.loads(result_path.read_text()))
-                continue
+                d = json.loads(result_path.read_text())
+                d = validate_result(d, i, expected_reviewers)
+                if d is not None:
+                    results.append(d)
+                    continue
             except (json.JSONDecodeError, OSError):
                 pass
         raw_path = round_dir / f"raw-{i}.txt"
@@ -315,15 +339,8 @@ def extract_results(round_dir: Path) -> list[dict | None]:
             continue
         try:
             d = json.loads(text[start : end + 1])
-            required = {"reviewer", "model", "findings", "overall_assessment"}
-            if required.issubset(d.keys()):
-                # Pin reviewer identity to prevent a model from spoofing
-                # another reviewer's slot
-                d["reviewer"] = expected_reviewers[i]
-                # Validate findings is actually a list
-                if not isinstance(d["findings"], list):
-                    results.append(None)
-                    continue
+            d = validate_result(d, i, expected_reviewers)
+            if d is not None:
                 with open(result_path, "w") as f:
                     json.dump(d, f, indent=2)
                 results.append(d)
@@ -341,6 +358,8 @@ def collect_blocking_findings(results: list[dict | None]) -> list[dict]:
         if r is None:
             continue
         for f in r.get("findings", []):
+            if not isinstance(f, dict):
+                continue
             if f.get("blocking", False) or f.get("severity") == "critical":
                 blocking.append({**f, "_reviewer": r.get("reviewer", "?")})
     return blocking
@@ -505,7 +524,7 @@ def main() -> int:
             return 7
 
         blocking = collect_blocking_findings(results)
-        print(f"Blocking findings: {len(blocking)} (critical+warning)")
+        print(f"Blocking findings: {len(blocking)} (blocking=true or critical)")
 
         if not blocking:
             print("\nCONVERGED: only suggestions remain.")
@@ -521,37 +540,16 @@ def main() -> int:
             print(f"  New: {len(new_findings)}, Repeated: {len(repeat_findings)}")
         previous_fp = current_fp
 
-        pre_status = _run(["git", "status", "--porcelain"], cwd=repo)
-        if pre_status.stdout.strip():
-            stash_label = f"review-loop-round-{round_num}"
-            stash = _run(
-                ["git", "stash", "push", "--include-untracked", "-m", stash_label],
-                cwd=repo,
-            )
-            stashed = stash.returncode == 0 and "No local changes" not in stash.stdout
-        else:
-            stashed = False
-
         ok = apply_fixes(blocking, round_dir, backends, repo)
         if not ok:
             print("\nMerge agent failed -- stopping.")
-            if stashed:
-                _run(["git", "reset", "--hard", "HEAD"], cwd=repo)
-                _run(["git", "clean", "-fd"], cwd=repo)
-                _run(["git", "stash", "pop"], cwd=repo)
             return 3
 
         tests_ok, test_output = run_tests(repo)
         (round_dir / "test-output.txt").write_text(test_output)
         if not tests_ok:
-            print("\nTests failed after fixes. Rolling back.")
-            _run(["git", "reset", "--hard", "HEAD"], cwd=repo)
-            _run(["git", "clean", "-fd"], cwd=repo)
-            if stashed:
-                _run(["git", "stash", "pop"], cwd=repo)
+            print("\nTests failed after fixes -- stopping without destructive reset.")
             return 4
-        if stashed:
-            _run(["git", "stash", "drop"], cwd=repo)
         print("Tests pass.")
 
         if args.auto_commit:

@@ -68,6 +68,47 @@ def _is_safe_file(diff_header: str) -> bool:
     return False
 
 
+def _is_intentional_fixture_line(line: str) -> bool:
+    """Lines containing regex patterns or test credential fixtures.
+
+    Used to narrow the safe-file bypass so that only lines that look
+    like intentional pattern definitions or fixture strings pass
+    through unscrubbed. Any other line in a "safe" file is still
+    scrubbed normally, so accidentally committed real secrets are
+    still caught.
+    """
+    return (
+        "re.compile(" in line
+        or "+API_KEY" in line
+        or "+password" in line
+        or "+secret" in line
+        or "+token" in line
+        or "+sk-" in line
+        or "+AKIA" in line
+        or "+ghp_" in line
+        or "+gho_" in line
+        or "+glpat-" in line
+        or "+-----BEGIN" in line
+        or '"type": "service_account"' in line
+    )
+
+
+def _redact_preserving_prefix(line: str) -> str:
+    """Return the redaction marker with the diff prefix preserved.
+
+    The diff prefix (``+``, ``-``, or `` ``) is preserved so that the
+    resulting patch remains syntactically valid. Lines that are not
+    hunk body lines (e.g. headers like ``diff --git`` already filtered
+    by the caller) pass through unchanged.
+    """
+    if not line:
+        return _REDACTED_LINE
+    prefix = line[0]
+    if prefix in ("+", "-", " "):
+        return f"{prefix}{REDACTED}\n"
+    return _REDACTED_LINE
+
+
 def scrub_line(line: str, in_safe_file: bool) -> str:
     """Replace a line with a redaction marker if it matches any pattern.
 
@@ -76,15 +117,19 @@ def scrub_line(line: str, in_safe_file: bool) -> str:
         in_safe_file: If True, this line is part of a safe file
             (the scrubber itself or its test suite) that contains
             credential patterns as string literals, not real secrets.
+            Only lines matching :func:`_is_intentional_fixture_line`
+            bypass scrubbing in safe files.
 
     Returns:
-        The original line, or the REDACTED marker.
+        The original line, or a redaction marker that preserves the
+        diff prefix (``+``, ``-``, or `` ``) so the patch remains
+        syntactically valid.
     """
-    if in_safe_file:
+    if in_safe_file and _is_intentional_fixture_line(line):
         return line
     for pattern in CREDENTIAL_PATTERNS:
         if pattern.search(line):
-            return _REDACTED_LINE
+            return _redact_preserving_prefix(line)
     return line
 
 
@@ -99,7 +144,7 @@ def main() -> None:
 
         clean = scrub_line(line, in_safe)
         sys.stdout.write(clean)
-        if clean == _REDACTED_LINE:
+        if clean != line and REDACTED in clean:
             n_redacted += 1
 
     if n_redacted > 0:

@@ -410,7 +410,8 @@ required = {'reviewer', 'model', 'findings', 'overall_assessment'}
 if not required.issubset(d.keys()):
     print(f'Missing keys: {required - set(d.keys())}', file=sys.stderr)
     sys.exit(1)
-json.dump(d, open(sys.argv[2], 'w'), indent=2)
+with open(sys.argv[2], 'w') as out:
+    json.dump(d, out, indent=2)
 " "$1" "$2" 2>"$REVIEW_TMP/extract-$(basename "$2" .json).err"
 }
 
@@ -428,10 +429,11 @@ for num in 1 2 3 4; do
   if [ ! -f "$result" ]; then
     python3 -c "
 import json, sys
-json.dump({
-    'reviewer': 'unknown', 'model': 'unknown', 'findings': [],
-    'overall_assessment': 'Reviewer ' + sys.argv[2] + ' failed: no parseable JSON output. Check extract-result-' + sys.argv[2] + '.err and stderr-' + sys.argv[2] + '.txt.'
-}, open(sys.argv[1], 'w'), indent=2)
+with open(sys.argv[1], 'w') as out:
+    json.dump({
+        'reviewer': 'unknown', 'model': 'unknown', 'findings': [],
+        'overall_assessment': 'Reviewer ' + sys.argv[2] + ' failed: no parseable JSON output. Check extract-result-' + sys.argv[2] + '.err and stderr-' + sys.argv[2] + '.txt.'
+    }, out, indent=2)
 " "$result" "$num"
     echo "WARNING: Reviewer $num produced no parseable output"
   fi
@@ -586,10 +588,6 @@ mechanically without second-guessing the reviewer.
 - If no CLIs are installed (no claude, codex, or hermes): abort full mode, suggest quick mode
 - If a reviewer crashes or times out: report failure, present remaining results
 - If the preflight script is missing: warn and proceed without audit (degraded mode)
-
-# Model configuration (full mode)
-
-See the priority table in the "CLI and provider detection" section above. Both tables are identical.
 
 # Privacy and isolation
 

@@ -35,10 +35,10 @@ ensemble-review agent (docs/ensemble-review.md)
   |  3. run scripts/review_preflight.py --> runtime-audit.json
   |  4. build repo-aware context bundle (docs, manifests, specs)
   |
-  |-- hermes -z <security prompt>       -m opus-4.6    --provider bedrock      --> result-1.json
-  |-- hermes -z <correctness prompt>    -m gpt-5.5     --provider openai-codex --> result-2.json
-  |-- hermes -z <readability prompt>    -m sonnet-4.6   --provider bedrock     --> result-3.json
-  |-- hermes -z <spec-contract prompt>  -m opus-4.6    --provider bedrock      --> result-4.json
+  |-- hermes opus (Bedrock) OR claude -p opus           --> result-1.json (security)
+  |-- codex exec (GPT-5.5) OR hermes haiku              --> result-2.json (correctness)
+  |-- gemini -p (Gemini) OR hermes sonnet OR claude -p  --> result-3.json (readability)
+  |-- hermes opus (Bedrock) OR claude -p opus           --> result-4.json (spec-contract)
   |   (all four run IN PARALLEL, 10min timeout each)
   |
   |  5. validate results against JSON schema
@@ -50,12 +50,12 @@ User sees: preflight audit, blocking findings, grouped criticals/warnings, conve
 
 ## Review lenses
 
-| Reviewer | Model | Focus |
+| Reviewer | Routing chain | Focus |
 |---|---|---|
-| Security & robustness | Claude Opus 4.6 (Bedrock) | Injection, auth, unsafe deserialization, secrets, race conditions, swallowed exceptions |
-| Correctness & edge cases | GPT-5.5 (Codex OAuth) | Off-by-one, null paths, shape mismatches, contract violations, logic errors, missing coverage |
-| Readability & performance | Claude Sonnet 4.6 (Bedrock) | Naming, function length, abstraction leaks, dead code, N+1 I/O, memory growth |
-| Spec-contract compliance | Claude Opus 4.6 (Bedrock) | Code vs signed artifacts, manifest drift, feature count mismatches, fallback/zero-fill that changes cohorts |
+| Security & robustness | Opus via Hermes/Bedrock (preferred) OR Claude CLI | Injection, auth, unsafe deserialization, secrets, race conditions, swallowed exceptions |
+| Correctness & edge cases | GPT-5.5 via Codex CLI (preferred) OR Haiku via Hermes/Claude CLI | Off-by-one, null paths, shape mismatches, contract violations, logic errors, missing coverage |
+| Readability & performance | Gemini CLI (preferred) OR Sonnet via Hermes/Claude CLI | Naming, function length, abstraction leaks, dead code, N+1 I/O, memory growth |
+| Spec-contract compliance | Opus via Hermes/Bedrock (preferred) OR Claude CLI | Code vs signed artifacts, manifest drift, feature count mismatches, fallback/zero-fill that changes cohorts |
 
 ## Runtime audit inputs
 

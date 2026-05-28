@@ -235,8 +235,12 @@ def collect_changed_artifacts(
     return artifacts
 
 
-def _safe_read_json(path: Path) -> dict | None:
-    """Read and parse a JSON file, returning None on failure."""
+def _safe_read_json(path: Path) -> Any | None:
+    """Read and parse a JSON file, returning None on failure.
+
+    Returns whatever the JSON document decodes to (dict, list, scalar);
+    callers must check the type before using it.
+    """
     try:
         return json.loads(path.read_text())
     except (json.JSONDecodeError, OSError):
@@ -260,6 +264,14 @@ def audit_signed_manifests() -> list[dict[str, Any]]:
             results.append({
                 "manifest": name,
                 "warning": "failed to parse JSON",
+            })
+            continue
+        if not isinstance(data, dict):
+            results.append({
+                "manifest": name,
+                "warning": (
+                    f"not a JSON object (got {type(data).__name__})"
+                ),
             })
             continue
         entry: dict[str, Any] = {

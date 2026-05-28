@@ -514,27 +514,72 @@ After presenting the report, ask the user:
 > Options: (1) apply all non-blocking fixes, (2) let me pick which
 > to apply, (3) don't apply any -- I'll do it manually."
 
-**When the user chooses to apply fixes**:
+**When the user chooses to apply fixes**, spawn a **merge subagent**
+with clean context. Do NOT apply fixes yourself -- your dev context
+is contaminated. The merge agent sees only the code and the patches.
 
-- Use the REVIEWER'S suggested_fix verbatim, not your own
-  interpretation. The reviewer had clean context; you (the
-  orchestrator) have contaminated dev context. The reviewer's
-  fix is more trustworthy.
-- For each fix, show the before/after diff and the reviewer
-  attribution before applying.
-- If multiple reviewers suggested different fixes for the same
-  issue, present all alternatives and ask which to apply.
-- After applying, re-run the test suite to verify.
-- If a reviewer's fix doesn't apply cleanly (wrong line numbers,
-  stale context), tell the user rather than guessing.
+### Merge subagent
 
-**What NOT to do**:
+Spawn a single Agent with `model: "opus"` (or `"sonnet"` for speed).
+The merge agent gets:
 
-- Do NOT rewrite or "improve" the reviewer's fix using your own
-  context. Apply it as-is or ask the user.
-- Do NOT auto-apply blocking/critical fixes without confirmation.
-- Do NOT merge conflicting fixes from different reviewers without
-  asking.
+1. The list of selected findings with their `suggested_fix` fields
+2. The current content of each affected file (read via Read tool)
+3. NO dev conversation history, NO review rationale, NO audit data
+
+Prompt:
+
+```
+You are a code merge agent. You have NOT seen the development
+conversation or the review discussion. You are given a set of
+concrete code fixes from independent reviewers. Apply them.
+
+Here are the fixes to apply:
+
+<for each selected finding, include:>
+Fix N (from <reviewer> reviewer):
+  File: <file path>
+  Issue: <one-line issue>
+  Suggested fix: <the reviewer's suggested_fix verbatim>
+</for each>
+
+Instructions:
+- Read each affected file using the Read tool
+- Apply each fix as described. Use the reviewer's code verbatim
+  where possible. Do NOT rewrite or "improve" fixes using your
+  own judgment -- the reviewer had clean context, trust their fix.
+- If two fixes touch the same lines, apply them in order and
+  note any conflicts.
+- If a fix doesn't apply cleanly (wrong line numbers, code has
+  changed), report which fix failed and why. Do NOT guess.
+- After all fixes are applied, report what changed.
+```
+
+After the merge agent returns:
+
+- Show the user what was changed (file-by-file summary)
+- Run the test suite: `pytest tests/ -x -q`
+- Run lint: `ruff check . && ruff format --check .`
+- If tests or lint fail, report which fix likely caused it
+- Do NOT commit -- let the user review and commit
+
+### Why a merge subagent instead of applying directly?
+
+The orchestrator (you) has seen the entire dev conversation: the
+implementation rationale, the rejected alternatives, the author's
+intent. This creates bias -- you might "improve" a reviewer's fix
+based on context the reviewer deliberately didn't have. The merge
+agent sees only the code and the patches, so it applies them
+mechanically without second-guessing the reviewer.
+
+### When NOT to use the merge agent
+
+- If only 1-2 trivial fixes (e.g. typos, import order), applying
+  directly is fine -- no need for a separate agent.
+- If the user says "I'll fix it manually", skip the agent.
+- If the fixes require architectural decisions (e.g. "restructure
+  this function"), the merge agent can't make that call -- present
+  the options and let the user decide.
 
 # Error handling
 

@@ -373,7 +373,7 @@ fi
 if $HAS_GEMINI; then
   launch_cli 3 gemini "$REVIEW_TMP/prompt-3.txt"
 elif $HAS_HERMES; then
-  launch_hermes 3 us.anthropic.claude-sonnet-4-6 "$REVIEW_TMP/prompt-3.txt"
+  launch_hermes 3 us.anthropic.claude-sonnet-4-6-v1 "$REVIEW_TMP/prompt-3.txt"
 else
   launch_cli 3 claude-sonnet "$REVIEW_TMP/prompt-3.txt"
 fi

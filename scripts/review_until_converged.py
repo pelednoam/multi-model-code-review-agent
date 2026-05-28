@@ -4,7 +4,7 @@ Each round: preflight audit + 4 parallel reviewers + merge agent + tests.
 Stops when:
   - Only suggestions remain (converged)
   - Same blocking findings appear twice in a row (stuck)
-  - Tests fail after fixes (regression -- rolls back)
+  - Tests fail after fixes (regression -- stops without rollback)
   - Max rounds reached
 
 Usage:
@@ -231,10 +231,8 @@ def launch_reviewers(
         elif i == 3 and backends["gemini"]:
             cmd = ["gemini", "--approval-mode", "plan", "--skip-trust"]
         elif i == 3 and backends["hermes"]:
-            # The prompt was already built with the gemini model label;
-            # rebuild with correct label for hermes sonnet fallback
-            prompt = build_reviewer_prompt(lens, focus, rv, 'claude-sonnet-4.6', diff, audit, context)
-            prompt_path.write_text(prompt)
+            # Slot 3 uses gemini by preference; this hermes fallback
+            # reuses the same prompt (model_label already correct).
             cmd = [
                 "hermes",
                 "-z",
@@ -296,6 +294,8 @@ def validate_result(d: object, i: int, expected_reviewers: dict[int, str]) -> di
         return None
     d["reviewer"] = expected_reviewers[i]
     if not isinstance(d["findings"], list):
+        return None
+    if not all(isinstance(f, dict) for f in d["findings"]):
         return None
     return d
 

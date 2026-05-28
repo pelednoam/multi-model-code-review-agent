@@ -28,11 +28,7 @@ class TestScrubDiff:
         return result.stdout, result.stderr, result.returncode
 
     def test_clean_diff_passes_through(self) -> None:
-        diff = (
-            "diff --git a/foo.py b/foo.py\n"
-            "+def hello():\n"
-            "+    pass\n"
-        )
+        diff = "diff --git a/foo.py b/foo.py\n+def hello():\n+    pass\n"
         stdout, stderr, code = self._run_scrub(diff)
         assert stdout == diff
         assert code == 0
@@ -176,9 +172,7 @@ class TestReviewPreflight:
         assert isinstance(audit["git"]["branch"], str)
         assert isinstance(audit["git"]["commit"], str)
 
-    def test_output_has_required_sections(
-        self, tmp_path: Path
-    ) -> None:
+    def test_output_has_required_sections(self, tmp_path: Path) -> None:
         audit, _ = self._run_preflight(tmp_path)
         required = {
             "timestamp",
@@ -188,13 +182,17 @@ class TestReviewPreflight:
             "changed_artifacts",
             "suspicious_patterns",
             "test_coverage_alignment",
+            "coverage_gaps",
+            "coverage_warnings",
+            "coverage_target_pct",
             "n_warnings",
         }
         assert required <= set(audit.keys())
+        assert isinstance(audit["coverage_gaps"], list)
+        assert isinstance(audit["coverage_warnings"], list)
+        assert isinstance(audit["coverage_target_pct"], int)
 
-    def test_git_command_warnings_populated_on_bad_remote(
-        self, tmp_path: Path
-    ) -> None:
+    def test_git_command_warnings_populated_on_bad_remote(self, tmp_path: Path) -> None:
         from scripts.review_preflight import _run_git
 
         warnings: list[str] = []
@@ -220,9 +218,7 @@ class TestReviewPreflight:
         try:
             SIGNED_MANIFESTS["test_missing"] = "nonexistent.json"
             results = audit_signed_manifests()
-            missing = [
-                r for r in results if r["manifest"] == "test_missing"
-            ]
+            missing = [r for r in results if r["manifest"] == "test_missing"]
             assert len(missing) == 1
             assert "warning" in missing[0]
             assert "missing" in missing[0]["warning"]
@@ -267,9 +263,7 @@ class TestValidateReviewResults:
         assert proc.returncode == 0
         assert "PASS" in proc.stdout
 
-    def test_rejects_extra_top_level_field(
-        self, tmp_path: Path
-    ) -> None:
+    def test_rejects_extra_top_level_field(self, tmp_path: Path) -> None:
         data = self._make_valid_result()
         data["extra"] = True
         result_path = tmp_path / "result.json"
@@ -283,9 +277,7 @@ class TestValidateReviewResults:
         assert proc.returncode == 1
         assert "Additional properties" in proc.stdout
 
-    def test_rejects_extra_finding_field(
-        self, tmp_path: Path
-    ) -> None:
+    def test_rejects_extra_finding_field(self, tmp_path: Path) -> None:
         data = self._make_valid_result()
         data["findings"][0]["extra_field"] = "bad"
         result_path = tmp_path / "result.json"
@@ -312,9 +304,7 @@ class TestValidateReviewResults:
         )
         assert proc.returncode == 1
 
-    def test_allows_null_optional_fields(
-        self, tmp_path: Path
-    ) -> None:
+    def test_allows_null_optional_fields(self, tmp_path: Path) -> None:
         data = self._make_valid_result()
         data["findings"][0]["repro_command"] = None
         data["findings"][0]["contract_reference"] = None
@@ -328,9 +318,7 @@ class TestValidateReviewResults:
         )
         assert proc.returncode == 0
 
-    def test_allows_custom_reviewer_name(
-        self, tmp_path: Path
-    ) -> None:
+    def test_allows_custom_reviewer_name(self, tmp_path: Path) -> None:
         data = self._make_valid_result()
         data["reviewer"] = "adversarial"
         result_path = tmp_path / "result.json"
@@ -343,9 +331,7 @@ class TestValidateReviewResults:
         )
         assert proc.returncode == 0
 
-    def test_rejects_missing_required_finding_field(
-        self, tmp_path: Path
-    ) -> None:
+    def test_rejects_missing_required_finding_field(self, tmp_path: Path) -> None:
         data = self._make_valid_result()
         del data["findings"][0]["blocking"]
         result_path = tmp_path / "result.json"
@@ -395,9 +381,7 @@ class TestValidateReviewResults:
         assert proc.returncode == 0
         assert "0 findings" in proc.stdout
 
-    def test_omitted_optional_fields_passes(
-        self, tmp_path: Path
-    ) -> None:
+    def test_omitted_optional_fields_passes(self, tmp_path: Path) -> None:
         data = self._make_valid_result()
         for key in (
             "repro_command",
@@ -414,3 +398,28 @@ class TestValidateReviewResults:
             timeout=10,
         )
         assert proc.returncode == 0
+
+
+class TestRunGate:
+    """The mandatory CI gate (lint + format + mypy + tests)."""
+
+    def test_run_gate_on_clean_repo(self, tmp_path: Path) -> None:
+        from scripts.review_until_converged import run_gate
+
+        # Empty tmp repo: no tools installed -> all skip -> True
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "tests").mkdir()
+        ok, output = run_gate(repo)
+        # All four steps either pass or skip; gate should return True
+        # in the worst case (skip everything) and never crash.
+        assert isinstance(ok, bool)
+        assert isinstance(output, str)
+        # Output should mention each gate step.
+        for label in (
+            "ruff check",
+            "ruff format",
+            "mypy",
+            "pytest",
+        ):
+            assert label in output

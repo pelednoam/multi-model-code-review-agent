@@ -70,6 +70,23 @@ LLM review. It collects:
 - **Suspicious patterns**: fill_value=0, bare except, hardcoded paths
 - **Test/implementation alignment**: implementation changes without test
   changes and vice versa
+- **Coverage gaps**: per-file line + branch coverage for changed source
+  files (target configurable via `COVERAGE_TARGET`, default 100%). The
+  correctness reviewer turns each gap into a concrete test-case finding.
+
+## Mandatory CI gate
+
+The convergence loop (`scripts/review_until_converged.py`) and the agent's
+merge-commit step both enforce a four-step gate. **All four must pass**:
+
+1. `ruff check .`
+2. `ruff format --check .`
+3. `mypy scripts/` (or project target)
+4. `pytest tests/ -x -q`
+
+A missing tool causes a graceful skip with a note, not a failure -- but in
+production all four should be installed. The gate output is persisted to
+`gate-output.txt` per round.
 
 ## JSON schema
 

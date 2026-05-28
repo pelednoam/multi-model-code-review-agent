@@ -30,9 +30,7 @@ CREDENTIAL_PATTERNS = [
     re.compile(r"gho_[a-zA-Z0-9]{36,}"),
     re.compile(r"glpat-[a-zA-Z0-9\-]{20,}"),
     re.compile(r"(?i)client[_-]?secret\s*[:=]"),
-    re.compile(
-        r"(?i)DefaultEndpointsProtocol=https;AccountName="
-    ),
+    re.compile(r"(?i)DefaultEndpointsProtocol=https;AccountName="),
     re.compile(r'"type"\s*:\s*"service_account"'),
 ]
 

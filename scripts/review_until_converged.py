@@ -75,7 +75,9 @@ def collect_diff(round_dir: Path, repo: Path) -> tuple[Path, int]:
     if git.returncode != 0:
         fallback = _run(["git", "diff", "HEAD~1"], cwd=repo)
         if fallback.returncode != 0:
-            raise RuntimeError(f"failed to collect diff: {git.stderr}\n{fallback.stderr}")
+            raise RuntimeError(
+                f"failed to collect diff: {git.stderr}\n{fallback.stderr}"
+            )
         git = fallback
     elif not git.stdout.strip():
         git = _run(["git", "diff", "HEAD~1"], cwd=repo)
@@ -214,7 +216,9 @@ def launch_reviewers(
         elif i == 2 and backends["hermes"]:
             # The prompt was already built with the codex model label;
             # rebuild with correct label for hermes haiku fallback
-            prompt = build_reviewer_prompt(lens, focus, rv, 'claude-haiku-4.5', diff, audit, context)
+            prompt = build_reviewer_prompt(
+                lens, focus, rv, "claude-haiku-4.5", diff, audit, context
+            )
             prompt_path.write_text(prompt)
             cmd = [
                 "hermes",
@@ -285,7 +289,9 @@ def launch_reviewers(
             err_f.close()
 
 
-def validate_result(d: object, i: int, expected_reviewers: dict[int, str]) -> dict | None:
+def validate_result(
+    d: object, i: int, expected_reviewers: dict[int, str]
+) -> dict | None:
     """Validate result dict has required keys and a findings list. Pin reviewer ID."""
     if not isinstance(d, dict):
         return None
@@ -433,17 +439,39 @@ def apply_fixes(
     return proc.returncode == 0
 
 
-def run_tests(repo: Path) -> tuple[bool, str]:
-    """Run pytest. Return (passed, output)."""
-    try:
-        result = _run(
-            ["python", "-m", "pytest", "tests/", "-x", "-q"],
-            cwd=repo,
-            timeout=TEST_TIMEOUT,
-        )
-    except subprocess.TimeoutExpired:
-        return False, f"Tests timed out after {TEST_TIMEOUT}s"
-    return result.returncode == 0, result.stdout + result.stderr
+def run_gate(repo: Path) -> tuple[bool, str]:
+    """Run the full CI gate: lint + format + type check + tests.
+
+    All four must pass for the gate to pass. Returns (ok, combined_output).
+    """
+    output_parts = []
+    gate_steps = [
+        ("ruff check", ["ruff", "check", "."]),
+        ("ruff format --check", ["ruff", "format", "--check", "."]),
+        ("mypy", ["mypy", "scripts/"]),
+        ("pytest", ["python", "-m", "pytest", "tests/", "-x", "-q"]),
+    ]
+    for label, cmd in gate_steps:
+        output_parts.append(f"\n=== {label} ===\n")
+        try:
+            result = _run(cmd, cwd=repo, timeout=TEST_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            output_parts.append(f"{label} TIMED OUT after {TEST_TIMEOUT}s")
+            return False, "".join(output_parts)
+        except FileNotFoundError:
+            # Tool not installed -- skip with a note rather than fail
+            output_parts.append(f"{label} skipped: tool not installed")
+            continue
+        output_parts.append(result.stdout)
+        output_parts.append(result.stderr)
+        if result.returncode != 0:
+            output_parts.append(f"\n{label} FAILED (exit {result.returncode})")
+            return False, "".join(output_parts)
+    return True, "".join(output_parts)
+
+
+# Backwards-compat alias for any callers expecting the old name.
+run_tests = run_gate
 
 
 def commit_and_push(round_num: int, n_fixes: int, repo: Path) -> bool:
@@ -484,7 +512,9 @@ def main() -> int:
     args = parser.parse_args()
 
     repo = args.repo.resolve()
-    review_dir = args.review_dir if args.review_dir is not None else repo / "data" / "reviews"
+    review_dir = (
+        args.review_dir if args.review_dir is not None else repo / "data" / "reviews"
+    )
 
     backends = detect_backends()
     print(f"Backends: {backends}")
@@ -523,7 +553,9 @@ def main() -> int:
         n_ok = sum(1 for r in results if r is not None)
         print(f"Results: {n_ok}/4 reviewers succeeded")
         if n_ok == 0:
-            print("\nERROR: no reviewer results could be parsed; cannot determine convergence.")
+            print(
+                "\nERROR: no reviewer results could be parsed; cannot determine convergence."
+            )
             return 7
 
         blocking = collect_blocking_findings(results)
@@ -548,12 +580,14 @@ def main() -> int:
             print("\nMerge agent failed -- stopping.")
             return 3
 
-        tests_ok, test_output = run_tests(repo)
-        (round_dir / "test-output.txt").write_text(test_output)
-        if not tests_ok:
-            print("\nTests failed after fixes -- stopping without destructive reset.")
+        gate_ok, gate_output = run_gate(repo)
+        (round_dir / "gate-output.txt").write_text(gate_output)
+        if not gate_ok:
+            print(
+                "\nGate failed (lint/format/mypy/tests) after fixes -- stopping without destructive reset."
+            )
             return 4
-        print("Tests pass.")
+        print("Gate (lint + format + mypy + tests) pass.")
 
         if args.auto_commit:
             if not commit_and_push(round_num, len(blocking), repo):

@@ -83,9 +83,7 @@ def _run_git(
         stderr_stripped = result.stderr.strip()
         stderr_lines = stderr_stripped.splitlines()
         first = stderr_lines[0] if stderr_lines else "(no stderr)"
-        warnings.append(
-            f"git failed (exit {result.returncode}): {cmd} -- {first}"
-        )
+        warnings.append(f"git failed (exit {result.returncode}): {cmd} -- {first}")
     return result.stdout.strip()
 
 
@@ -119,9 +117,7 @@ def collect_git_state(
     commit = _run_git(["rev-parse", "HEAD"], warnings)
     status_short = _run_git(["status", "--short"], warnings)
     cached = _run_git(["diff", "--cached", "--name-only"], warnings)
-    untracked = _run_git(
-        ["ls-files", "--others", "--exclude-standard"], warnings
-    )
+    untracked = _run_git(["ls-files", "--others", "--exclude-standard"], warnings)
     changed_vs_main = _run_git(
         ["diff", "--merge-base", "origin/main", "--name-only"], warnings
     )
@@ -132,9 +128,7 @@ def collect_git_state(
         "status_short": status_short.splitlines() if status_short else [],
         "cached_files": cached.splitlines() if cached else [],
         "untracked_files": untracked.splitlines() if untracked else [],
-        "changed_vs_main": changed_vs_main.splitlines()
-        if changed_vs_main
-        else [],
+        "changed_vs_main": changed_vs_main.splitlines() if changed_vs_main else [],
     }
 
 
@@ -150,9 +144,7 @@ def collect_changed_artifacts(
         if path.suffix != ".json" or not path.exists():
             continue
 
-        is_artifact = any(
-            f == d.rstrip("/") or f.startswith(d) for d in ARTIFACT_DIRS
-        )
+        is_artifact = any(f == d.rstrip("/") or f.startswith(d) for d in ARTIFACT_DIRS)
         if not is_artifact:
             continue
 
@@ -193,13 +185,9 @@ def collect_changed_artifacts(
                     if role in cell_data:
                         cell_info[role] = len(cell_data[role])
                 if "test_final" in cell_data:
-                    cell_info["n_test_final"] = len(
-                        cell_data["test_final"]
-                    )
+                    cell_info["n_test_final"] = len(cell_data["test_final"])
                 if "per_patient" in cell_data:
-                    cell_info["n_per_patient"] = len(
-                        cell_data["per_patient"]
-                    )
+                    cell_info["n_per_patient"] = len(cell_data["per_patient"])
                 cells[cell_name] = cell_info
             summary["cells"] = cells
 
@@ -226,9 +214,7 @@ def collect_changed_artifacts(
             summary["cells_array"] = cells_list
 
         if "admitted_csv_columns" in data:
-            summary["n_admitted_columns"] = len(
-                data["admitted_csv_columns"]
-            )
+            summary["n_admitted_columns"] = len(data["admitted_csv_columns"])
 
         artifacts.append(summary)
 
@@ -254,25 +240,29 @@ def audit_signed_manifests() -> list[dict[str, Any]]:
     for name, rel_path in SIGNED_MANIFESTS.items():
         path = REPO_ROOT / rel_path
         if not path.exists():
-            results.append({
-                "manifest": name,
-                "warning": f"configured but missing: {rel_path}",
-            })
+            results.append(
+                {
+                    "manifest": name,
+                    "warning": f"configured but missing: {rel_path}",
+                }
+            )
             continue
         data = _safe_read_json(path)
         if data is None:
-            results.append({
-                "manifest": name,
-                "warning": "failed to parse JSON",
-            })
+            results.append(
+                {
+                    "manifest": name,
+                    "warning": "failed to parse JSON",
+                }
+            )
             continue
         if not isinstance(data, dict):
-            results.append({
-                "manifest": name,
-                "warning": (
-                    f"not a JSON object (got {type(data).__name__})"
-                ),
-            })
+            results.append(
+                {
+                    "manifest": name,
+                    "warning": (f"not a JSON object (got {type(data).__name__})"),
+                }
+            )
             continue
         entry: dict[str, Any] = {
             "manifest": name,
@@ -334,33 +324,113 @@ def check_test_coverage_alignment(
         and "__init__" not in f
     }
     test_files = {
-        f
-        for f in changed_files
-        if f.startswith("tests/") and f.endswith(".py")
+        f for f in changed_files if f.startswith("tests/") and f.endswith(".py")
     }
 
     if impl_files and not test_files:
         warnings.append(
-            f"{len(impl_files)} implementation files changed "
-            f"but no test files"
+            f"{len(impl_files)} implementation files changed but no test files"
         )
     if test_files and not impl_files:
         warnings.append(
-            f"{len(test_files)} test files changed "
-            f"but no implementation files"
+            f"{len(test_files)} test files changed but no implementation files"
         )
 
     return warnings
+
+
+COVERAGE_TARGET = 100  # percent; configurable per project
+
+
+def measure_test_coverage(
+    changed_files: list[str],
+    warnings: list[str],
+) -> list[dict[str, Any]]:
+    """Run pytest with coverage on changed source files.
+
+    Returns one entry per changed source file with: coverage %,
+    uncovered line numbers, uncovered branches. Skipped silently
+    if pytest is not installed or no tests exist.
+    """
+    impl_files = [
+        f
+        for f in changed_files
+        if (f.startswith("src/") or f.startswith("research/"))
+        and f.endswith(".py")
+        and "__init__" not in f
+        and "/test" not in f
+    ]
+    if not impl_files:
+        return []
+
+    cov_json = REPO_ROOT / ".coverage.json"
+    cov_json.unlink(missing_ok=True)
+    sources = ",".join(impl_files)
+    try:
+        result = subprocess.run(
+            [
+                "python",
+                "-m",
+                "pytest",
+                "tests/",
+                "--cov=" + sources,
+                "--cov-report=json:" + str(cov_json),
+                "--cov-branch",
+                "-q",
+                "--no-header",
+            ],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        warnings.append(f"coverage measurement failed: {e}")
+        return []
+    if not cov_json.exists():
+        if result.returncode != 0:
+            warnings.append(
+                f"pytest --cov failed (exit {result.returncode}); coverage skipped"
+            )
+        return []
+
+    try:
+        cov_data = json.loads(cov_json.read_text())
+    except (json.JSONDecodeError, OSError):
+        warnings.append("coverage report could not be parsed")
+        return []
+    finally:
+        cov_json.unlink(missing_ok=True)
+
+    gaps = []
+    for f in impl_files:
+        file_data = cov_data.get("files", {}).get(f)
+        if not file_data:
+            continue
+        summary = file_data.get("summary", {})
+        pct = summary.get("percent_covered", 0.0)
+        if pct >= COVERAGE_TARGET:
+            continue
+        gaps.append(
+            {
+                "file": f,
+                "percent_covered": round(pct, 1),
+                "uncovered_lines": file_data.get("missing_lines", [])[:30],
+                "uncovered_branches": file_data.get("missing_branches", [])[:20],
+                "n_statements": summary.get("num_statements", 0),
+                "n_missing": summary.get("missing_lines", 0),
+            }
+        )
+    return gaps
 
 
 def run_preflight() -> dict[str, Any]:
     """Run all preflight checks and return the audit dict."""
     git_warnings: list[str] = []
     git = collect_git_state(git_warnings)
-    all_changed = list(
-        dict.fromkeys(git["changed_vs_main"] + git["untracked_files"])
-    )
+    all_changed = list(dict.fromkeys(git["changed_vs_main"] + git["untracked_files"]))
 
+    coverage_warnings: list[str] = []
     audit: dict[str, Any] = {
         "timestamp": datetime.now(tz=UTC).isoformat(),
         "git": git,
@@ -368,9 +438,10 @@ def run_preflight() -> dict[str, Any]:
         "signed_manifests": audit_signed_manifests(),
         "changed_artifacts": collect_changed_artifacts(all_changed),
         "suspicious_patterns": scan_suspicious_patterns(all_changed),
-        "test_coverage_alignment": check_test_coverage_alignment(
-            all_changed
-        ),
+        "test_coverage_alignment": check_test_coverage_alignment(all_changed),
+        "coverage_gaps": measure_test_coverage(all_changed, coverage_warnings),
+        "coverage_warnings": coverage_warnings,
+        "coverage_target_pct": COVERAGE_TARGET,
     }
 
     audit["n_warnings"] = (
@@ -378,6 +449,8 @@ def run_preflight() -> dict[str, Any]:
         + len(audit["suspicious_patterns"])
         + len(audit["test_coverage_alignment"])
         + len(audit["git_command_warnings"])
+        + len(audit["coverage_warnings"])
+        + len(audit["coverage_gaps"])
     )
 
     return audit
@@ -408,6 +481,14 @@ def main() -> None:
     print(f"  Untracked: {len(audit['git']['untracked_files'])}")
     print(f"  Artifacts: {len(audit['changed_artifacts'])}")
     print(f"  Suspicious: {len(audit['suspicious_patterns'])}")
+    n_gaps = len(audit["coverage_gaps"])
+    if n_gaps:
+        print(f"  Coverage gaps ({COVERAGE_TARGET}% target): {n_gaps} file(s)")
+        for gap in audit["coverage_gaps"][:5]:
+            print(
+                f"    {gap['file']}: {gap['percent_covered']}% "
+                f"({gap['n_missing']}/{gap['n_statements']} lines missing)"
+            )
     print(f"  Warnings: {audit['n_warnings']}")
 
     sys.exit(1 if audit["n_warnings"] > 0 else 0)

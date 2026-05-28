@@ -51,12 +51,8 @@ def validate_result(
             return [f"{path.name}: failed to parse: {e}"]
 
     errors = []
-    for error in sorted(
-        validator.iter_errors(data), key=lambda e: list(e.path)
-    ):
-        field_path = (
-            ".".join(str(p) for p in error.absolute_path) or "(root)"
-        )
+    for error in sorted(validator.iter_errors(data), key=lambda e: list(e.path)):
+        field_path = ".".join(str(p) for p in error.absolute_path) or "(root)"
         errors.append(f"{path.name}:{field_path}: {error.message}")
     return errors
 

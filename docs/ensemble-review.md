@@ -261,6 +261,8 @@ If Codex CLI is installed, this reviewer runs via `codex exec -o $REVIEW_TMP/res
 
 Lens: off-by-one, null paths, shape/dtype mismatches, contract violations, logic errors, missing test coverage. For numpy/torch: shape broadcasting, device placement, gradient flow.
 
+**Coverage gaps**: when the audit JSON contains a non-empty `coverage_gaps` array, this reviewer MUST propose specific test cases for each uncovered line/branch. Each such finding should have `category: "test"` and `suggested_fix` containing the actual test code (function name, inputs, assertions) -- not a description. The merge agent will apply these tests verbatim, so they must be runnable as-is.
+
 ### Reviewer 3 -- Readability, maintainability & performance (Sonnet 4.6 via Bedrock)
 
 Output: `$REVIEW_TMP/result-3.json`
@@ -557,13 +559,25 @@ Instructions:
 - After all fixes are applied, report what changed.
 ```
 
-After the merge agent returns:
+After the merge agent returns, run the **mandatory CI gate** -- all four steps must pass before commit:
 
-- Show the user what was changed (file-by-file summary)
-- Run the test suite: `pytest tests/ -x -q`
-- Run lint: `ruff check . && ruff format --check .`
-- If tests or lint fail, report which fix likely caused it
-- If tests and lint pass, commit and push to the current repo
+1. **Lint**: `ruff check .`
+2. **Format**: `ruff format --check .`
+3. **Type check**: `mypy scripts/ src/` (or whatever the project's mypy target is)
+4. **Tests**: `pytest tests/ -x -q`
+
+If any step fails, report which fix likely caused it. Do NOT commit a partial gate -- all four must be green. The convergence loop (`scripts/review_until_converged.py`) enforces this via `run_gate()`.
+
+If all four pass, commit and push to the current repo.
+
+### Coverage gate
+
+When the preflight audit reports `coverage_gaps` (files in the diff with less than `coverage_target_pct`% coverage), the correctness reviewer is instructed to propose specific test cases for the uncovered lines. These appear as findings with category `test` and suggested_fix containing the test code to add.
+
+Coverage gaps are blocking by default. To merge code with <100% coverage, the user must either:
+- Add the suggested tests (the merge agent can do this)
+- Lower `COVERAGE_TARGET` in `scripts/review_preflight.py` (project-wide policy decision)
+- Explicitly skip coverage for a file (e.g. `# pragma: no cover`)
 
 ### Why a merge subagent instead of applying directly?
 

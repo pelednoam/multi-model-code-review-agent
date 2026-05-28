@@ -306,30 +306,42 @@ Anthropic reviewers. For cross-provider diversity, also install:
 
 ## Quick start
 
-### 1. Copy the agent definition to your project
+### 1. Clone this repo, then run `install.sh` against your project
 
 ```bash
-mkdir -p .claude/agents
-cp docs/ensemble-review.md .claude/agents/ensemble-review.md
+git clone https://github.com/pelednoam/multi-model-code-review-agent.git
+cd multi-model-code-review-agent
+./install.sh /path/to/your-project
 ```
 
-### 2. Copy the scripts
+That copies the agent definition into `your-project/.claude/agents/`
+and the helper scripts into `your-project/scripts/`. Run this once per
+project.
 
-```bash
-cp scripts/scrub_diff.py             your-project/scripts/
-cp scripts/review_preflight.py       your-project/scripts/
-cp scripts/review_until_converged.py your-project/scripts/   # optional, for the loop
-cp scripts/validate_review_results.py your-project/scripts/
-cp docs/ensemble_review_result_schema.json your-project/docs/
-```
+> **You must run `install.sh` yourself, not from inside Claude Code.**
+> Claude Code's auto-mode classifier blocks writes into
+> `.claude/agents/` because that path permanently changes how Claude
+> Code behaves in every future session for that project. The block is
+> correct -- agents that can modify their own startup configuration
+> are exactly the threat model the classifier is meant to catch. So
+> the installer is designed for the human to run from a regular
+> shell, not for Claude to run on your behalf.
+>
+> If you ask Claude Code to set up this agent and it can't clone +
+> install, it will print the exact `install.sh` command for you to
+> paste into a terminal. Run it once, then every future Claude Code
+> session in that project picks up the agent automatically.
 
-### 3. Configure for your project
+### 2. Configure for your project (optional)
 
 Edit `scripts/review_preflight.py` to set:
 - `SIGNED_MANIFESTS`: paths to your project's signed JSON artifacts
 - `ARTIFACT_DIRS`: directories containing JSON artifacts to audit
 
-### 4. Run from Claude Code
+Defaults work fine for most projects -- the audit will report no
+signed-manifest results rather than failing.
+
+### 3. Run from Claude Code
 
 Say any of:
 - "review this" or "quick review" -- quick mode (free, 2 subagents)

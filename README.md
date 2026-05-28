@@ -83,24 +83,31 @@ Each reviewer runs as a **separate OS process** with clean context --
 no conversation history, no author bias.
 
 ```
-Claude Code
+Claude Code (or shell)
   |
-  |  "review this" (quick) or "full review" (full)
+  |  "review this" (quick), "full review" (full),
+  |  or "run until converged" (loop)
   v
 ensemble-review agent (docs/ensemble-review.md)
   |
-  |  1. git diff | scrub_diff.py  (secrets never touch disk)
-  |  2. review_preflight.py       (deterministic audit)
-  |  3. build context bundle      (docs, manifests, specs)
-  |
-  |  QUICK MODE:                         FULL MODE:
-  |  Agent(opus, spec-contract)          R1: hermes opus  OR  claude -p opus
-  |  Agent(sonnet, correctness)          R2: codex exec   (GPT-5.5)
-  |  (2 subagents, free)                 R3: gemini       OR  claude -p sonnet
-  |                                      R4: hermes opus  OR  claude -p opus
-  |                                      (4 sessions, free or paid)
-  |
-  |  4. synthesize convergence report
+  +-------- [convergence loop, repeats until converged or stuck] -------+
+  |                                                                    |
+  |  1. git diff | scrub_diff.py  (secrets never touch disk)            |
+  |  2. review_preflight.py       (audit + coverage gaps)               |
+  |  3. build context bundle      (docs, manifests, specs)              |
+  |                                                                    |
+  |  QUICK MODE:                         FULL MODE:                    |
+  |  Agent(opus, spec-contract)          R1: hermes opus  OR  claude -p |
+  |  Agent(sonnet, correctness)          R2: codex exec   (GPT-5.5)    |
+  |  (2 subagents, free)                 R3: gemini       OR  claude -p |
+  |                                      R4: hermes opus  OR  claude -p |
+  |                                      (4 sessions, free or paid)    |
+  |                                                                    |
+  |  4. synthesize convergence report                                  |
+  |  5. [loop only] merge agent applies suggested_fix's (clean ctx)    |
+  |  6. [loop only] mandatory gate: ruff + format + mypy + pytest      |
+  |  7. [loop only] auto-commit; fingerprint findings vs prev round    |
+  +--------------------------------------------------------------------+
   v
 User sees: preflight audit, blocking findings, convergence analysis
 ```
@@ -145,11 +152,113 @@ Coverage target is configurable (default 100%) via `COVERAGE_TARGET`
 at the top of `scripts/review_preflight.py`. Set it to your project's
 policy. Per-file opt-out is the standard `# pragma: no cover`.
 
+## The convergence loop (external loop)
+
+`scripts/review_until_converged.py` is an **external orchestration
+loop** that wraps the inner review pipeline. Where quick and full
+modes do one review pass, the convergence loop runs the full pipeline
+**autonomously, round after round**, applying fixes between rounds
+until no blocking findings remain. You start it once; it stops on its
+own.
+
+### What one round looks like
+
+```
++------------------------------------------------------------------+
+|  ROUND N                                                         |
+|                                                                  |
+|  1. preflight audit  (git state + manifests + coverage gaps)     |
+|  2. 4 reviewers run IN PARALLEL on the current diff              |
+|     (each in a separate OS process, clean context)               |
+|  3. fingerprint findings -> compare with previous round          |
+|  4. merge agent applies suggested_fix's IN A CLEAN CONTEXT       |
+|     (separate Claude Code session; sees only the findings)       |
+|  5. mandatory gate: ruff check + ruff format + mypy + pytest     |
+|  6. auto-commit if --auto-commit                                 |
++------------------------------------------------------------------+
+```
+
+Each step writes evidence under `data/reviews/<timestamp>_<branch>/round-N/`:
+
+- `audit.json` -- preflight output
+- `prompt-{1..4}.txt` + `result-{1..4}.json` -- reviewer prompts and parsed findings
+- `merge-prompt.txt` + `merge-output.json` -- what the merge agent saw and did
+- `gate-output.txt` -- combined output of all four gate steps
+- `convergence.json` -- diff vs previous round (new / repeated / resolved findings)
+
+### Stop conditions
+
+The loop exits on the first of:
+
+| Code | Reason | When |
+|---|---|---|
+| 0 | **Converged** | No blocking findings remain -- only suggestions |
+| 2 | **Stuck** | The same fingerprinted blocking findings appeared two rounds in a row (the reviewers want a fix the merge agent can't or won't make) |
+| 3 | Merge agent failed | The merge subprocess crashed or returned non-JSON |
+| 4 | Gate failed | Lint / format / mypy / pytest failed after fixes were applied |
+| 5 | Commit/push failed | `--auto-commit` was set and git refused the push |
+| 6 | Max rounds reached | `--max-rounds` (default 5) hit without convergence |
+
+Exit 4 means the loop stops **without rolling back** -- the failing
+diff is left in the working tree so you can inspect what went wrong.
+Exit 2 is the most useful diagnostic: when two rounds produce
+identical blocking findings, that's a signal that human judgment is
+needed (the reviewers disagree with each other, or the fix requires
+architectural changes the merge agent can't make).
+
+### Why the merge agent runs in a clean context
+
+The orchestrator (the convergence loop itself) has seen everything:
+the prior rounds, the diff, the reviewer prompts, the failed gate
+output. That context is contaminating -- if the orchestrator applied
+fixes, it could be influenced by the rationale of an earlier rejected
+fix or by the author's coding style from elsewhere in the diff.
+
+The merge agent runs as a **separate Claude Code session** that sees
+only:
+- the current diff
+- the parsed findings (file, issue, suggested_fix)
+- the repo layout for navigation
+
+It cannot see prior conversation, prior rounds, or the orchestrator's
+notes. Findings either get applied verbatim or not at all -- there's
+no negotiation in the loop.
+
+### Invoking the loop
+
+From Claude Code: "run until converged".
+
+From the shell:
+
+```bash
+python scripts/review_until_converged.py \
+    --repo /path/to/repo \
+    --max-rounds 5 \
+    --auto-commit            # commit after each successful round
+```
+
+Common patterns:
+
+| Goal | Flags |
+|---|---|
+| One-shot: review + fix + gate, then stop | `--max-rounds 1` |
+| Iterate locally without polluting git | omit `--auto-commit`, inspect each round's working tree |
+| CI gate enforcement only | use the loop with `--max-rounds 1`; the gate runs unconditionally |
+| Long autonomous session | `--max-rounds 10 --auto-commit` |
+
+### When to use which mode
+
+- **Quick mode**: every commit -- catch obvious problems, ~30s
+- **Full mode**: pre-merge gate -- cross-provider diversity, ~3 min
+- **Convergence loop**: when you want the agent to *finish* the
+  review-and-fix cycle, not just identify problems. Good for: large
+  refactors, post-rebase cleanup, "make this PR mergeable", catching
+  regressions after a bulk auto-edit.
+
 ## Mandatory CI gate
 
-The convergence loop (`scripts/review_until_converged.py`) enforces a
-four-step gate after the merge agent applies fixes. **All four must
-pass before commit**:
+Step 5 of each convergence-loop round is a **four-step gate** that
+must pass before commit:
 
 1. `ruff check .`
 2. `ruff format --check .`
@@ -161,8 +270,11 @@ If any step fails, the loop stops without committing -- the round's
 (e.g. mypy not installed in the venv) cause a graceful skip with a
 note rather than a failure, so the gate works in minimal environments.
 
-This closes the lint/type/test loop: no review can recommend a fix
-that breaks the gate without the loop catching it on the same round.
+The gate closes the lint/type/test loop: no review can recommend a
+fix that breaks the gate without the loop catching it on the same
+round. If a review's `suggested_fix` is applied and breaks tests, the
+loop halts at the broken commit so you can inspect, instead of
+silently moving on.
 
 ## Why four lenses?
 
@@ -222,20 +334,8 @@ Edit `scripts/review_preflight.py` to set:
 Say any of:
 - "review this" or "quick review" -- quick mode (free, 2 subagents)
 - "full review" or "full ensemble review" -- full mode (4 reviewers)
-- "run until converged" -- convergence loop (full mode + merge agent +
-  mandatory gate, runs until no blocking findings remain)
-
-Or run the convergence loop directly from the shell:
-
-```bash
-python scripts/review_until_converged.py \
-    --repo /path/to/repo \
-    --max-rounds 5 \
-    --auto-commit
-```
-
-Each round writes `data/reviews/<round>/` with the diff, audit JSON,
-reviewer prompts/results, merge output, and `gate-output.txt`.
+- "run until converged" -- convergence loop, see [The convergence
+  loop](#the-convergence-loop-external-loop) for details
 
 ## Files
 

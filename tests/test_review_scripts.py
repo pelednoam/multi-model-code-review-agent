@@ -6,10 +6,6 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRUB_SCRIPT = REPO_ROOT / "scripts" / "scrub_diff.py"
@@ -197,7 +193,7 @@ class TestReviewPreflight:
         assert required <= set(audit.keys())
 
     def test_git_command_warnings_populated_on_bad_remote(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path
     ) -> None:
         from scripts.review_preflight import _run_git
 
@@ -253,6 +249,7 @@ class TestValidateReviewResults:
                     "rationale": "test rationale",
                     "observed_or_inferred": "observed_in_diff",
                     "blocking": False,
+                    "suggested_fix": "No change needed.",
                 }
             ],
             "overall_assessment": "Looks good.",
@@ -319,7 +316,6 @@ class TestValidateReviewResults:
         self, tmp_path: Path
     ) -> None:
         data = self._make_valid_result()
-        data["findings"][0]["suggested_fix"] = None
         data["findings"][0]["repro_command"] = None
         data["findings"][0]["contract_reference"] = None
         result_path = tmp_path / "result.json"
@@ -404,7 +400,6 @@ class TestValidateReviewResults:
     ) -> None:
         data = self._make_valid_result()
         for key in (
-            "suggested_fix",
             "repro_command",
             "contract_reference",
             "line",

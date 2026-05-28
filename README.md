@@ -188,7 +188,7 @@ Say any of:
 | `scripts/scrub_diff.py` | Stdin credential scrubber |
 | `scripts/review_preflight.py` | Deterministic pre-review audit |
 | `scripts/validate_review_results.py` | JSON schema validator |
-| `tests/test_review_scripts.py` | Test suite (31 tests) |
+| `tests/test_review_scripts.py` | Test suite |
 
 ## Key design decisions
 

@@ -48,7 +48,7 @@ _SUSPICIOUS_COMPILED: list[tuple[re.Pattern[str], str]] = [
 
 # Excluded from suspicious-pattern scanning to avoid false positives
 # from its own regex definitions.
-_SELF_PATH = "scripts/review_preflight.py"
+_SELF_PATH = str(Path(__file__).resolve().relative_to(REPO_ROOT))
 
 MAX_ARTIFACT_BYTES = 50 * 1024 * 1024
 
@@ -318,7 +318,7 @@ def check_test_coverage_alignment(
         for f in changed_files
         if (f.startswith("src/") or f.startswith("research/"))
         and f.endswith(".py")
-        and "/test" not in f
+        and not f.split("/")[-1].startswith("test_")
         and "__init__" not in f
     }
     test_files = {

@@ -23,7 +23,7 @@ CREDENTIAL_PATTERNS = [
     re.compile(r"(?i)(password|passwd|pwd)\s*[:=]"),
     re.compile(r"(?i)\b(token|bearer)\s*[:=]"),
     re.compile(r"(?i)BEGIN\s+(RSA\s+)?PRIVATE\s+KEY"),
-    re.compile(r"(?i)(^|/)\.env(\.[a-z]+)?$"),
+    re.compile(r"(?i)(^|[\s'\"/])\.env(\.[a-z]+)?([\s'\"/]|$)"),
     re.compile(r"AKIA[0-9A-Z]{16}"),
     re.compile(r"sk-[a-zA-Z0-9]{20,128}"),
     re.compile(r"ghp_[a-zA-Z0-9]{36,}"),
@@ -36,7 +36,7 @@ CREDENTIAL_PATTERNS = [
     re.compile(r'"type"\s*:\s*"service_account"'),
 ]
 
-REDACTED = "+++ [REDACTED: credential pattern detected] +++"
+REDACTED = "# [REDACTED: credential pattern detected]"
 _REDACTED_LINE = REDACTED + "\n"
 
 # Files whose diff sections are safe to pass through without

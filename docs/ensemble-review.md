@@ -56,11 +56,14 @@ mode" below.
 
 # Choosing the mode
 
-- **Quick mode** (default): spawns 2 Claude Code subagents (Opus spec-contract + Sonnet correctness) with clean context. Free, ~30 seconds. Use for every commit, routine changes, rapid iteration.
-- **Full mode**: spawns 4 parallel Hermes sessions (Opus, Haiku/Codex, Sonnet). Paid via Bedrock (~$5-40) or free via Codex CLI if installed. ~3-5 minutes. Use for pre-merge gates, high-stakes changes.
+- **Quick mode** (default): spawns 2 Claude Code subagents (Opus spec-contract + Sonnet correctness) with clean context. Free, ~30 seconds. Use for every commit, routine changes, rapid iteration. NOTE: quick mode uses the parent Claude Code session's API allocation for the subagents (via the `Agent()` tool) -- not the local `claude` / `codex` / `gemini` CLIs. For local-CLI reviewers, the user must say "full review".
+- **Full mode**: spawns 4 parallel reviewer subprocesses across providers. Free when local CLIs (`claude`, `codex`, `gemini`) are installed and used. ~3-5 minutes. Use for pre-merge gates, high-stakes changes.
 
-If the user says "quick review", "review this", or just "ensemble review" -- use quick mode.
-If the user says "full review", "full ensemble review", or "hermes review" -- use full mode.
+If the user says "quick review", "review this", or just "ensemble review" -- use quick mode. Before spawning the quick-mode subagents, print one line: *"Quick mode (parent Claude Code's API allocation). Say 'full review' to use local CLIs instead."*
+
+If the user says "full review", "full ensemble review", or "ensemble review" -- use full mode.
+
+If the user says "hermes review", "bedrock review", or "isolated review", or if `.claude/use-hermes` exists in the project root, use full mode AND prefer Hermes/Bedrock over local CLIs for Anthropic reviewers (see "Bedrock opt-in" below).
 
 # CLI and provider detection
 
@@ -71,24 +74,42 @@ HAS_HERMES=false; command -v hermes &>/dev/null && HAS_HERMES=true
 HAS_CLAUDE=false; command -v claude &>/dev/null && HAS_CLAUDE=true
 HAS_CODEX=false;  command -v codex  &>/dev/null && HAS_CODEX=true
 HAS_GEMINI=false; command -v gemini &>/dev/null && HAS_GEMINI=true
+
+# Bedrock opt-in: set when the user verbally asked for hermes/bedrock,
+# OR when the project pinned it via .claude/use-hermes.
+PREFER_HERMES=false
+if [ -f ".claude/use-hermes" ]; then PREFER_HERMES=true; fi
+# Also set PREFER_HERMES=true if the user's request matched
+# "hermes review" / "bedrock review" / "isolated review".
 ```
 
-**Priority order for each reviewer -- Hermes first (better isolation), CLIs as fallback (free):**
+**Priority order for each reviewer -- local CLIs first (free), Hermes only when opted in:**
 
-For Anthropic models (reviewers 1, 3, 4), Hermes gives better isolation: the reviewer writes JSON directly to a file via `-t file`, output format is consistent, and data stays in your AWS account (Bedrock). CLI mode is free but output needs extraction and data goes through Anthropic's infrastructure.
+For Anthropic models (reviewers 1, 3, 4), the local `claude` CLI is the default when installed. It's free (uses the user's existing Claude subscription) and manages its own OAuth reliably. Hermes/Bedrock is preferred only when `PREFER_HERMES=true` -- it's paid (~$5-40 per full review) and only worth it for regulated codebases that need Bedrock's data-at-rest guarantees.
 
-For non-Anthropic models (reviewer 2 correctness, reviewer 3 readability), CLIs are the only free path. Hermes can also route to these providers if configured.
+For non-Anthropic models (reviewer 2 correctness via Codex GPT-5.5, reviewer 3 readability via Gemini), the dedicated CLI is the only free path.
+
+Default precedence (PREFER_HERMES=false):
+
+| Reviewer | 1st choice | 2nd choice | 3rd choice |
+|---|---|---|---|
+| Security (Opus) | Claude CLI opus (free) | Hermes Opus (Bedrock, paid) | -- |
+| Correctness | Codex CLI GPT-5.5 (free) | Claude CLI haiku (free) | Hermes Haiku (Bedrock) |
+| Readability | Gemini CLI (free) | Claude CLI sonnet (free) | Hermes Sonnet (Bedrock) |
+| Spec-contract (Opus) | Claude CLI opus (free) | Hermes Opus (Bedrock, paid) | -- |
+
+Bedrock opt-in precedence (PREFER_HERMES=true), used for regulated codebases that need data-at-rest in your AWS account:
 
 | Reviewer | 1st choice | 2nd choice | 3rd choice |
 |---|---|---|---|
 | Security (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
-| Correctness | Codex CLI GPT-5.5 (free) | Hermes Haiku (Bedrock) | Claude CLI haiku (free) |
-| Readability | Gemini CLI (free) | Hermes Sonnet (Bedrock) | Claude CLI sonnet (free) |
+| Correctness | Hermes Haiku (Bedrock) | Codex CLI GPT-5.5 (free) | Claude CLI haiku (free) |
+| Readability | Hermes Sonnet (Bedrock) | Gemini CLI (free) | Claude CLI sonnet (free) |
 | Spec-contract (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
 
-**Why Hermes first**: consistent JSON output (no extraction fragility), true `-t file` toolset restriction, data stays in your AWS (Bedrock). Worth the cost for high-stakes reviews.
+**Why local CLIs first by default**: free (uses existing subscriptions), reliable auth (each CLI manages its own OAuth), and for most projects (open-source, non-regulated) there's no real value to paid Bedrock routing.
 
-**Why CLIs as fallback**: free (uses existing subscriptions), and for Gemini there is no Hermes provider configured so CLI is the only option.
+**Why Hermes/Bedrock matters when opted in**: data stays in your AWS account, consistent JSON via `-t file`, true toolset restriction. Worth the cost for FDA-path / HIPAA / compliance-sensitive codebases.
 
 **Maximum diversity for free** (all CLIs installed): Anthropic (Claude CLI) + OpenAI (Codex CLI) + Google (Gemini CLI) = 3 provider families.
 
@@ -402,36 +423,46 @@ if [ $N_PROVIDERS -eq 1 ]; then
 fi
 echo "Provider diversity: $N_PROVIDERS provider(s)"
 
-# R1: Security (Opus) -- Hermes preferred, Claude CLI fallback
-if $HAS_HERMES; then
+# R1: Security (Opus) -- local CLI by default (free), Hermes only when opted in
+if $PREFER_HERMES && $HAS_HERMES; then
   launch_hermes 1 us.anthropic.claude-opus-4-6-v1 "$REVIEW_TMP/prompt-1.txt"
-else
+elif $HAS_CLAUDE; then
   launch_cli 1 claude-opus "$REVIEW_TMP/prompt-1.txt"
+elif $HAS_HERMES; then
+  launch_hermes 1 us.anthropic.claude-opus-4-6-v1 "$REVIEW_TMP/prompt-1.txt"
 fi
 
-# R2: Correctness -- Codex (GPT-5.5) preferred for cross-provider diversity
-if $HAS_CODEX; then
+# R2: Correctness -- Codex (GPT-5.5) preferred for cross-provider diversity.
+# When PREFER_HERMES is set, the Bedrock haiku path runs first.
+if $PREFER_HERMES && $HAS_HERMES; then
+  launch_hermes 2 us.anthropic.claude-haiku-4-5-20251001-v1:0 "$REVIEW_TMP/prompt-2.txt"
+elif $HAS_CODEX; then
   launch_cli 2 codex "$REVIEW_TMP/prompt-2.txt"
+elif $HAS_CLAUDE; then
+  launch_cli 2 claude-haiku "$REVIEW_TMP/prompt-2.txt"
 elif $HAS_HERMES; then
   launch_hermes 2 us.anthropic.claude-haiku-4-5-20251001-v1:0 "$REVIEW_TMP/prompt-2.txt"
-else
-  launch_cli 2 claude-haiku "$REVIEW_TMP/prompt-2.txt"
 fi
 
-# R3: Readability -- Gemini preferred (3rd provider), then Hermes, then Claude CLI
-if $HAS_GEMINI; then
+# R3: Readability -- Gemini preferred (3rd provider for diversity).
+# When PREFER_HERMES is set, the Bedrock sonnet path runs first.
+if $PREFER_HERMES && $HAS_HERMES; then
+  launch_hermes 3 us.anthropic.claude-sonnet-4-6-v1 "$REVIEW_TMP/prompt-3.txt"
+elif $HAS_GEMINI; then
   launch_cli 3 gemini "$REVIEW_TMP/prompt-3.txt"
+elif $HAS_CLAUDE; then
+  launch_cli 3 claude-sonnet "$REVIEW_TMP/prompt-3.txt"
 elif $HAS_HERMES; then
   launch_hermes 3 us.anthropic.claude-sonnet-4-6-v1 "$REVIEW_TMP/prompt-3.txt"
-else
-  launch_cli 3 claude-sonnet "$REVIEW_TMP/prompt-3.txt"
 fi
 
-# R4: Spec-contract (Opus) -- Hermes preferred, Claude CLI fallback
-if $HAS_HERMES; then
+# R4: Spec-contract (Opus) -- local CLI by default (free), Hermes only when opted in
+if $PREFER_HERMES && $HAS_HERMES; then
   launch_hermes 4 us.anthropic.claude-opus-4-6-v1 "$REVIEW_TMP/prompt-4.txt"
-else
+elif $HAS_CLAUDE; then
   launch_cli 4 claude-opus "$REVIEW_TMP/prompt-4.txt"
+elif $HAS_HERMES; then
+  launch_hermes 4 us.anthropic.claude-opus-4-6-v1 "$REVIEW_TMP/prompt-4.txt"
 fi
 
 # Wait for ALL background children (avoids stale-PID issues when

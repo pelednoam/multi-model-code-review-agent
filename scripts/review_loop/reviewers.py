@@ -105,33 +105,56 @@ def _claude_cmd(slot: int) -> list[str]:
     ]
 
 
+_OPUS_BEDROCK = "us.anthropic.claude-opus-4-6-v1"
+_HAIKU_BEDROCK = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+_SONNET_BEDROCK = "us.anthropic.claude-sonnet-4-6-v1"
+
+
 def _choose_command(
     slot: int,
     prompt_path: Path,
     round_dir: Path,
     backends: dict[str, bool],
+    prefer_hermes: bool = False,
 ) -> tuple[list[str], str | None] | None:
-    """Pick the command for a reviewer slot, with fallbacks across backends.
+    """Pick the command for a reviewer slot.
+
+    Default precedence (``prefer_hermes=False``): local CLIs first --
+    they're free (existing subscriptions) and manage their own auth.
+    Hermes/Bedrock is the paid API path; only chosen as a last resort.
+
+    Bedrock opt-in (``prefer_hermes=True``): Hermes/Bedrock first for
+    Anthropic reviewers. Used by regulated codebases that need
+    data-at-rest in their AWS account.
 
     Returns ``(cmd, rebuild_label)``, where ``rebuild_label`` is set when
     the chosen backend needs the prompt to be rebuilt with a different
-    model label (currently only slot 2's hermes-haiku fallback). Returns
-    ``None`` if no backend is available.
+    model label (slot 2's hermes-haiku path). Returns ``None`` if no
+    backend is available.
     """
-    if slot in (1, 4) and backends["hermes"]:
-        return _hermes_cmd(prompt_path, "us.anthropic.claude-opus-4-6-v1"), None
+    if prefer_hermes and backends["hermes"]:
+        if slot in (1, 4):
+            return _hermes_cmd(prompt_path, _OPUS_BEDROCK), None
+        if slot == 2:
+            return _hermes_cmd(prompt_path, _HAIKU_BEDROCK), "claude-haiku-4.5"
+        if slot == 3:
+            return _hermes_cmd(prompt_path, _SONNET_BEDROCK), None
+
     if slot == 2 and backends["codex"]:
         result_path = round_dir / f"result-{slot}.json"
         return ["codex", "exec", "-o", str(result_path), "-"], None
-    if slot == 2 and backends["hermes"]:
-        cmd = _hermes_cmd(prompt_path, "us.anthropic.claude-haiku-4-5-20251001-v1:0")
-        return cmd, "claude-haiku-4.5"
     if slot == 3 and backends["gemini"]:
         return ["gemini", "--approval-mode", "plan", "--skip-trust"], None
-    if slot == 3 and backends["hermes"]:
-        return _hermes_cmd(prompt_path, "us.anthropic.claude-sonnet-4-6-v1"), None
     if backends["claude"]:
         return _claude_cmd(slot), None
+
+    # Last-resort Hermes paths if no local CLI matched.
+    if slot in (1, 4) and backends["hermes"]:
+        return _hermes_cmd(prompt_path, _OPUS_BEDROCK), None
+    if slot == 2 and backends["hermes"]:
+        return _hermes_cmd(prompt_path, _HAIKU_BEDROCK), "claude-haiku-4.5"
+    if slot == 3 and backends["hermes"]:
+        return _hermes_cmd(prompt_path, _SONNET_BEDROCK), None
     return None
 
 
@@ -148,6 +171,7 @@ def _launch_one(
     context: str,
     round_dir: Path,
     backends: dict[str, bool],
+    prefer_hermes: bool = False,
 ) -> ReviewerProc | None:
     """Launch a single reviewer subprocess. Return tracking tuple or None."""
     lens, focus, rv, model_label = lens_args
@@ -155,7 +179,7 @@ def _launch_one(
     prompt_path = round_dir / f"prompt-{slot}.txt"
     prompt_path.write_text(prompt)
 
-    choice = _choose_command(slot, prompt_path, round_dir, backends)
+    choice = _choose_command(slot, prompt_path, round_dir, backends, prefer_hermes)
     if choice is None:
         print(f"  R{slot}: SKIPPED (no backend)")
         return None
@@ -191,11 +215,14 @@ def launch_reviewers(
     audit: str,
     context: str,
     backends: dict[str, bool],
+    prefer_hermes: bool = False,
 ) -> None:
     """Launch 4 reviewers in parallel, write raw outputs to round_dir."""
     procs: list[ReviewerProc] = []
     for i, lens_args in enumerate(_LENSES, 1):
-        tracked = _launch_one(i, lens_args, diff, audit, context, round_dir, backends)
+        tracked = _launch_one(
+            i, lens_args, diff, audit, context, round_dir, backends, prefer_hermes
+        )
         if tracked is not None:
             procs.append(tracked)
     for slot, proc, _, out_f, err_f in procs:

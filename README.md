@@ -7,10 +7,14 @@ each with a different review lens, preceded by a deterministic
 preflight audit. Three modes:
 
 - **Quick mode** (free): 2 Claude Code subagents with clean context.
-  ~30 seconds. Use for every commit.
-- **Full mode** (free or paid): 4 parallel reviewers using native CLIs
-  (Claude Code, Codex, Gemini) or Hermes+Bedrock. ~3-5 minutes. Use
-  for pre-merge gates.
+  ~30 seconds. Use for every commit. Subagents run via the `Agent()`
+  tool and use the parent Claude Code session's API allocation -- not
+  the local `claude`/`codex`/`gemini` CLIs.
+- **Full mode** (free or paid): 4 parallel reviewer subprocesses
+  across providers using the locally installed CLIs by default. Free
+  when `claude` + `codex` + `gemini` are installed. Hermes/Bedrock
+  available as an opt-in for codebases that need data-at-rest.
+  ~3-5 minutes. Use for pre-merge gates.
 - **Convergence loop** (free or paid): runs full mode repeatedly,
   applying fixes via a clean-context merge agent, until no blocking
   findings remain (or the same findings appear twice -- "stuck"). Each
@@ -115,22 +119,42 @@ User sees: preflight audit, blocking findings, convergence analysis
 ### Full mode routing
 
 The agent auto-detects installed CLIs and picks the best backend for
-each reviewer. **Native CLIs are preferred** because each CLI manages
-its own auth reliably (no stale OAuth tokens), and they're free.
-Hermes is preferred for Anthropic models only when Bedrock isolation
-matters.
+each reviewer. **Local CLIs are the default** when installed --
+they're free (existing subscriptions), reliable (each CLI manages its
+own OAuth), and there's no good reason to spend Bedrock money on a
+routine review.
+
+Default precedence (no Bedrock opt-in):
+
+| Reviewer | 1st choice | 2nd choice | 3rd choice |
+|---|---|---|---|
+| Security (Opus) | Claude CLI opus (free) | Hermes Opus (Bedrock, paid) | -- |
+| Correctness | Codex CLI GPT-5.5 (free) | Claude CLI haiku (free) | Hermes Haiku (Bedrock) |
+| Readability | Gemini CLI (free) | Claude CLI sonnet (free) | Hermes Sonnet (Bedrock) |
+| Spec-contract (Opus) | Claude CLI opus (free) | Hermes Opus (Bedrock, paid) | -- |
+
+### Bedrock opt-in (when you actually want Hermes)
+
+For regulated codebases (FDA-path, HIPAA, anything where the diff
+content must stay in your own AWS account), Bedrock's data-at-rest
+guarantee matters. Opt in three ways:
+
+1. **Verbal trigger**: say "hermes review", "bedrock review", or
+   "isolated review" in Claude Code.
+2. **Project-pinned**: create an empty file at `.claude/use-hermes`
+   in the project root. Every review in that project (CLI or
+   convergence-loop) auto-uses Bedrock for Anthropic reviewers.
+3. **CLI flag**: `python scripts/review_until_converged.py
+   --prefer-hermes` for the convergence loop.
+
+When opted in, the precedence flips for Anthropic reviewers:
 
 | Reviewer | 1st choice | 2nd choice | 3rd choice |
 |---|---|---|---|
 | Security (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
-| Correctness | Codex CLI GPT-5.5 (free) | Hermes Haiku (Bedrock) | Claude CLI haiku (free) |
-| Readability | Gemini CLI (free) | Hermes Sonnet (Bedrock) | Claude CLI sonnet (free) |
+| Correctness | Hermes Haiku (Bedrock) | Codex CLI GPT-5.5 (free) | Claude CLI haiku (free) |
+| Readability | Hermes Sonnet (Bedrock) | Gemini CLI (free) | Claude CLI sonnet (free) |
 | Spec-contract (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
-
-**Why native CLIs over Hermes API proxying**: each CLI manages its own
-auth session. Hermes's OAuth proxying (e.g. Codex OAuth) can have
-stale tokens and intermittent failures. `codex exec` uses your ChatGPT
-subscription directly -- same as opening a new terminal tab.
 
 **With all CLIs installed** (claude + codex + gemini): the full review
 is free, 3 provider families (Anthropic + OpenAI + Google).

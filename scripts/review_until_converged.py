@@ -88,6 +88,7 @@ def _run_one_round(
     context: str,
     previous_fp: set[FindingKey],
     auto_commit: bool,
+    prefer_hermes: bool = False,
 ) -> tuple[int | None, set[FindingKey]]:
     """Execute a single round. Return (exit_code or None, new_fingerprint).
 
@@ -108,7 +109,7 @@ def _run_one_round(
     audit_text = audit_path.read_text()
 
     t0 = time.time()
-    launch_reviewers(round_dir, diff_text, audit_text, context, backends)
+    launch_reviewers(round_dir, diff_text, audit_text, context, backends, prefer_hermes)
     print(f"Reviewers finished in {time.time() - t0:.0f}s")
 
     results = extract_results(round_dir)
@@ -170,6 +171,15 @@ def main() -> int:
         "--auto-commit", action="store_true", help="Commit and push after each round"
     )
     parser.add_argument("--review-dir", type=Path, default=None)
+    parser.add_argument(
+        "--prefer-hermes",
+        action="store_true",
+        help=(
+            "Route Anthropic reviewers through Hermes/Bedrock (paid API) "
+            "instead of the local claude CLI. Also triggered automatically "
+            "when .claude/use-hermes exists in the project root."
+        ),
+    )
     args = parser.parse_args()
 
     repo = args.repo.resolve()
@@ -182,6 +192,13 @@ def main() -> int:
     if not backends["claude"] and not backends["hermes"]:
         print("ERROR: need claude or hermes for Anthropic reviewers")
         return 1
+
+    # Bedrock opt-in: explicit flag OR project-pinned via .claude/use-hermes.
+    # Default is the free local CLI path so casual users aren't surprised by
+    # Bedrock charges.
+    prefer_hermes = args.prefer_hermes or (repo / ".claude" / "use-hermes").exists()
+    if prefer_hermes:
+        print("Bedrock opt-in: routing Anthropic reviewers via Hermes")
 
     session_id = datetime.now(tz=UTC).strftime("%Y%m%d_%H%M%S")
     session_dir = review_dir / f"loop_{session_id}"
@@ -200,6 +217,7 @@ def main() -> int:
             context,
             previous_fp,
             args.auto_commit,
+            prefer_hermes,
         )
         if exit_code is not None:
             return exit_code

@@ -46,7 +46,15 @@ def collect_diff(round_dir: Path, repo: Path) -> tuple[Path, int]:
 
 
 def run_preflight(round_dir: Path, repo: Path) -> Path:
-    """Run preflight audit, return path to audit JSON."""
+    """Run preflight audit, return path to audit JSON.
+
+    review_preflight.py exits 1 when ``n_warnings > 0`` to signal humans
+    that the tree has concerns worth eyeballing. That signal must NOT be
+    fatal for the automated review loop -- if the audit JSON was written
+    successfully, the reviewers can read the warnings from it and decide
+    whether they're blocking. Only treat the run as failed if the audit
+    JSON wasn't produced at all.
+    """
     audit_path = round_dir / "audit.json"
     result = _run(
         [
@@ -57,8 +65,9 @@ def run_preflight(round_dir: Path, repo: Path) -> Path:
         ],
         cwd=repo,
     )
-    if result.returncode != 0:
-        raise RuntimeError(f"preflight failed: {result.stderr}")
     if not audit_path.exists():
-        raise RuntimeError("preflight did not produce audit JSON")
+        raise RuntimeError(
+            f"preflight failed (no audit JSON, exit {result.returncode}): "
+            f"{result.stderr}"
+        )
     return audit_path

@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import subprocess
-from pathlib import Path
+from typing import IO, TYPE_CHECKING
 
 from .config import REVIEWER_TIMEOUT
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+ReviewerProc = tuple[int, "subprocess.Popen[str]", str, IO[str], IO[str]]
 
 _LENSES = [
     (
@@ -105,24 +110,79 @@ def _choose_command(
     prompt_path: Path,
     round_dir: Path,
     backends: dict[str, bool],
-    rebuild_prompt: callable,
-) -> list[str] | None:
-    """Pick the command for a reviewer slot, with fallbacks across backends."""
+) -> tuple[list[str], str | None] | None:
+    """Pick the command for a reviewer slot, with fallbacks across backends.
+
+    Returns ``(cmd, rebuild_label)``, where ``rebuild_label`` is set when
+    the chosen backend needs the prompt to be rebuilt with a different
+    model label (currently only slot 2's hermes-haiku fallback). Returns
+    ``None`` if no backend is available.
+    """
     if slot in (1, 4) and backends["hermes"]:
-        return _hermes_cmd(prompt_path, "us.anthropic.claude-opus-4-6-v1")
+        return _hermes_cmd(prompt_path, "us.anthropic.claude-opus-4-6-v1"), None
     if slot == 2 and backends["codex"]:
         result_path = round_dir / f"result-{slot}.json"
-        return ["codex", "exec", "-o", str(result_path), "-"]
+        return ["codex", "exec", "-o", str(result_path), "-"], None
     if slot == 2 and backends["hermes"]:
-        rebuild_prompt("claude-haiku-4.5")
-        return _hermes_cmd(prompt_path, "us.anthropic.claude-haiku-4-5-20251001-v1:0")
+        cmd = _hermes_cmd(prompt_path, "us.anthropic.claude-haiku-4-5-20251001-v1:0")
+        return cmd, "claude-haiku-4.5"
     if slot == 3 and backends["gemini"]:
-        return ["gemini", "--approval-mode", "plan", "--skip-trust"]
+        return ["gemini", "--approval-mode", "plan", "--skip-trust"], None
     if slot == 3 and backends["hermes"]:
-        return _hermes_cmd(prompt_path, "us.anthropic.claude-sonnet-4-6-v1")
+        return _hermes_cmd(prompt_path, "us.anthropic.claude-sonnet-4-6-v1"), None
     if backends["claude"]:
-        return _claude_cmd(slot)
+        return _claude_cmd(slot), None
     return None
+
+
+def _stdin_backends() -> tuple[str, ...]:
+    """CLI backends that accept the prompt on stdin (not via filepath)."""
+    return ("codex", "gemini", "claude")
+
+
+def _launch_one(
+    slot: int,
+    lens_args: tuple[str, str, str, str],
+    diff: str,
+    audit: str,
+    context: str,
+    round_dir: Path,
+    backends: dict[str, bool],
+) -> ReviewerProc | None:
+    """Launch a single reviewer subprocess. Return tracking tuple or None."""
+    lens, focus, rv, model_label = lens_args
+    prompt = build_reviewer_prompt(lens, focus, rv, model_label, diff, audit, context)
+    prompt_path = round_dir / f"prompt-{slot}.txt"
+    prompt_path.write_text(prompt)
+
+    choice = _choose_command(slot, prompt_path, round_dir, backends)
+    if choice is None:
+        print(f"  R{slot}: SKIPPED (no backend)")
+        return None
+    cmd, rebuild_label = choice
+    if rebuild_label is not None:
+        prompt = build_reviewer_prompt(
+            lens, focus, rv, rebuild_label, diff, audit, context
+        )
+        prompt_path.write_text(prompt)
+
+    # The Popen handles intentionally outlive these open() calls; they are
+    # closed in launch_reviewers' wait loop after the subprocess finishes.
+    out_f = open(round_dir / f"raw-{slot}.txt", "w")  # noqa: SIM115
+    err_f = open(round_dir / f"stderr-{slot}.txt", "w")  # noqa: SIM115
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE if cmd[0] in _stdin_backends() else None,
+        stdout=out_f,
+        stderr=err_f,
+        text=True,
+    )
+    if cmd[0] in _stdin_backends():
+        assert proc.stdin is not None  # PIPE guaranteed above
+        proc.stdin.write(prompt)
+        proc.stdin.close()
+    print(f"  R{slot}: launched via {cmd[0]}")
+    return slot, proc, cmd[0], out_f, err_f
 
 
 def launch_reviewers(
@@ -133,49 +193,17 @@ def launch_reviewers(
     backends: dict[str, bool],
 ) -> None:
     """Launch 4 reviewers in parallel, write raw outputs to round_dir."""
-    procs = []
-    for i, (lens, focus, rv, ml) in enumerate(_LENSES, 1):
-        prompt = build_reviewer_prompt(lens, focus, rv, ml, diff, audit, context)
-        prompt_path = round_dir / f"prompt-{i}.txt"
-        prompt_path.write_text(prompt)
-        out_path = round_dir / f"raw-{i}.txt"
-        err_path = round_dir / f"stderr-{i}.txt"
-
-        # Closure so _choose_command can rebuild the prompt with a different
-        # model label without us threading it through every branch.
-        prompt_holder = {"text": prompt}
-
-        def rebuild(label: str, _i=i, _lens=lens, _focus=focus, _rv=rv) -> None:
-            new_prompt = build_reviewer_prompt(
-                _lens, _focus, _rv, label, diff, audit, context
-            )
-            prompt_path.write_text(new_prompt)
-            prompt_holder["text"] = new_prompt
-
-        cmd = _choose_command(i, prompt_path, round_dir, backends, rebuild)
-        if cmd is None:
-            print(f"  R{i}: SKIPPED (no backend)")
-            continue
-        out_f = open(out_path, "w")
-        err_f = open(err_path, "w")
-        proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE if cmd[0] in ("codex", "gemini", "claude") else None,
-            stdout=out_f,
-            stderr=err_f,
-            text=True,
-        )
-        if cmd[0] in ("codex", "gemini", "claude"):
-            proc.stdin.write(prompt_holder["text"])
-            proc.stdin.close()
-        procs.append((i, proc, cmd[0], out_f, err_f))
-        print(f"  R{i}: launched via {cmd[0]}")
-    for i, proc, _, out_f, err_f in procs:
+    procs: list[ReviewerProc] = []
+    for i, lens_args in enumerate(_LENSES, 1):
+        tracked = _launch_one(i, lens_args, diff, audit, context, round_dir, backends)
+        if tracked is not None:
+            procs.append(tracked)
+    for slot, proc, _, out_f, err_f in procs:
         try:
             proc.wait(timeout=REVIEWER_TIMEOUT)
         except subprocess.TimeoutExpired:
             proc.kill()
-            print(f"  R{i}: TIMEOUT after {REVIEWER_TIMEOUT}s")
+            print(f"  R{slot}: TIMEOUT after {REVIEWER_TIMEOUT}s")
         finally:
             out_f.close()
             err_f.close()

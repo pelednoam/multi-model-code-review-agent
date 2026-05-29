@@ -33,7 +33,7 @@ _CELL_ARRAY_KEYS = (
 )
 
 
-def _summarize_per_cell(per_cell: dict) -> dict[str, dict[str, Any]]:
+def _summarize_per_cell(per_cell: dict[str, Any]) -> dict[str, dict[str, Any]]:
     cells = {}
     for cell_name, cell_data in per_cell.items():
         cell_info: dict[str, Any] = {}
@@ -48,7 +48,7 @@ def _summarize_per_cell(per_cell: dict) -> dict[str, dict[str, Any]]:
     return cells
 
 
-def _summarize_cells_array(cells_list: list) -> list[dict[str, Any]]:
+def _summarize_cells_array(cells_list: list[Any]) -> list[dict[str, Any]]:
     out = []
     for cell in cells_list:
         if not isinstance(cell, dict):

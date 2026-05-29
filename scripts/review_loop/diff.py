@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .backends import _run
 from .config import SCRIPTS_DIR
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def collect_diff(round_dir: Path, repo: Path) -> tuple[Path, int]:

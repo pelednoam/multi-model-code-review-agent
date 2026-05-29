@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import subprocess
-from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from .config import MERGE_TIMEOUT
 
+if TYPE_CHECKING:
+    from pathlib import Path
 
-def _format_fixes(findings: list[dict]) -> str:
+
+def _format_fixes(findings: list[dict[str, Any]]) -> str:
     return "\n\n".join(
         f"### Fix {i} ({f['_reviewer']}): {f['file']}\n"
         f"Issue: {f.get('issue', '')}\n"
@@ -17,7 +20,7 @@ def _format_fixes(findings: list[dict]) -> str:
     )
 
 
-def _build_prompt(findings: list[dict], repo: Path) -> str:
+def _build_prompt(findings: list[dict[str, Any]], repo: Path) -> str:
     return (
         "You are a code merge agent. You have NOT seen the development "
         "conversation. Apply these concrete code fixes from independent "
@@ -32,7 +35,7 @@ def _build_prompt(findings: list[dict], repo: Path) -> str:
 
 
 def apply_fixes(
-    findings: list[dict],
+    findings: list[dict[str, Any]],
     round_dir: Path,
     backends: dict[str, bool],
     repo: Path,
@@ -44,8 +47,9 @@ def apply_fixes(
     prompt = _build_prompt(findings, repo)
     (round_dir / "merge-prompt.txt").write_text(prompt)
     print(f"  Launching merge agent for {len(findings)} fixes...")
-    out_f = open(round_dir / "merge-output.json", "w")
-    err_f = open(round_dir / "merge-stderr.txt", "w")
+    # The Popen handles intentionally outlive these open() calls; closed in finally.
+    out_f = open(round_dir / "merge-output.json", "w")  # noqa: SIM115
+    err_f = open(round_dir / "merge-stderr.txt", "w")  # noqa: SIM115
     try:
         proc = subprocess.Popen(
             [
@@ -64,6 +68,7 @@ def apply_fixes(
             stderr=err_f,
             text=True,
         )
+        assert proc.stdin is not None  # PIPE guaranteed above
         proc.stdin.write(prompt)
         proc.stdin.close()
         try:

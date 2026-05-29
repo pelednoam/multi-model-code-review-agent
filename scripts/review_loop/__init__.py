@@ -28,12 +28,12 @@ from .results import extract_results
 from .reviewers import build_reviewer_prompt, launch_reviewers
 
 __all__ = [
-    "FindingKey",
     "MERGE_TIMEOUT",
     "REPO_ROOT",
     "REVIEWER_TIMEOUT",
     "SCRIPTS_DIR",
     "TEST_TIMEOUT",
+    "FindingKey",
     "_run",
     "apply_fixes",
     "build_reviewer_prompt",

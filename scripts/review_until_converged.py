@@ -57,12 +57,12 @@ from scripts.review_loop import (  # noqa: E402
 )
 
 __all__ = [
-    "FindingKey",
     "MERGE_TIMEOUT",
     "REPO_ROOT",
     "REVIEWER_TIMEOUT",
     "SCRIPTS_DIR",
     "TEST_TIMEOUT",
+    "FindingKey",
     "_run",
     "apply_fixes",
     "build_reviewer_prompt",
@@ -116,7 +116,8 @@ def _run_one_round(
     print(f"Results: {n_ok}/4 reviewers succeeded")
     if n_ok == 0:
         print(
-            "\nERROR: no reviewer results could be parsed; cannot determine convergence."
+            "\nERROR: no reviewer results could be parsed; "
+            "cannot determine convergence."
         )
         return 7, previous_fp
 
@@ -160,7 +161,8 @@ def main() -> int:
     """CLI entry point."""
     # Force line-buffered stdout so progress is visible when output
     # is redirected to a file or pipe (e.g. background invocations).
-    sys.stdout.reconfigure(line_buffering=True)
+    # mypy doesn't know sys.stdout is always a TextIOWrapper here.
+    sys.stdout.reconfigure(line_buffering=True)  # type: ignore[union-attr]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", type=Path, default=REPO_ROOT)
     parser.add_argument("--max-rounds", type=int, default=5)

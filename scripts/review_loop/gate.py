@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import subprocess
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .backends import _run
 from .config import TEST_TIMEOUT
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def run_gate(repo: Path) -> tuple[bool, str]:

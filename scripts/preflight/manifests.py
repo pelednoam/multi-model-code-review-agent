@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import itertools
 import json
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .config import REPO_ROOT, SIGNED_MANIFESTS
 from .git_state import sha256_file
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _safe_read_json(path: Path) -> Any | None:

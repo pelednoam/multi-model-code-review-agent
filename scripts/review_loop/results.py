@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from .findings import validate_result
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 EXPECTED_REVIEWERS = {
     1: "security",
@@ -15,7 +18,7 @@ EXPECTED_REVIEWERS = {
 }
 
 
-def _try_load_existing_result(result_path: Path, slot: int) -> dict | None:
+def _try_load_existing_result(result_path: Path, slot: int) -> dict[str, Any] | None:
     """Return a valid result dict from a pre-written result-N.json, else None."""
     if not result_path.exists():
         return None
@@ -36,12 +39,13 @@ def _unwrap_claude_result(text: str) -> str:
     except (json.JSONDecodeError, ValueError):
         return text
     if isinstance(wrapper, dict) and isinstance(wrapper.get("result"), str):
-        return wrapper["result"]
+        result: str = wrapper["result"]
+        return result
     return text
 
 
-def _extract_from_raw(round_dir: Path, slot: int) -> dict | None:
-    """Try to parse raw-{slot}.txt as a JSON result, writing result-{slot}.json on success."""
+def _extract_from_raw(round_dir: Path, slot: int) -> dict[str, Any] | None:
+    """Parse raw-{slot}.txt as JSON, writing result-{slot}.json on success."""
     raw_path = round_dir / f"raw-{slot}.txt"
     if not raw_path.exists():
         return None
@@ -62,9 +66,9 @@ def _extract_from_raw(round_dir: Path, slot: int) -> dict | None:
     return d
 
 
-def extract_results(round_dir: Path) -> list[dict | None]:
+def extract_results(round_dir: Path) -> list[dict[str, Any] | None]:
     """Extract and validate result JSON from each reviewer's output."""
-    results: list[dict | None] = []
+    results: list[dict[str, Any] | None] = []
     for i in range(1, 5):
         result_path = round_dir / f"result-{i}.json"
         d = _try_load_existing_result(result_path, i) or _extract_from_raw(round_dir, i)

@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 # When invoked as `python scripts/review_preflight.py`, the repo root
 # is not yet on sys.path -- but the sub-package import needs it. Add
@@ -61,7 +62,7 @@ __all__ = [
 ]
 
 
-def _print_summary(audit: dict) -> None:
+def _print_summary(audit: dict[str, Any]) -> None:
     print(f"  Branch: {audit['git']['branch']}")
     print(f"  Commit: {audit['git']['commit']}")
     print(f"  Changed files: {len(audit['git']['changed_vs_main'])}")

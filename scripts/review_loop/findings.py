@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -13,13 +14,13 @@ class FindingKey:
     issue: str
 
     @classmethod
-    def from_dict(cls, f: dict) -> FindingKey:
+    def from_dict(cls, f: dict[str, Any]) -> FindingKey:
         return cls(file=f.get("file", ""), issue=f.get("issue", ""))
 
 
 def validate_result(
     d: object, i: int, expected_reviewers: dict[int, str]
-) -> dict | None:
+) -> dict[str, Any] | None:
     """Validate result dict has required keys and a findings list. Pin reviewer ID."""
     if not isinstance(d, dict):
         return None
@@ -34,7 +35,9 @@ def validate_result(
     return d
 
 
-def collect_blocking_findings(results: list[dict | None]) -> list[dict]:
+def collect_blocking_findings(
+    results: list[dict[str, Any] | None],
+) -> list[dict[str, Any]]:
     """Return all blocking findings (explicit blocking=true or critical severity)."""
     blocking = []
     for r in results:
@@ -48,6 +51,6 @@ def collect_blocking_findings(results: list[dict | None]) -> list[dict]:
     return blocking
 
 
-def fingerprint(findings: list[dict]) -> set[FindingKey]:
+def fingerprint(findings: list[dict[str, Any]]) -> set[FindingKey]:
     """Stable fingerprint of a set of findings."""
     return {FindingKey.from_dict(f) for f in findings}

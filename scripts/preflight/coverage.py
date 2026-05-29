@@ -22,7 +22,7 @@ def _changed_impl_files(changed_files: list[str]) -> list[str]:
 
 def _run_pytest_with_coverage(
     impl_files: list[str], warnings: list[str]
-) -> dict | None:
+) -> dict[str, Any] | None:
     """Invoke pytest --cov and parse the JSON report. None on failure."""
     cov_json = REPO_ROOT / ".coverage.json"
     cov_json.unlink(missing_ok=True)
@@ -56,7 +56,8 @@ def _run_pytest_with_coverage(
         return None
 
     try:
-        return json.loads(cov_json.read_text())
+        data: dict[str, Any] = json.loads(cov_json.read_text())
+        return data
     except (json.JSONDecodeError, OSError):
         warnings.append("coverage report could not be parsed")
         return None

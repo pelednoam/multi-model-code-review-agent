@@ -31,6 +31,20 @@ cp "$REPO_ROOT/scripts/review_until_converged.py"        "$TARGET/scripts/"
 cp "$REPO_ROOT/scripts/validate_review_results.py"       "$TARGET/scripts/"
 cp "$REPO_ROOT/docs/ensemble_review_result_schema.json"  "$TARGET/docs/"
 
+# Sub-packages: helpers split out of the two entry points so each file
+# stays under 300 lines. Entry points re-export everything for back compat.
+# Use rsync with --exclude when available so we never copy stale bytecode;
+# fall back to cp -R + find-delete otherwise.
+if command -v rsync >/dev/null 2>&1; then
+  rsync -a --exclude __pycache__ "$REPO_ROOT/scripts/preflight/"   "$TARGET/scripts/preflight/"
+  rsync -a --exclude __pycache__ "$REPO_ROOT/scripts/review_loop/" "$TARGET/scripts/review_loop/"
+else
+  cp -R "$REPO_ROOT/scripts/preflight"   "$TARGET/scripts/preflight"
+  cp -R "$REPO_ROOT/scripts/review_loop" "$TARGET/scripts/review_loop"
+  find "$TARGET/scripts/preflight" "$TARGET/scripts/review_loop" \
+    -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+fi
+
 cat <<EOF
 
 Installed multi-model code review agent into:
@@ -42,6 +56,8 @@ Files written:
   scripts/review_preflight.py
   scripts/review_until_converged.py
   scripts/validate_review_results.py
+  scripts/preflight/        (helpers for the preflight audit)
+  scripts/review_loop/      (helpers for the convergence loop)
   docs/ensemble_review_result_schema.json
 
 Next step: open Claude Code in that project and say one of:

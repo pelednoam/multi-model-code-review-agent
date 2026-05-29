@@ -141,9 +141,11 @@ guarantee matters. Opt in three ways:
 
 1. **Verbal trigger**: say "hermes review", "bedrock review", or
    "isolated review" in Claude Code.
-2. **Project-pinned**: create an empty file at `.claude/use-hermes`
-   in the project root. Every review in that project (CLI or
-   convergence-loop) auto-uses Bedrock for Anthropic reviewers.
+2. **Project-pinned**: create an empty file at `.use-hermes` in the
+   project root. Every review in that project (CLI or convergence-
+   loop) auto-uses Bedrock for Anthropic reviewers. The marker lives
+   at repo root (not under `.claude/`) so it survives `.claude/`
+   being gitignored and can be committed to share the policy.
 3. **CLI flag**: `python scripts/review_until_converged.py
    --prefer-hermes` for the convergence loop.
 

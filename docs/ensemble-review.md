@@ -63,7 +63,7 @@ If the user says "quick review", "review this", or just "ensemble review" -- use
 
 If the user says "full review", "full ensemble review", or "ensemble review" -- use full mode.
 
-If the user says "hermes review", "bedrock review", or "isolated review", or if `.claude/use-hermes` exists in the project root, use full mode AND prefer Hermes/Bedrock over local CLIs for Anthropic reviewers (see "Bedrock opt-in" below).
+If the user says "hermes review", "bedrock review", or "isolated review", or if `.use-hermes` exists in the project root, use full mode AND prefer Hermes/Bedrock over local CLIs for Anthropic reviewers (see "Bedrock opt-in" below).
 
 # CLI and provider detection
 
@@ -76,9 +76,9 @@ HAS_CODEX=false;  command -v codex  &>/dev/null && HAS_CODEX=true
 HAS_GEMINI=false; command -v gemini &>/dev/null && HAS_GEMINI=true
 
 # Bedrock opt-in: set when the user verbally asked for hermes/bedrock,
-# OR when the project pinned it via .claude/use-hermes.
+# OR when the project pinned it via .use-hermes.
 PREFER_HERMES=false
-if [ -f ".claude/use-hermes" ]; then PREFER_HERMES=true; fi
+if [ -f ".use-hermes" ]; then PREFER_HERMES=true; fi
 # Also set PREFER_HERMES=true if the user's request matched
 # "hermes review" / "bedrock review" / "isolated review".
 ```

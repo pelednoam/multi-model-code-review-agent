@@ -177,7 +177,7 @@ def main() -> int:
         help=(
             "Route Anthropic reviewers through Hermes/Bedrock (paid API) "
             "instead of the local claude CLI. Also triggered automatically "
-            "when .claude/use-hermes exists in the project root."
+            "when .use-hermes exists in the project root."
         ),
     )
     args = parser.parse_args()
@@ -193,10 +193,11 @@ def main() -> int:
         print("ERROR: need claude or hermes for Anthropic reviewers")
         return 1
 
-    # Bedrock opt-in: explicit flag OR project-pinned via .claude/use-hermes.
-    # Default is the free local CLI path so casual users aren't surprised by
-    # Bedrock charges.
-    prefer_hermes = args.prefer_hermes or (repo / ".claude" / "use-hermes").exists()
+    # Bedrock opt-in: explicit flag OR project-pinned via .use-hermes
+    # at repo root. (Marker lives outside .claude/ so it can be committed
+    # even when .claude/ is gitignored.) Default is the free local CLI
+    # path so casual users aren't surprised by Bedrock charges.
+    prefer_hermes = args.prefer_hermes or (repo / ".use-hermes").exists()
     if prefer_hermes:
         print("Bedrock opt-in: routing Anthropic reviewers via Hermes")
 

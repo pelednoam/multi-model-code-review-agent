@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from typing import TYPE_CHECKING
 
 from .backends import _run
@@ -22,7 +23,7 @@ def run_gate(repo: Path) -> tuple[bool, str]:
         ("ruff check", ["ruff", "check", "."]),
         ("ruff format --check", ["ruff", "format", "--check", "."]),
         ("mypy", ["mypy", "scripts/"]),
-        ("pytest", ["python", "-m", "pytest", "tests/", "-x", "-q"]),
+        ("pytest", [sys.executable, "-m", "pytest", "tests/", "-x", "-q"]),
     ]
     for label, cmd in gate_steps:
         output_parts.append(f"\n=== {label} ===\n")

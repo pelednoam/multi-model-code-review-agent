@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from .config import REPO_ROOT, SELF_SKIP_PREFIXES, SUSPICIOUS_COMPILED
+from .config import (
+    REPO_ROOT,
+    SELF_SKIP_PREFIXES,
+    SOURCE_DIRS,
+    SUSPICIOUS_COMPILED,
+    TEST_DIRS,
+)
 from .git_state import is_safe_relpath
 
 
@@ -44,18 +50,25 @@ def scan_suspicious_patterns(
 def check_test_coverage_alignment(
     changed_files: list[str],
 ) -> list[str]:
-    """Check for implementation changes without test changes."""
+    """Check for implementation changes without test changes.
+
+    Uses ``SOURCE_DIRS`` and ``TEST_DIRS`` from config to identify
+    impl vs test files. Override those constants for non-conventional
+    repo layouts (e.g. ``backend/``, ``frontend/__tests__/``).
+    """
     warnings = []
     impl_files = {
         f
         for f in changed_files
-        if (f.startswith("src/") or f.startswith("research/"))
+        if any(f.startswith(d) for d in SOURCE_DIRS)
         and f.endswith(".py")
         and not f.split("/")[-1].startswith("test_")
         and "__init__" not in f
     }
     test_files = {
-        f for f in changed_files if f.startswith("tests/") and f.endswith(".py")
+        f
+        for f in changed_files
+        if any(f.startswith(d) for d in TEST_DIRS) and f.endswith(".py")
     }
 
     if impl_files and not test_files:

@@ -14,7 +14,7 @@ from .config import (
     SCRIPTS_DIR,
     TEST_TIMEOUT,
 )
-from .diff import collect_diff, run_preflight
+from .diff import SecretsDetectedError, collect_diff, run_preflight
 from .findings import (
     FindingKey,
     collect_blocking_findings,
@@ -34,6 +34,7 @@ __all__ = [
     "SCRIPTS_DIR",
     "TEST_TIMEOUT",
     "FindingKey",
+    "SecretsDetectedError",
     "_run",
     "apply_fixes",
     "build_reviewer_prompt",

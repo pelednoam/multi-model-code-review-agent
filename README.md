@@ -224,6 +224,8 @@ The loop exits on the first of:
 | 4 | Gate failed | Lint / format / mypy / pytest failed after fixes were applied |
 | 5 | Commit/push failed | `--auto-commit` was set and git refused the push |
 | 6 | Max rounds reached | `--max-rounds` (default 5) hit without convergence |
+| 7 | No reviewer results | Zero of 4 reviewers produced parseable JSON (rare, usually a CLI auth or network failure) |
+| 8 | **Secrets detected** | `scrub_diff.py` redacted at least one line. Rotate the leaked secret and re-stage the diff before re-running |
 
 Exit 4 means the loop stops **without rolling back** -- the failing
 diff is left in the working tree so you can inspect what went wrong.
@@ -360,12 +362,21 @@ project.
 
 ### 2. Configure for your project (optional)
 
-Edit `scripts/review_preflight.py` to set:
+Edit `scripts/preflight/config.py` to set:
 - `SIGNED_MANIFESTS`: paths to your project's signed JSON artifacts
 - `ARTIFACT_DIRS`: directories containing JSON artifacts to audit
+- `SOURCE_DIRS`: directories that hold source code. Defaults to
+  `["src/", "research/"]`. **Override this for any layout that isn't
+  a "src layout"** -- e.g. `["backend/", "frontend/src/", "lib/"]` for
+  a typical full-stack app. If you skip this, the coverage gate is
+  silently inoperative: the audit will print "coverage gate inoperative"
+  when it detects Python files outside `SOURCE_DIRS`.
+- `TEST_DIRS`: directories that hold tests. Defaults to `["tests/"]`.
 
-Defaults work fine for most projects -- the audit will report no
-signed-manifest results rather than failing.
+Defaults work fine for projects using the conventional `src/` /
+`tests/` layout. The audit will report no signed-manifest results
+rather than failing, but `SOURCE_DIRS` mismatch *is* surfaced as a
+warning so you don't miss it.
 
 ### 3. Run from Claude Code
 

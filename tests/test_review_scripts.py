@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRUB_SCRIPT = REPO_ROOT / "scripts" / "scrub_diff.py"
 PREFLIGHT_SCRIPT = REPO_ROOT / "scripts" / "review_preflight.py"
@@ -423,3 +425,80 @@ class TestRunGate:
             "pytest",
         ):
             assert label in output
+
+
+class TestSecretsDetected:
+    """The scrubber must STOP the loop, not just warn."""
+
+    def test_exception_is_exported(self) -> None:
+        from scripts.review_until_converged import SecretsDetectedError
+
+        assert issubclass(SecretsDetectedError, RuntimeError)
+
+    def test_collect_diff_raises_on_redaction(self, tmp_path: Path) -> None:
+        # Stub scrub_diff.py with one that exits 1 to simulate redaction.
+        # Set up a git repo with one commit + a staged change so collect_diff
+        # has a real diff to feed the (fake) scrubber.
+        from unittest.mock import patch
+
+        from scripts.review_loop.diff import SecretsDetectedError, collect_diff
+
+        round_dir = tmp_path / "round"
+        round_dir.mkdir()
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        env = {
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@t",
+        }
+        subprocess.run(
+            ["git", "init", "-q", "-b", "main"], cwd=repo, check=True, env=env
+        )
+        (repo / "x.py").write_text("a = 1\n")
+        subprocess.run(["git", "add", "x.py"], cwd=repo, check=True, env=env)
+        subprocess.run(
+            ["git", "commit", "-q", "-m", "init"], cwd=repo, check=True, env=env
+        )
+        # Need HEAD~1 to resolve, so make a second commit.
+        (repo / "x.py").write_text("a = 2\n")
+        subprocess.run(["git", "add", "x.py"], cwd=repo, check=True, env=env)
+        subprocess.run(
+            ["git", "commit", "-q", "-m", "two"], cwd=repo, check=True, env=env
+        )
+
+        fake_scrubber = tmp_path / "scrub_diff.py"
+        fake_scrubber.write_text(
+            'import sys\nprint("redacted: 1 line", file=sys.stderr)\nsys.exit(1)\n'
+        )
+        with patch("scripts.review_loop.diff.SCRIPTS_DIR", tmp_path):
+            with pytest.raises(SecretsDetectedError) as exc_info:
+                collect_diff(round_dir, repo)
+        assert "rotated" in str(exc_info.value)
+
+
+class TestSourceDirsConfigurable:
+    """Coverage gate must surface when SOURCE_DIRS doesn't match anything."""
+
+    def test_warning_emitted_when_python_files_outside_source_dirs(self) -> None:
+        from scripts.preflight.coverage import measure_test_coverage
+
+        warnings: list[str] = []
+        # Simulate a backend/app project: changed Python files exist but
+        # none under the default src/ or research/ prefixes.
+        changed = ["backend/views.py", "backend/models.py"]
+        result = measure_test_coverage(changed, warnings)
+        assert result == []
+        assert len(warnings) == 1
+        assert "coverage gate inoperative" in warnings[0]
+        assert "SOURCE_DIRS" in warnings[0]
+
+    def test_no_warning_when_no_python_files(self) -> None:
+        from scripts.preflight.coverage import measure_test_coverage
+
+        warnings: list[str] = []
+        # Doc-only or config-only diff: nothing to measure, no warning.
+        result = measure_test_coverage(["docs/foo.md", "config.yaml"], warnings)
+        assert result == []
+        assert warnings == []

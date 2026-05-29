@@ -4,16 +4,17 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from typing import Any
 
-from .config import COVERAGE_TARGET, REPO_ROOT
+from .config import COVERAGE_TARGET, REPO_ROOT, SOURCE_DIRS
 
 
 def _changed_impl_files(changed_files: list[str]) -> list[str]:
     return [
         f
         for f in changed_files
-        if (f.startswith("src/") or f.startswith("research/"))
+        if any(f.startswith(d) for d in SOURCE_DIRS)
         and f.endswith(".py")
         and "__init__" not in f
         and "/test" not in f
@@ -30,7 +31,7 @@ def _run_pytest_with_coverage(
     try:
         result = subprocess.run(
             [
-                "python",
+                sys.executable,
                 "-m",
                 "pytest",
                 "tests/",
@@ -74,9 +75,23 @@ def measure_test_coverage(
     Returns one entry per changed source file with: coverage %,
     uncovered line numbers, uncovered branches. Skipped silently
     if pytest is not installed or no tests exist.
+
+    Emits a warning when the diff contains Python files but none of
+    them match the configured SOURCE_DIRS -- that's a signal the
+    coverage gate is silently inoperative for this repo and the user
+    should override SOURCE_DIRS for their layout (e.g. add "backend/",
+    "app/", "lib/").
     """
     impl_files = _changed_impl_files(changed_files)
     if not impl_files:
+        changed_python = [f for f in changed_files if f.endswith(".py")]
+        if changed_python:
+            warnings.append(
+                "coverage gate inoperative: "
+                f"{len(changed_python)} Python file(s) changed but none "
+                f"matched SOURCE_DIRS={SOURCE_DIRS}. Override SOURCE_DIRS "
+                "in scripts/preflight/config.py for this repo's layout."
+            )
         return []
     cov_data = _run_pytest_with_coverage(impl_files, warnings)
     if cov_data is None:

@@ -26,6 +26,22 @@ ARTIFACT_DIRS: list[str] = [
     "docs/",
 ]
 
+# Directories that hold source code in this project. Drives the
+# coverage gap detector and the test/impl alignment check. Override
+# this for monorepos or non-standard layouts (e.g. ["backend/",
+# "frontend/src/", "lib/"]). The defaults match the conventional
+# "src layout" plus a research workspace; for a Django/FastAPI/Next
+# project you almost certainly need to override.
+SOURCE_DIRS: list[str] = [
+    "src/",
+    "research/",
+]
+
+# Directories that hold tests. Used by the test/impl alignment warning.
+TEST_DIRS: list[str] = [
+    "tests/",
+]
+
 SUSPICIOUS_COMPILED: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"fill_value\s*=\s*0"), "silent zero-fill"),
     (re.compile(r"\.fillna\s*\(\s*0"), "silent NaN fill with 0"),

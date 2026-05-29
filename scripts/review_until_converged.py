@@ -40,6 +40,7 @@ from scripts.review_loop import (  # noqa: E402
     SCRIPTS_DIR,
     TEST_TIMEOUT,
     FindingKey,
+    SecretsDetectedError,
     _run,
     apply_fixes,
     build_reviewer_prompt,
@@ -63,6 +64,7 @@ __all__ = [
     "SCRIPTS_DIR",
     "TEST_TIMEOUT",
     "FindingKey",
+    "SecretsDetectedError",
     "_run",
     "apply_fixes",
     "build_reviewer_prompt",
@@ -98,7 +100,11 @@ def _run_one_round(
     round_dir = session_dir / f"round-{round_num}"
     round_dir.mkdir(exist_ok=True)
 
-    diff_path, n_lines = collect_diff(round_dir, repo)
+    try:
+        diff_path, n_lines = collect_diff(round_dir, repo)
+    except SecretsDetectedError as e:
+        print(f"\nABORT: secrets detected in diff.\n\n{e}")
+        return 8, previous_fp
     print(f"Diff: {n_lines} lines")
     if n_lines == 0:
         print("No changes -- nothing to review.")

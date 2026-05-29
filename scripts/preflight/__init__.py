@@ -12,6 +12,8 @@ from .config import (
     COVERAGE_TARGET,
     REPO_ROOT,
     SIGNED_MANIFESTS,
+    SOURCE_DIRS,
+    TEST_DIRS,
 )
 from .coverage import measure_test_coverage
 from .git_state import _run_git, collect_git_state, is_safe_relpath, sha256_file
@@ -24,6 +26,8 @@ __all__ = [
     "COVERAGE_TARGET",
     "REPO_ROOT",
     "SIGNED_MANIFESTS",
+    "SOURCE_DIRS",
+    "TEST_DIRS",
     "_run_git",
     "audit_signed_manifests",
     "check_test_coverage_alignment",

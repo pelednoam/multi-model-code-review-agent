@@ -13,8 +13,23 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+class SecretsDetectedError(RuntimeError):
+    """Raised when scrub_diff.py reports that secrets were redacted.
+
+    The agent contract says secrets must never reach a reviewer -- the
+    review must STOP so the user can rotate the secret and re-stage.
+    Continuing with a partially-scrubbed diff would defeat the whole
+    point of having a scrubber.
+    """
+
+
 def collect_diff(round_dir: Path, repo: Path) -> tuple[Path, int]:
-    """Collect scrubbed diff against origin/main."""
+    """Collect scrubbed diff against origin/main.
+
+    Raises:
+        SecretsDetectedError: scrub_diff.py redacted at least one line.
+            The user must rotate the leaked secret and re-run.
+    """
     diff_path = round_dir / "diff.patch"
     git = _run(["git", "diff", "--merge-base", "origin/main", "--", "."], cwd=repo)
     if git.returncode != 0:
@@ -29,7 +44,7 @@ def collect_diff(round_dir: Path, repo: Path) -> tuple[Path, int]:
     diff_input = git.stdout or ""
     with open(diff_path, "w") as out_f:
         scrubber = subprocess.Popen(
-            ["python", str(SCRIPTS_DIR / "scrub_diff.py")],
+            [sys.executable, str(SCRIPTS_DIR / "scrub_diff.py")],
             stdin=subprocess.PIPE,
             stdout=out_f,
             stderr=subprocess.PIPE,
@@ -37,8 +52,12 @@ def collect_diff(round_dir: Path, repo: Path) -> tuple[Path, int]:
         )
         _, scrub_err = scrubber.communicate(input=diff_input)
     if scrubber.returncode != 0:
-        print(
-            f"  WARNING: scrubber redacted lines: {scrub_err.strip()}", file=sys.stderr
+        raise SecretsDetectedError(
+            "scrub_diff.py redacted at least one line from the diff. "
+            "The leaked secret must be rotated, the diff re-staged, and "
+            "the review re-run before proceeding.\n"
+            f"Scrubber stderr: {scrub_err.strip()}\n"
+            f"Redacted diff saved to: {diff_path}"
         )
     with open(diff_path) as f:
         n_lines = sum(1 for _ in f)
@@ -58,7 +77,7 @@ def run_preflight(round_dir: Path, repo: Path) -> Path:
     audit_path = round_dir / "audit.json"
     result = _run(
         [
-            "python",
+            sys.executable,
             str(SCRIPTS_DIR / "review_preflight.py"),
             "--output",
             str(audit_path),

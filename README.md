@@ -326,7 +326,19 @@ behavior instead of specified behavior.
 **Full mode**: at least `claude` or `hermes` must be installed for
 Anthropic reviewers. For cross-provider diversity, also install:
 - [Codex CLI](https://github.com/openai/codex) for GPT-5.5
-  (uses ChatGPT subscription, no API credits)
+  (uses ChatGPT subscription, no API credits). The pipeline uses
+  whatever model + reasoning effort your `~/.codex/config.toml` has
+  (defaults to `gpt-5.5` at `medium` effort for Plus). To bump to
+  the **GPT-5.5 Pro** equivalent from the web UI -- same model,
+  deeper reasoning, slower, more tokens per query -- set the env var
+  before running the agent:
+  ```bash
+  export CODEX_REASONING_EFFORT=high   # or low / medium
+  # optional: also pin a specific model
+  export CODEX_MODEL=gpt-5.5            # or gpt-5.5-codex
+  ```
+  Persist it in `~/.bashrc` / `~/.zshrc` / a project `.envrc` so
+  every review picks it up.
 - [Gemini CLI](https://www.npmjs.com/package/@google/gemini-cli) for
   Gemini (uses Google AI Studio, free tier available). The pipeline
   pins `gemini-2.5-flash` by default -- as of 2026-05, the free tier

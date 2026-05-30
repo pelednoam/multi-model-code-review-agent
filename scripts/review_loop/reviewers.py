@@ -122,6 +122,34 @@ def _gemini_model() -> str:
     return os.environ.get("GEMINI_MODEL", _GEMINI_MODEL_DEFAULT)
 
 
+def _codex_extra_args() -> list[str]:
+    """Build the extra ``codex exec`` flags from CODEX_* env vars.
+
+    Defaults: whatever ``~/.codex/config.toml`` already has (typically
+    ``model = "gpt-5.5"`` and ``model_reasoning_effort = "medium"`` for
+    ChatGPT Plus users).
+
+    Overrides:
+      - ``CODEX_MODEL=<id>``       -- e.g. ``gpt-5.5``, ``gpt-5.5-codex``
+      - ``CODEX_REASONING_EFFORT=<level>`` -- ``low``, ``medium``, or
+        ``high``. ``high`` is the equivalent of "GPT-5.5 Pro" in the
+        ChatGPT web UI: same base model, deeper reasoning (slower, more
+        tokens per query). Worth it for spec-contract review and deep
+        architectural questions; medium is usually fine for line-level
+        correctness review.
+    """
+    import os
+
+    args: list[str] = []
+    model = os.environ.get("CODEX_MODEL")
+    if model:
+        args.extend(["-m", model])
+    effort = os.environ.get("CODEX_REASONING_EFFORT")
+    if effort:
+        args.extend(["-c", f"model_reasoning_effort={effort}"])
+    return args
+
+
 def _choose_command(
     slot: int,
     prompt_path: Path,
@@ -154,7 +182,14 @@ def _choose_command(
 
     if slot == 2 and backends["codex"]:
         result_path = round_dir / f"result-{slot}.json"
-        return ["codex", "exec", "-o", str(result_path), "-"], None
+        return [
+            "codex",
+            "exec",
+            *_codex_extra_args(),
+            "-o",
+            str(result_path),
+            "-",
+        ], None
     if slot == 3 and backends["gemini"]:
         return [
             "gemini",

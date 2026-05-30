@@ -118,7 +118,7 @@ Bedrock opt-in precedence (PREFER_HERMES=true), used for regulated codebases tha
 | CLI | Non-interactive | Read-only | Input | Output |
 |---|---|---|---|---|
 | `claude` | `-p` | `--allowedTools "Read Grep Glob"` | stdin (`< prompt.txt`) | `--output-format json` wraps in `{"result":"..."}` |
-| `codex` | `codex exec` | default sandbox | stdin (pipe) | `-o <file>` writes last message |
+| `codex` | `codex exec` (optional `-m <model> -c model_reasoning_effort=<level>` -- override via `CODEX_MODEL`, `CODEX_REASONING_EFFORT`; `=high` is the "GPT-5.5 Pro" equivalent) | default sandbox | stdin (pipe) | `-o <file>` writes last message |
 | `gemini` | `-p` | `--model <m> --approval-mode plan --skip-trust` (default `<m>` is `gemini-2.5-flash` for free-tier compatibility; override via `GEMINI_MODEL`) | stdin (pipe) | stdout (text, may have fences) |
 | `hermes` | `-z --yolo` | `-t file` | `-z` flag (has ARG_MAX risk for large prompts) | reviewer writes file directly |
 
@@ -383,12 +383,24 @@ launch_cli() {
       echo "R$num: Claude CLI ($model) [free]"
       ;;
     codex)
+      # Build extra flags from CODEX_* env vars.
+      #   CODEX_MODEL=gpt-5.5            (or gpt-5.5-codex)
+      #   CODEX_REASONING_EFFORT=high    -- "GPT-5.5 Pro" equivalent
+      # Defaults: whatever ~/.codex/config.toml has (usually
+      # model=gpt-5.5 + model_reasoning_effort=medium).
+      local codex_extra=()
+      [ -n "${CODEX_MODEL:-}" ] && codex_extra+=(-m "$CODEX_MODEL")
+      [ -n "${CODEX_REASONING_EFFORT:-}" ] && \
+        codex_extra+=(-c "model_reasoning_effort=$CODEX_REASONING_EFFORT")
       timeout 600 codex exec \
+        "${codex_extra[@]}" \
         -o "$REVIEW_TMP/result-$num.json" \
         - < "$prompt_file" \
         1>"$REVIEW_TMP/stdout-$num.txt" \
         2>"$REVIEW_TMP/stderr-$num.txt" &
-      echo "R$num: Codex CLI (GPT-5.5) [free]"
+      local label="${CODEX_MODEL:-gpt-5.5}"
+      [ -n "${CODEX_REASONING_EFFORT:-}" ] && label="$label/$CODEX_REASONING_EFFORT"
+      echo "R$num: Codex CLI ($label) [free]"
       ;;
     gemini)
       # Gemini CLI: -p "appended to input on stdin". Omit -p flag

@@ -507,3 +507,41 @@ class TestSourceDirsConfigurable:
         result = measure_test_coverage(["docs/foo.md", "config.yaml"], warnings)
         assert result == []
         assert warnings == []
+
+
+class TestCodexEnvOverrides:
+    """CODEX_MODEL and CODEX_REASONING_EFFORT pass through to codex exec."""
+
+    def test_no_env_means_no_extra_args(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from scripts.review_loop.reviewers import _codex_extra_args
+
+        monkeypatch.delenv("CODEX_MODEL", raising=False)
+        monkeypatch.delenv("CODEX_REASONING_EFFORT", raising=False)
+        assert _codex_extra_args() == []
+
+    def test_model_env_adds_dash_m(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from scripts.review_loop.reviewers import _codex_extra_args
+
+        monkeypatch.setenv("CODEX_MODEL", "gpt-5.5-codex")
+        monkeypatch.delenv("CODEX_REASONING_EFFORT", raising=False)
+        assert _codex_extra_args() == ["-m", "gpt-5.5-codex"]
+
+    def test_reasoning_high_is_pro_equivalent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from scripts.review_loop.reviewers import _codex_extra_args
+
+        monkeypatch.delenv("CODEX_MODEL", raising=False)
+        monkeypatch.setenv("CODEX_REASONING_EFFORT", "high")
+        # The bash equivalent is `-c model_reasoning_effort=high` and
+        # matches what the ChatGPT web UI labels as "GPT-5.5 Pro".
+        assert _codex_extra_args() == ["-c", "model_reasoning_effort=high"]
+
+    def test_both_env_vars_compose(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from scripts.review_loop.reviewers import _codex_extra_args
+
+        monkeypatch.setenv("CODEX_MODEL", "gpt-5.5")
+        monkeypatch.setenv("CODEX_REASONING_EFFORT", "high")
+        args = _codex_extra_args()
+        assert "-m" in args and "gpt-5.5" in args
+        assert "-c" in args and "model_reasoning_effort=high" in args

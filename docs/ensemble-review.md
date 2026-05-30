@@ -119,7 +119,7 @@ Bedrock opt-in precedence (PREFER_HERMES=true), used for regulated codebases tha
 |---|---|---|---|---|
 | `claude` | `-p` | `--allowedTools "Read Grep Glob"` | stdin (`< prompt.txt`) | `--output-format json` wraps in `{"result":"..."}` |
 | `codex` | `codex exec` | default sandbox | stdin (pipe) | `-o <file>` writes last message |
-| `gemini` | `-p` | `--approval-mode plan --skip-trust` | stdin (pipe) | stdout (text, may have fences) |
+| `gemini` | `-p` | `--model <m> --approval-mode plan --skip-trust` (default `<m>` is `gemini-2.5-flash` for free-tier compatibility; override via `GEMINI_MODEL`) | stdin (pipe) | stdout (text, may have fences) |
 | `hermes` | `-z --yolo` | `-t file` | `-z` flag (has ARG_MAX risk for large prompts) | reviewer writes file directly |
 
 All CLIs receive prompts via stdin (pipe) to avoid ARG_MAX overflow. Hermes uses `-z` which has a size limit -- for very large diffs, consider writing the prompt to a temp file and using Hermes's file-based input if available.
@@ -393,12 +393,16 @@ launch_cli() {
     gemini)
       # Gemini CLI: -p "appended to input on stdin". Omit -p flag
       # entirely and pipe stdin so the prompt IS the input.
+      # Pin to gemini-2.5-flash because gemini-2.5-pro is not in the
+      # free tier (returns HTTP 429). Override with GEMINI_MODEL=... if
+      # you have paid quota.
       timeout 600 gemini \
+        --model "${GEMINI_MODEL:-gemini-2.5-flash}" \
         --approval-mode plan --skip-trust \
         < "$prompt_file" \
         1>"$REVIEW_TMP/stdout-$num.txt" \
         2>"$REVIEW_TMP/stderr-$num.txt" &
-      echo "R$num: Gemini CLI [free]"
+      echo "R$num: Gemini CLI (${GEMINI_MODEL:-gemini-2.5-flash}) [free]"
       ;;
     *)
       echo "R$num: SKIPPED (unknown backend: $cli)"

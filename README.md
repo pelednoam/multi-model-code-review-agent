@@ -328,7 +328,11 @@ Anthropic reviewers. For cross-provider diversity, also install:
 - [Codex CLI](https://github.com/openai/codex) for GPT-5.5
   (uses ChatGPT subscription, no API credits)
 - [Gemini CLI](https://www.npmjs.com/package/@google/gemini-cli) for
-  Gemini (uses Google AI Studio, free tier available)
+  Gemini (uses Google AI Studio, free tier available). The pipeline
+  pins `gemini-2.5-flash` by default -- as of 2026-05, the free tier
+  does not include quota for `gemini-2.5-pro` (it returns HTTP 429).
+  If you have paid quota and want Pro, set `GEMINI_MODEL=gemini-2.5-pro`
+  in your shell before running the agent.
 - [Hermes Agent](https://github.com/NousResearch/hermes-agent) +
   AWS Bedrock for best isolation (data stays in your AWS account)
 

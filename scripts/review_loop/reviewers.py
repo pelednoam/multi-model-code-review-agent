@@ -109,6 +109,18 @@ _OPUS_BEDROCK = "us.anthropic.claude-opus-4-6-v1"
 _HAIKU_BEDROCK = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 _SONNET_BEDROCK = "us.anthropic.claude-sonnet-4-6-v1"
 
+# Gemini's free tier currently grants quota for gemini-2.5-flash only;
+# gemini-2.5-pro returns HTTP 429 on first request. Default to Flash so
+# the readability reviewer works for unpaid users out of the box; users
+# with paid quota can override via the GEMINI_MODEL env var.
+_GEMINI_MODEL_DEFAULT = "gemini-2.5-flash"
+
+
+def _gemini_model() -> str:
+    import os
+
+    return os.environ.get("GEMINI_MODEL", _GEMINI_MODEL_DEFAULT)
+
 
 def _choose_command(
     slot: int,
@@ -144,7 +156,14 @@ def _choose_command(
         result_path = round_dir / f"result-{slot}.json"
         return ["codex", "exec", "-o", str(result_path), "-"], None
     if slot == 3 and backends["gemini"]:
-        return ["gemini", "--approval-mode", "plan", "--skip-trust"], None
+        return [
+            "gemini",
+            "--model",
+            _gemini_model(),
+            "--approval-mode",
+            "plan",
+            "--skip-trust",
+        ], None
     if backends["claude"]:
         return _claude_cmd(slot), None
 

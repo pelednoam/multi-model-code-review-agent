@@ -100,6 +100,13 @@ def _claude_cmd(slot: int) -> list[str]:
         model,
         "--allowedTools",
         "Read Grep Glob",
+        # --allowedTools only exempts these from the permission prompt; it
+        # does not confine the agent to them, so a reviewer can Edit/Write
+        # the very tree it is reviewing. Verified with a canary file: under
+        # --allowedTools alone the reviewer rewrote it; with this deny in
+        # place it declines.
+        "--disallowedTools",
+        "Edit Write MultiEdit NotebookEdit Bash",
         "--output-format",
         "json",
     ]
@@ -279,12 +286,15 @@ def launch_reviewers(
         )
         if tracked is not None:
             procs.append(tracked)
-    for slot, proc, _, out_f, err_f in procs:
+    for slot, proc, backend, out_f, err_f in procs:
+        rc: int | None = None
         try:
-            proc.wait(timeout=REVIEWER_TIMEOUT)
+            rc = proc.wait(timeout=REVIEWER_TIMEOUT)
         except subprocess.TimeoutExpired:
             proc.kill()
             print(f"  R{slot}: TIMEOUT after {REVIEWER_TIMEOUT}s")
         finally:
             out_f.close()
             err_f.close()
+        if rc is not None and rc != 0:
+            print(f"  R{slot}: exit {rc} ({backend}) -- see stderr-{slot}.txt")

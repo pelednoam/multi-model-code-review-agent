@@ -6,6 +6,7 @@ Re-exports the public API. The CLI entry point lives at
 
 from __future__ import annotations
 
+from .artifacts import describe_outputs, write_artifacts_key
 from .backends import _run, detect_backends
 from .config import (
     MERGE_TIMEOUT,
@@ -36,11 +37,13 @@ __all__ = [
     "FindingKey",
     "SecretsDetectedError",
     "_run",
+    "write_artifacts_key",
     "apply_fixes",
     "build_reviewer_prompt",
     "collect_blocking_findings",
     "collect_diff",
     "commit_and_push",
+    "describe_outputs",
     "detect_backends",
     "extract_results",
     "fingerprint",

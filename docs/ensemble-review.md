@@ -117,10 +117,46 @@ Bedrock opt-in precedence (PREFER_HERMES=true), used for regulated codebases tha
 
 | CLI | Non-interactive | Read-only | Input | Output |
 |---|---|---|---|---|
-| `claude` | `-p` | `--allowedTools "Read Grep Glob"` | stdin (`< prompt.txt`) | `--output-format json` wraps in `{"result":"..."}` |
+| `claude` | `-p` | `--allowedTools "Read Grep Glob"` **plus** `--disallowedTools "Edit Write MultiEdit NotebookEdit Bash"` -- `--allowedTools` alone only skips the permission prompt, it does *not* confine the agent | stdin (`< prompt.txt`) | `--output-format json` wraps in `{"result":"..."}` |
 | `codex` | `codex exec` (optional `-m <model> -c model_reasoning_effort=<level>` -- override via `CODEX_MODEL`, `CODEX_REASONING_EFFORT`; `=high` is the "GPT-5.5 Pro" equivalent) | default sandbox | stdin (pipe) | `-o <file>` writes last message |
 | `gemini` | `-p` | `--model <m> --approval-mode plan --skip-trust` (default `<m>` is `gemini-2.5-flash` for free-tier compatibility; override via `GEMINI_MODEL`) | stdin (pipe) | stdout (text, may have fences) |
 | `hermes` | `-z --yolo` | `-t file` | `-z` flag (has ARG_MAX risk for large prompts) | reviewer writes file directly |
+
+### Retrieving the reviewers' output
+
+Every round writes to `data/reviews/loop_<timestamp>/round-<n>/`, and the run
+prints that path plus an `ARTIFACTS.md` key into the directory itself.
+
+**Read `result-N.json`. That is where the findings are.** Each one is a
+validated object matching `docs/ensemble_review_result_schema.json`.
+
+```bash
+ROUND=$(ls -td data/reviews/loop_*/round-* | head -1)
+
+# every finding across all reviewers
+jq -s '[.[].findings[]]' "$ROUND"/result-*.json
+
+# only the blocking ones
+jq -s '[.[].findings[] | select(.blocking or .severity == "critical")]' "$ROUND"/result-*.json
+
+# per-reviewer counts, and which slots reported at all
+for f in "$ROUND"/result-*.json; do echo "$f: $(jq '.findings | length' "$f")"; done
+```
+
+**Two traps worth knowing about, because both look like a failed reviewer:**
+
+- **`raw-N.txt` is not the output.** It holds whatever the CLI printed on
+  stdout before parsing. The codex slot runs with `-o result-N.json` and writes
+  straight to the result file, so *its raw file is empty on every successful
+  run*. Judge a slot by whether `result-N.json` exists and validates, never by
+  the size of its raw file.
+- **A file read mid-run is not a finished file.** Reviewers stream output over
+  several minutes. Wait for `Reviewers finished in Ns` before concluding
+  anything; a file inspected at 45 seconds into a five-minute round will look
+  empty whether or not the reviewer is healthy.
+
+When a slot genuinely produced nothing, `result-N.json` is absent and
+`stderr-N.txt` says why.
 
 All CLIs receive prompts via stdin (pipe) to avoid ARG_MAX overflow. Hermes uses `-z` which has a size limit -- for very large diffs, consider writing the prompt to a temp file and using Hermes's file-based input if available.
 

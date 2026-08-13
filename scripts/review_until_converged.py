@@ -47,9 +47,11 @@ from scripts.review_loop import (  # noqa: E402
     collect_blocking_findings,
     collect_diff,
     commit_and_push,
+    describe_outputs,
     detect_backends,
     extract_results,
     fingerprint,
+    write_artifacts_key,
     launch_reviewers,
     run_gate,
     run_preflight,
@@ -121,6 +123,10 @@ def _run_one_round(
     results = extract_results(round_dir)
     n_ok = sum(1 for r in results if r is not None)
     print(f"Results: {n_ok}/4 reviewers succeeded")
+    # Say where the findings are, every round, whatever the outcome -- the
+    # round directory is not self-explanatory and `raw-N.txt` is a trap.
+    write_artifacts_key(round_dir)
+    print(describe_outputs(round_dir))
     if n_ok == 0:
         print(
             "\nERROR: no reviewer results could be parsed; "

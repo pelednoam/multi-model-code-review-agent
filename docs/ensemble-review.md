@@ -345,9 +345,64 @@ Lens: code vs signed artifacts, manifest drift, feature count mismatches, fallba
 
 ## 6. Launch four reviewer sessions in parallel
 
-Two launch functions. Hermes is preferred for Anthropic models (better isolation). CLIs are fallbacks (free).
+### THE ONE THING TO GET RIGHT HERE
+
+**Launching and waiting must happen inside a SINGLE shell, and that shell must not be a
+foreground Bash tool call.**
+
+Each reviewer is wrapped in `timeout 600`, so a full round takes up to ten minutes. A foreground
+Bash tool call defaults to a 120 second timeout and is capped at 600 seconds. So a naive
+"launch with `&`, then `wait`" in one foreground call is killed at two minutes, while the
+backgrounded reviewers survive detached and keep writing output. The orchestrator is then left in
+the worst possible state: no results, no `wait` to return, and nothing that will ever wake it. It
+goes idle, and the only thing that moves the review forward is a human asking "what happened?".
+That failure has now happened in two separate rounds on the same project, and both times it looked
+like a reviewer problem when it was purely an orchestration one.
+
+Two consequences, and neither is optional:
+
+1. `wait` only works on children of the CURRENT shell. Shell state does not persist between Bash
+   tool calls, so a `wait` in a later call has no children and returns instantly, reporting
+   success while the reviewers are still running. Launch and wait therefore go in one script.
+2. That script is run with `run_in_background: true`, which is not subject to the tool timeout and
+   re-invokes you when it exits. You do not poll it, and you do not need to.
+
+Write the whole thing to a file and run the file. Do not paste the launch block and the wait into
+separate Bash calls.
+
+### 6a. Write the runner script
 
 ```bash
+cat > "$REVIEW_TMP/run-reviewers.sh" <<'RUNNER'
+#!/usr/bin/env bash
+# Launch, wait, and normalize - one shell, start to finish.
+# Written to a file rather than run inline so that `wait` sees the children it launched.
+set -uo pipefail
+: "${REVIEW_TMP:?REVIEW_TMP must be exported by the caller}"
+
+# JOB CONTROL IN A SCRIPT, deliberately. With `set -m` each background job gets its OWN process
+# group, so `kill -- -$pid` reaches the whole tree. Without it every reviewer shares the runner's
+# process group and can only be killed one process at a time - and a reviewer CLI is a tree (node
+# spawning helpers), so killing the top of it leaves descendants running, still burning provider
+# quota and still writing into $REVIEW_TMP after the report has been written. Verified: a reviewer
+# whose child ignores SIGTERM survives the round entirely without this.
+set -m
+
+# Per-reviewer deadline. The watchdog below allows a little more than this so that a reviewer
+# killed by its own `timeout` is still collected as a failure rather than hanging the round.
+REVIEWER_TIMEOUT=${REVIEWER_TIMEOUT:-600}
+ROUND_DEADLINE=$((REVIEWER_TIMEOUT + 90))
+# -k escalates to SIGKILL 10s after the TERM. A reviewer CLI is a process TREE - node spawning
+# helpers - and a TERM delivered only to the top of it can leave descendants running and writing
+# into $REVIEW_TMP after the round has closed and the report has been written.
+
+# Every reviewer runs inside a brace group that records its exit status in a done-marker when it
+# finishes. The markers are what makes progress observable from ANOTHER shell: `ps` on a recorded
+# pid is ambiguous once pids are recycled, and an output file can exist while the process is still
+# writing to it. The marker is written by the same subshell that ran the reviewer, NOT by a separate
+# waiter - `wait` refuses a pid that is not a child of the shell calling it, so a sibling waiter
+# would fail instantly and record a bogus status for a reviewer that is still running.
+
 # Launch via Hermes (best isolation: -t file, consistent JSON output).
 # Hermes -z takes prompt as argument (no stdin mode). This means:
 # - Subject to ARG_MAX for very large diffs (use Claude CLI instead)
@@ -355,10 +410,12 @@ Two launch functions. Hermes is preferred for Anthropic models (better isolation
 # For sensitive reviews with large diffs, prefer Claude CLI.
 launch_hermes() {
   local num=$1 hermes_model=$2 prompt_file=$3
-  timeout 600 hermes -z "$(cat "$prompt_file")" \
-    -m "$hermes_model" --provider bedrock -t file --yolo \
-    1>"$REVIEW_TMP/stdout-$num.txt" \
-    2>"$REVIEW_TMP/stderr-$num.txt" &
+  { timeout -k 10 "$REVIEWER_TIMEOUT" hermes -z "$(cat "$prompt_file")" \
+      -m "$hermes_model" --provider bedrock -t file --yolo \
+      1>"$REVIEW_TMP/stdout-$num.txt" \
+      2>"$REVIEW_TMP/stderr-$num.txt"
+    echo $? > "$REVIEW_TMP/done-$num"; } &
+  echo $! > "$REVIEW_TMP/pid-$num"
   echo "R$num: Hermes ($hermes_model) [Bedrock]"
 }
 
@@ -375,12 +432,21 @@ launch_cli() {
         echo "R$num: SKIPPED (invalid Claude model: $model)"
         return 1
       fi
-      timeout 600 claude -p --model "$model" \
-        --allowedTools "Read Grep Glob" \
-        --output-format json < "$prompt_file" \
-        1>"$REVIEW_TMP/claude-raw-$num.json" \
-        2>"$REVIEW_TMP/stderr-$num.txt" &
-      echo "R$num: Claude CLI ($model) [free]"
+      # ALLOWED TOOLS ARE A REVIEW DECISION, not a detail. A read-only reviewer physically cannot
+      # mutation-probe, and a reviewer asked to probe without the tools to do it may report a probe
+      # result it never ran - that has happened. Set REVIEWER_TOOLS_2="Read Grep Glob Bash Edit
+      # Write" for the correctness slot when you want real probing, and run that reviewer in an
+      # isolated git worktree so its edits cannot reach the working tree.
+      local tools_var="REVIEWER_TOOLS_$num"
+      local tools="${!tools_var:-Read Grep Glob}"
+      { timeout -k 10 "$REVIEWER_TIMEOUT" claude -p --model "$model" \
+          --allowedTools "$tools" \
+          --output-format json < "$prompt_file" \
+          1>"$REVIEW_TMP/claude-raw-$num.json" \
+          2>"$REVIEW_TMP/stderr-$num.txt"
+        echo $? > "$REVIEW_TMP/done-$num"; } &
+      echo $! > "$REVIEW_TMP/pid-$num"
+      echo "R$num: Claude CLI ($model, tools: $tools) [free]"
       ;;
     codex)
       # Build extra flags from CODEX_* env vars.
@@ -392,12 +458,14 @@ launch_cli() {
       [ -n "${CODEX_MODEL:-}" ] && codex_extra+=(-m "$CODEX_MODEL")
       [ -n "${CODEX_REASONING_EFFORT:-}" ] && \
         codex_extra+=(-c "model_reasoning_effort=$CODEX_REASONING_EFFORT")
-      timeout 600 codex exec \
-        "${codex_extra[@]}" \
-        -o "$REVIEW_TMP/result-$num.json" \
-        - < "$prompt_file" \
-        1>"$REVIEW_TMP/stdout-$num.txt" \
-        2>"$REVIEW_TMP/stderr-$num.txt" &
+      { timeout -k 10 "$REVIEWER_TIMEOUT" codex exec \
+          "${codex_extra[@]}" \
+          -o "$REVIEW_TMP/result-$num.json" \
+          - < "$prompt_file" \
+          1>"$REVIEW_TMP/stdout-$num.txt" \
+          2>"$REVIEW_TMP/stderr-$num.txt"
+        echo $? > "$REVIEW_TMP/done-$num"; } &
+      echo $! > "$REVIEW_TMP/pid-$num"
       local label="${CODEX_MODEL:-gpt-5.5}"
       [ -n "${CODEX_REASONING_EFFORT:-}" ] && label="$label/$CODEX_REASONING_EFFORT"
       echo "R$num: Codex CLI ($label) [free]"
@@ -408,12 +476,14 @@ launch_cli() {
       # Pin to gemini-2.5-flash because gemini-2.5-pro is not in the
       # free tier (returns HTTP 429). Override with GEMINI_MODEL=... if
       # you have paid quota.
-      timeout 600 gemini \
-        --model "${GEMINI_MODEL:-gemini-2.5-flash}" \
-        --approval-mode plan --skip-trust \
-        < "$prompt_file" \
-        1>"$REVIEW_TMP/stdout-$num.txt" \
-        2>"$REVIEW_TMP/stderr-$num.txt" &
+      { timeout -k 10 "$REVIEWER_TIMEOUT" gemini \
+          --model "${GEMINI_MODEL:-gemini-2.5-flash}" \
+          --approval-mode plan --skip-trust \
+          < "$prompt_file" \
+          1>"$REVIEW_TMP/stdout-$num.txt" \
+          2>"$REVIEW_TMP/stderr-$num.txt"
+        echo $? > "$REVIEW_TMP/done-$num"; } &
+      echo $! > "$REVIEW_TMP/pid-$num"
       echo "R$num: Gemini CLI (${GEMINI_MODEL:-gemini-2.5-flash}) [free]"
       ;;
     *)
@@ -481,9 +551,40 @@ elif $HAS_HERMES; then
   launch_hermes 4 us.anthropic.claude-opus-4-6-v1 "$REVIEW_TMP/prompt-4.txt"
 fi
 
-# Wait for ALL background children (avoids stale-PID issues when
-# a launcher SKIPs without backgrounding a process).
-wait
+# WATCHDOG, not a bare `wait`. A bare wait has no deadline of its own, so one wedged reviewer holds
+# the whole round open forever and the partial results from the other three are never reported.
+# This gives up at ROUND_DEADLINE and leaves the stragglers to be recorded as timed out below.
+round_start=$SECONDS
+while :; do
+  running=0
+  for num in 1 2 3 4; do
+    [ -f "$REVIEW_TMP/pid-$num" ] || continue          # slot was skipped, never launched
+    [ -f "$REVIEW_TMP/done-$num" ] && continue         # finished, status recorded
+    running=$((running + 1))
+  done
+  [ "$running" -eq 0 ] && break
+  if [ $((SECONDS - round_start)) -ge "$ROUND_DEADLINE" ]; then
+    echo "WATCHDOG: $running reviewer(s) still running after ${ROUND_DEADLINE}s - giving up on them"
+    for num in 1 2 3 4; do
+      [ -f "$REVIEW_TMP/pid-$num" ] || continue
+      [ -f "$REVIEW_TMP/done-$num" ] && continue
+      # Negative pid = the whole process group, which `set -m` gave this job.
+      kill -- "-$(cat "$REVIEW_TMP/pid-$num")" 2>/dev/null
+      echo "timeout" > "$REVIEW_TMP/done-$num"
+    done
+    break
+  fi
+  sleep 5
+done
+echo "All reviewer slots resolved after $((SECONDS - round_start))s"
+
+# SWEEP. A reviewer killed by its own `timeout` still leaves descendants: timeout signals the
+# process it started, not that process's children. Every job has its own process group, so one
+# group kill per slot collects them. Harmless when the group is already gone.
+for num in 1 2 3 4; do
+  [ -f "$REVIEW_TMP/pid-$num" ] || continue
+  kill -- "-$(cat "$REVIEW_TMP/pid-$num")" 2>/dev/null
+done
 
 # Extract review JSON from raw output. Handles Claude CLI wrappers,
 # markdown fences, and preamble. Validates required schema keys.
@@ -521,20 +622,66 @@ for num in 1 2 3 4; do
     [ -f "$src" ] && extract_json "$src" "$result" && break
   done
 
-  # If no result produced, write a synthetic error
+  # If no result produced, write a synthetic error. The done-marker distinguishes the two very
+  # different failures a reader needs to tell apart: a reviewer that ran and produced unparseable
+  # output, and one that never finished at all.
   if [ ! -f "$result" ]; then
+    case "$(cat "$REVIEW_TMP/done-$num" 2>/dev/null)" in
+      timeout) why="killed by the watchdog before it finished" ;;
+      124|137) why="hit its own ${REVIEWER_TIMEOUT}s timeout" ;;
+      "")      why="no parseable JSON output and no exit status recorded" ;;
+      0)       why="no parseable JSON output (it exited cleanly, so read its stdout)" ;;
+      *)       why="exited $(cat "$REVIEW_TMP/done-$num") without usable JSON" ;;
+    esac
+    [ -f "$REVIEW_TMP/pid-$num" ] || why="never launched (no backend available for this slot)"
     python3 -c "
 import json, sys
 with open(sys.argv[1], 'w') as out:
     json.dump({
         'reviewer': 'unknown', 'model': 'unknown', 'findings': [],
-        'overall_assessment': 'Reviewer ' + sys.argv[2] + ' failed: no parseable JSON output. Check extract-result-' + sys.argv[2] + '.err and stderr-' + sys.argv[2] + '.txt.'
+        'overall_assessment': 'Reviewer ' + sys.argv[2] + ' failed: ' + sys.argv[3] + '. Check extract-result-' + sys.argv[2] + '.err and stderr-' + sys.argv[2] + '.txt.'
     }, out, indent=2)
-" "$result" "$num"
-    echo "WARNING: Reviewer $num produced no parseable output"
+" "$result" "$num" "$why"
+    echo "WARNING: Reviewer $num produced no result ($why)"
   fi
 done
+
+echo "ROUND COMPLETE"
+RUNNER
+chmod +x "$REVIEW_TMP/run-reviewers.sh"
 ```
+
+### 6b. Run it in the background, once
+
+Run with `run_in_background: true`. The harness re-invokes you when it exits, so there is nothing
+to poll and no timeout to lose the round to. Export the detection variables first: the script runs
+in its own shell and inherits nothing from the call that wrote it.
+
+```bash
+export REVIEW_TMP HAS_CLAUDE HAS_HERMES HAS_CODEX HAS_GEMINI PREFER_HERMES
+"$REVIEW_TMP/run-reviewers.sh" 2>&1 | tee "$REVIEW_TMP/round.log"
+```
+
+When it exits, `round.log` ends with `ROUND COMPLETE` and every `result-N.json` exists, including
+synthetic ones for slots that failed. Go straight to section 7. Do not relaunch anything.
+
+### 6c. If you lose the background run
+
+Only if the background task is gone (the session was interrupted, or you genuinely do not know
+whether it is still going). This is safe to run repeatedly and never launches anything:
+
+```bash
+for num in 1 2 3 4; do
+  if   [ ! -f "$REVIEW_TMP/pid-$num" ];  then echo "R$num: not launched"
+  elif [ -f "$REVIEW_TMP/done-$num" ];   then echo "R$num: done (status $(cat "$REVIEW_TMP/done-$num"))"
+  elif kill -0 "$(cat "$REVIEW_TMP/pid-$num")" 2>/dev/null; then echo "R$num: still running"
+  else echo "R$num: process gone, no done-marker (died without being reaped)"; fi
+done
+```
+
+Report what this says rather than guessing. "Three of four are still running" is a useful thing to
+tell a waiting human; silence is not.
+
 
 **Tool restriction**: Hermes uses `-t file` (best isolation). Claude CLI uses `--allowedTools "Read Grep Glob"` (read-only). Codex uses its default sandbox. Gemini uses `--approval-mode plan` (read-only). Extraction errors logged to `$REVIEW_TMP/extract-N.err`.
 
@@ -696,6 +843,49 @@ mechanically without second-guessing the reviewer.
 - If no CLIs are installed (no claude, codex, or hermes): abort full mode, suggest quick mode
 - If a reviewer crashes or times out: report failure, present remaining results
 - If the preflight script is missing: warn and proceed without audit (degraded mode)
+
+## Never go quiet
+
+The orchestrator is the only thing that can tell a waiting human what is happening, and a long
+silence is indistinguishable from a crash. Say which reviewers are running, which finished and
+which failed, and say it BEFORE you are asked. If you are waiting, say what you are waiting for and
+roughly how long is left. "Three of four are still running, about six minutes in" is useful; going
+silent for ten minutes and then producing a report is not, and going silent and producing nothing
+is how a stalled round gets mistaken for a working one.
+
+Never present a reconstructed review as a completed one. If the round did not run, say so plainly.
+An honest "it did not run, here is why" is worth more than a complete-looking report assembled
+after the fact.
+
+## Failures that are normal, and what they mean
+
+These are not bugs in the code under review, and they should be reported as infrastructure status
+rather than folded into the findings:
+
+- **Gemini `TerminalQuotaError` / HTTP 429.** The free tier is capped per day (20 requests on
+  gemini-2.5-flash). Once exhausted, retrying the same day will not help. Fall back to a Claude CLI
+  reviewer for that slot and say the slot changed provider, because it costs the round a provider.
+- **Codex `bwrap: Failed RTM_NEWADDR: Operation not permitted`.** Codex's sandbox cannot create a
+  user namespace in some containers, and then EVERY command it runs fails, including `cat`. Test it
+  with a throwaway `codex exec` before dispatching rather than discovering it in the results.
+- **A slot that silently changed provider.** When two of four slots fall back to the same provider,
+  "four models" is really four lenses on mostly one model. Say so in the report header - convergence
+  between two reviewers means much less when they share a model.
+
+## A reviewer asked to probe needs the tools to probe
+
+A read-only reviewer (`--allowedTools "Read Grep Glob"`) physically cannot run a mutation probe. Ask
+one to anyway and it may report a probe result it never ran - that has happened, complete with
+invented before-and-after output. Either give the correctness slot Bash and Edit
+(`REVIEWER_TOOLS_2="Read Grep Glob Bash Edit Write"`) and run it in an isolated git worktree pinned
+at the commit under review, or tell it to reason and mark its findings unverified. Do not ask for
+execution you have not enabled, and when a reviewer claims to have executed something, check that
+its transcript shows tool calls at all before believing it.
+
+**A probe that leaves the tree uncompilable is not a surviving mutant.** If a mutation removes the
+last use of a variable, a typed build fails; a test suite that runs against a previously built
+artifact then passes, and the mutant looks like it survived. Confirm the build succeeded before
+concluding anything from a probe, and never suppress its output.
 
 # Privacy and isolation
 

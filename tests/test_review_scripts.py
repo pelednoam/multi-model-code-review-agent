@@ -545,3 +545,87 @@ class TestCodexEnvOverrides:
         args = _codex_extra_args()
         assert "-m" in args and "gpt-5.5" in args
         assert "-c" in args and "model_reasoning_effort=high" in args
+
+
+class TestRunnerScript:
+    """The runner in docs/ensemble-review.md section 6.
+
+    THE DOC IS THE PROGRAM for full mode: the orchestrating agent reads that markdown and executes
+    the bash out of it, so a regression there is a regression in the product with nothing to catch
+    it. These tests extract the runner heredoc and check the properties that failed in the field.
+
+    The failure they exist for: launch-with-& followed by `wait` used to sit in one foreground Bash
+    tool call. That call is killed at its 120 second timeout while the reviewers, wrapped in
+    `timeout 600`, survive detached. The orchestrator then had no results, no `wait` to return, and
+    nothing that would ever wake it - it went idle and the round only moved when a human asked what
+    had happened. It cost two rounds on a downstream project before the cause was found.
+    """
+
+    AGENT_DOC = REPO_ROOT / "docs" / "ensemble-review.md"
+
+    def _runner(self) -> str:
+        import re
+
+        doc = self.AGENT_DOC.read_text()
+        m = re.search(
+            r"cat > \"\$REVIEW_TMP/run-reviewers\.sh\" <<'RUNNER'\n(.*?)\nRUNNER\n", doc, re.S
+        )
+        assert m, "section 6 no longer defines a run-reviewers.sh heredoc"
+        return m.group(1)
+
+    def test_runner_is_valid_bash(self, tmp_path: Path) -> None:
+        script = tmp_path / "run-reviewers.sh"
+        script.write_text(self._runner() + "\n")
+        result = subprocess.run(
+            ["bash", "-n", str(script)], capture_output=True, text=True, timeout=10
+        )
+        assert result.returncode == 0, f"runner does not parse: {result.stderr}"
+
+    def test_launch_and_wait_live_in_the_same_script(self) -> None:
+        # Both halves in one heredoc is the whole fix: `wait` and `kill -0` only work on children
+        # of the shell that started them, and shell state does not survive between tool calls.
+        runner = self._runner()
+        assert "launch_cli" in runner and "launch_hermes" in runner
+        assert "ROUND_DEADLINE" in runner
+        assert "ROUND COMPLETE" in runner
+
+    def test_the_doc_tells_the_agent_to_run_it_in_the_background(self) -> None:
+        doc = self.AGENT_DOC.read_text()
+        assert "run_in_background: true" in doc
+        # And says why, so the next person to touch it does not "simplify" it back.
+        assert "120 second timeout" in doc
+
+    def test_waiting_is_bounded(self) -> None:
+        # A bare `wait` has no deadline of its own, so one wedged reviewer holds the round open
+        # forever and the other three results are never reported.
+        runner = self._runner()
+        assert "\nwait\n" not in runner, "bare `wait` is back: one wedged reviewer hangs the round"
+        assert "WATCHDOG" in runner
+
+    def test_every_reviewer_records_a_pid_and_an_exit_status(self) -> None:
+        runner = self._runner()
+        # Four slots, each recording both, is what makes progress observable from another shell.
+        assert runner.count('echo $! > "$REVIEW_TMP/pid-$num"') == 4
+        assert runner.count('echo $? > "$REVIEW_TMP/done-$num"') == 4
+        # The status must be written by the subshell that ran the reviewer. A separate waiter
+        # cannot: `wait` refuses a pid that is not its own child, so it would record a bogus
+        # status immediately while the reviewer was still running.
+        assert "wait $!" not in runner
+
+    def test_reviewers_are_killable_as_a_tree(self) -> None:
+        runner = self._runner()
+        # `set -m` gives each background job its own process group; without it a reviewer CLI's
+        # helper processes survive the round, still burning provider quota and still writing into
+        # $REVIEW_TMP after the report is written.
+        assert "\nset -m" in runner
+        assert 'kill -- "-$(cat "$REVIEW_TMP/pid-$num")"' in runner
+        # SIGKILL escalation, because a CLI that traps SIGTERM otherwise outlives the round.
+        assert runner.count('timeout -k 10 "$REVIEWER_TIMEOUT"') == 4
+
+    def test_a_failed_slot_still_produces_a_result_with_a_true_reason(self) -> None:
+        runner = self._runner()
+        # Every slot must yield a result-N.json so the report can be honest about what is missing,
+        # and the reason must distinguish the cases a reader would act on differently.
+        assert "124|137" in runner, "a reviewer killed by its own timeout is reported as a parse error"
+        assert "never launched" in runner
+        assert "killed by the watchdog" in runner

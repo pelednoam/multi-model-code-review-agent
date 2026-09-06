@@ -132,7 +132,10 @@ def _gemini_model() -> str:
 def _codex_extra_args() -> list[str]:
     """Build the extra ``codex exec`` flags from CODEX_* env vars.
 
-    Defaults: whatever ``~/.codex/config.toml`` already has (typically
+    Always pins the two safety flags (see below), then layers the model
+    overrides on top.
+
+    Model defaults: whatever ``~/.codex/config.toml`` already has (typically
     ``model = "gpt-5.5"`` and ``model_reasoning_effort = "medium"`` for
     ChatGPT Plus users).
 
@@ -147,7 +150,23 @@ def _codex_extra_args() -> list[str]:
     """
     import os
 
-    args: list[str] = []
+    # NON-NEGOTIABLE, and deliberately not overridable by env:
+    #
+    #   -s read-only            the reviewer must not be able to edit the code it reviews.
+    #                           The tool previously passed NO sandbox flag and relied on
+    #                           codex's default, which varies by host and config.
+    #   approvals_reviewer=user a global `approvals_reviewer = "auto_review"` in the user's
+    #                           ~/.codex/config.toml auto-approves the model's escalation
+    #                           requests "using the workspace-write sandbox" (codex's own
+    #                           wording) and thereby OVERRIDES -s read-only. Verified side
+    #                           by side on codex-cli 0.153.4: with auto_review the write
+    #                           succeeded; with "user" the same prompt got
+    #                           "Read-only file system". Pinning it here means a reviewer's
+    #                           confinement no longer depends on a user's global settings.
+    #
+    # This is belt AND braces: backends.codex_is_confined() still canary-tests the result,
+    # because a flag that is silently overridden is exactly the failure being defended against.
+    args: list[str] = ["-s", "read-only", "-c", 'approvals_reviewer="user"']
     model = os.environ.get("CODEX_MODEL")
     if model:
         args.extend(["-m", model])

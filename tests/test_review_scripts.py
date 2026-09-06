@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from types import SimpleNamespace
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRUB_SCRIPT = REPO_ROOT / "scripts" / "scrub_diff.py"
@@ -512,19 +513,34 @@ class TestSourceDirsConfigurable:
 class TestCodexEnvOverrides:
     """CODEX_MODEL and CODEX_REASONING_EFFORT pass through to codex exec."""
 
-    def test_no_env_means_no_extra_args(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The two safety flags are always present, whatever the env says. A reviewer that can
+    # edit the code it reviews breaks this tool's central promise, and `-s read-only` alone
+    # is not enough: a global `approvals_reviewer = "auto_review"` overrides it.
+    SAFETY = ["-s", "read-only", "-c", 'approvals_reviewer="user"']
+
+    def test_no_env_still_pins_the_safety_flags(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from scripts.review_loop.reviewers import _codex_extra_args
 
         monkeypatch.delenv("CODEX_MODEL", raising=False)
         monkeypatch.delenv("CODEX_REASONING_EFFORT", raising=False)
-        assert _codex_extra_args() == []
+        assert _codex_extra_args() == self.SAFETY
+
+    def test_env_cannot_drop_the_read_only_sandbox(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from scripts.review_loop.reviewers import _codex_extra_args
+
+        # Even a user trying to widen the sandbox through the model knobs keeps read-only.
+        monkeypatch.setenv("CODEX_MODEL", "gpt-5.5-codex")
+        monkeypatch.setenv("CODEX_REASONING_EFFORT", "high")
+        args = _codex_extra_args()
+        assert args[:2] == ["-s", "read-only"]
+        assert 'approvals_reviewer="user"' in args
 
     def test_model_env_adds_dash_m(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from scripts.review_loop.reviewers import _codex_extra_args
 
         monkeypatch.setenv("CODEX_MODEL", "gpt-5.5-codex")
         monkeypatch.delenv("CODEX_REASONING_EFFORT", raising=False)
-        assert _codex_extra_args() == ["-m", "gpt-5.5-codex"]
+        assert _codex_extra_args() == [*self.SAFETY, "-m", "gpt-5.5-codex"]
 
     def test_reasoning_high_is_pro_equivalent(
         self, monkeypatch: pytest.MonkeyPatch
@@ -535,7 +551,7 @@ class TestCodexEnvOverrides:
         monkeypatch.setenv("CODEX_REASONING_EFFORT", "high")
         # The bash equivalent is `-c model_reasoning_effort=high` and
         # matches what the ChatGPT web UI labels as "GPT-5.5 Pro".
-        assert _codex_extra_args() == ["-c", "model_reasoning_effort=high"]
+        assert _codex_extra_args() == [*self.SAFETY, "-c", "model_reasoning_effort=high"]
 
     def test_both_env_vars_compose(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from scripts.review_loop.reviewers import _codex_extra_args
@@ -629,3 +645,67 @@ class TestRunnerScript:
         assert "124|137" in runner, "a reviewer killed by its own timeout is reported as a parse error"
         assert "never launched" in runner
         assert "killed by the watchdog" in runner
+
+
+class TestCodexSandboxVerification:
+    """An unconfined codex must be DROPPED, not used.
+
+    The failure this guards against is specific: a reviewer that silently has write access
+    to the repo it is reviewing. It has happened, from two unrelated causes (a kernel that
+    blocks bubblewrap's user namespaces, and a global approvals_reviewer that escalates
+    past -s read-only), so confinement is proven per-run rather than assumed.
+    """
+
+    def test_unconfined_codex_is_disabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from scripts.review_loop import backends
+
+        monkeypatch.delenv("MMCRA_SKIP_CODEX_SANDBOX_CHECK", raising=False)
+        monkeypatch.setattr(backends.shutil, "which", lambda c: f"/usr/bin/{c}")
+        monkeypatch.setattr(backends, "codex_is_confined", lambda: (False, "sandbox allowed a write"))
+        assert backends.detect_backends()["codex"] is False
+        # The other backends are unaffected by codex's verdict.
+        assert backends.detect_backends()["claude"] is True
+
+    def test_confined_codex_is_kept(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from scripts.review_loop import backends
+
+        monkeypatch.delenv("MMCRA_SKIP_CODEX_SANDBOX_CHECK", raising=False)
+        monkeypatch.setattr(backends.shutil, "which", lambda c: f"/usr/bin/{c}")
+        monkeypatch.setattr(backends, "codex_is_confined", lambda: (True, "verified"))
+        assert backends.detect_backends()["codex"] is True
+
+    def test_check_can_be_skipped_for_externally_sandboxed_hosts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from scripts.review_loop import backends
+
+        monkeypatch.setenv("MMCRA_SKIP_CODEX_SANDBOX_CHECK", "1")
+        monkeypatch.setattr(backends.shutil, "which", lambda c: f"/usr/bin/{c}")
+
+        def _boom() -> tuple[bool, str]:  # must not even be called
+            raise AssertionError("confinement check ran despite the skip flag")
+
+        monkeypatch.setattr(backends, "codex_is_confined", _boom)
+        assert backends.detect_backends()["codex"] is True
+
+    def test_a_sandbox_that_cannot_start_is_not_treated_as_confined(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The ambiguity at the heart of this bug.
+
+        If the sandbox never launches, the canary survives untouched -- which looks exactly
+        like a correctly refused write. Reporting that as "confined" is how an unconfined
+        reviewer gets trusted, so a sandbox that cannot start must fail the check.
+        """
+        from scripts.review_loop import backends
+
+        monkeypatch.setattr(backends.shutil, "which", lambda c: f"/usr/bin/{c}")
+        monkeypatch.setattr(
+            backends,
+            "_run",
+            lambda *a, **k: SimpleNamespace(stdout="", stderr="bwrap: setting up uid map: Permission denied"),
+        )
+        ok, reason = backends.codex_is_confined()
+        assert ok is False
+        assert "could not start" in reason
+        assert "user namespace" in reason  # points at the actual remedy

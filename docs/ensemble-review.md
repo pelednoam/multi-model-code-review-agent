@@ -118,7 +118,7 @@ Bedrock opt-in precedence (PREFER_HERMES=true), used for regulated codebases tha
 | CLI | Non-interactive | Read-only | Input | Output |
 |---|---|---|---|---|
 | `claude` | `-p` | `--allowedTools "Read Grep Glob"` **plus** `--disallowedTools "Edit Write MultiEdit NotebookEdit Bash"` -- `--allowedTools` alone only skips the permission prompt, it does *not* confine the agent | stdin (`< prompt.txt`) | `--output-format json` wraps in `{"result":"..."}` |
-| `codex` | `codex exec` (optional `-m <model> -c model_reasoning_effort=<level>` -- override via `CODEX_MODEL`, `CODEX_REASONING_EFFORT`; `=high` is the "GPT-5.5 Pro" equivalent) | default sandbox | stdin (pipe) | `-o <file>` writes last message |
+| `codex` | `codex exec` **plus `-s read-only` and `-c approvals_reviewer="user"`** -- both are pinned by the tool and neither is optional: no sandbox flag was passed at all before, and `-s read-only` on its own is silently overridden by a global `approvals_reviewer = "auto_review"` (see docs/codex-sandbox.md). Codex is also canary-tested at launch and its slot is DROPPED if the sandbox does not actually refuse a write (optional `-m <model> -c model_reasoning_effort=<level>` -- override via `CODEX_MODEL`, `CODEX_REASONING_EFFORT`; `=high` is the "GPT-5.5 Pro" equivalent) | verified read-only, not assumed | stdin (pipe) | `-o <file>` writes last message |
 | `gemini` | `-p` | `--model <m> --approval-mode plan --skip-trust` (default `<m>` is `gemini-2.5-flash` for free-tier compatibility; override via `GEMINI_MODEL`) | stdin (pipe) | stdout (text, may have fences) |
 | `hermes` | `-z --yolo` | `-t file` | `-z` flag (has ARG_MAX risk for large prompts) | reviewer writes file directly |
 

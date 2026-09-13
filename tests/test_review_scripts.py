@@ -509,6 +509,147 @@ class TestSourceDirsConfigurable:
         assert warnings == []
 
 
+class TestCoverageSourceSpec:
+    """The coverage gate must actually collect data, not fail open.
+
+    coverage.py resolves a --cov value as an importable package name or a
+    directory. It cannot use an individual .py path. When changed files were
+    passed as sources, coverage collected nothing and wrote no JSON report, so
+    measure_test_coverage() returned [] -- indistinguishable from "no gaps".
+    These tests pin both halves: the argv shape, and an end-to-end measurement
+    that must find a real gap.
+    """
+
+    def test_cov_sources_are_directories_not_files(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from scripts.preflight import coverage as cov_mod
+
+        (tmp_path / "src").mkdir()
+        monkeypatch.setattr(cov_mod, "REPO_ROOT", tmp_path)
+        monkeypatch.setattr(cov_mod, "SOURCE_DIRS", ["src/"])
+
+        captured: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess:
+            captured.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(cov_mod.subprocess, "run", fake_run)
+        cov_mod._run_pytest_with_coverage([])
+
+        assert captured, "pytest was never invoked"
+        cov_args = [a for a in captured[0] if a.startswith("--cov=")]
+        assert cov_args == ["--cov=src"]
+        assert not any(a.endswith(".py") for a in cov_args), (
+            "a .py path as a coverage source collects nothing"
+        )
+
+    def test_no_source_dirs_on_disk_warns_instead_of_failing_open(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from scripts.preflight import coverage as cov_mod
+
+        monkeypatch.setattr(cov_mod, "REPO_ROOT", tmp_path)
+        monkeypatch.setattr(cov_mod, "SOURCE_DIRS", ["nonexistent/"])
+
+        warnings: list[str] = []
+        assert cov_mod._run_pytest_with_coverage(warnings) is None
+        assert len(warnings) == 1
+        assert "coverage gate inoperative" in warnings[0]
+
+    def test_end_to_end_gap_is_detected(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The test that would have caught the original bug.
+
+        A real project tree with a genuinely uncovered branch must produce a
+        gap. Before the fix this returned [] and the branch went unreported.
+        """
+        from scripts.preflight import coverage as cov_mod
+
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "mod.py").write_text(
+            "def classify(n: int) -> str:\n"
+            "    if n > 0:\n"
+            "        return 'positive'\n"
+            "    return 'other'\n"
+        )
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_mod.py").write_text(
+            "import sys\n"
+            "from pathlib import Path\n"
+            "sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'src'))\n"
+            "from mod import classify\n"
+            "\n"
+            "def test_positive() -> None:\n"
+            "    assert classify(1) == 'positive'\n"
+        )
+
+        monkeypatch.setattr(cov_mod, "REPO_ROOT", tmp_path)
+        monkeypatch.setattr(cov_mod, "SOURCE_DIRS", ["src/"])
+        monkeypatch.setattr(cov_mod, "COVERAGE_TARGET", 100)
+
+        warnings: list[str] = []
+        gaps = cov_mod.measure_test_coverage(["src/mod.py"], warnings)
+
+        assert warnings == []
+        assert len(gaps) == 1, f"expected one gap, got {gaps}"
+        assert gaps[0]["file"] == "src/mod.py"
+        assert gaps[0]["percent_covered"] < 100
+        assert gaps[0]["uncovered_lines"], "the untaken return was not reported"
+
+
+_GIT_ENV = {
+    "GIT_AUTHOR_NAME": "t",
+    "GIT_AUTHOR_EMAIL": "t@t",
+    "GIT_COMMITTER_NAME": "t",
+    "GIT_COMMITTER_EMAIL": "t@t",
+}
+
+
+class TestChangedFilesFallback:
+    """The audit must not report an empty tree just because origin/main is absent."""
+
+    def _repo(self, tmp_path: Path, n_commits: int) -> Path:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(
+            ["git", "init", "-q", "-b", "main"], cwd=repo, check=True, env=_GIT_ENV
+        )
+        for i in range(n_commits):
+            (repo / "x.py").write_text(f"a = {i}\n")
+            subprocess.run(["git", "add", "x.py"], cwd=repo, check=True, env=_GIT_ENV)
+            subprocess.run(
+                ["git", "commit", "-q", "-m", f"c{i}"],
+                cwd=repo,
+                check=True,
+                env=_GIT_ENV,
+            )
+        return repo
+
+    def test_falls_back_to_head_parent_without_origin_main(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from scripts.preflight import git_state
+
+        monkeypatch.setattr(git_state, "REPO_ROOT", self._repo(tmp_path, 2))
+        warnings: list[str] = []
+        assert git_state._changed_vs_base(warnings) == "x.py"
+        assert warnings == []
+
+    def test_warns_when_no_base_resolves_at_all(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from scripts.preflight import git_state
+
+        monkeypatch.setattr(git_state, "REPO_ROOT", self._repo(tmp_path, 1))
+        warnings: list[str] = []
+        assert git_state._changed_vs_base(warnings) == ""
+        assert len(warnings) == 1
+        assert "could not resolve changed files" in warnings[0]
+
+
 class TestCodexEnvOverrides:
     """CODEX_MODEL and CODEX_REASONING_EFFORT pass through to codex exec."""
 

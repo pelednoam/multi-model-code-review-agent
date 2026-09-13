@@ -15,7 +15,12 @@ from .config import (
     SCRIPTS_DIR,
     TEST_TIMEOUT,
 )
-from .diff import SecretsDetectedError, collect_diff, run_preflight
+from .diff import (
+    ScrubberFailedError,
+    SecretsDetectedError,
+    collect_diff,
+    run_preflight,
+)
 from .findings import (
     FindingKey,
     collect_blocking_findings,
@@ -35,6 +40,7 @@ __all__ = [
     "SCRIPTS_DIR",
     "TEST_TIMEOUT",
     "FindingKey",
+    "ScrubberFailedError",
     "SecretsDetectedError",
     "_run",
     "write_artifacts_key",

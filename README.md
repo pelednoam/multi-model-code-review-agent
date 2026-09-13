@@ -226,6 +226,7 @@ The loop exits on the first of:
 | 6 | Max rounds reached | `--max-rounds` (default 5) hit without convergence |
 | 7 | No reviewer results | Zero of 4 reviewers produced parseable JSON (rare, usually a CLI auth or network failure) |
 | 8 | **Secrets detected** | `scrub_diff.py` redacted at least one line. Rotate the leaked secret and re-stage the diff before re-running |
+| 9 | **Scrubber failed** | `scrub_diff.py` aborted part-way through. The patch on disk is truncated and its tail was never scrubbed, so it is not shown to a reviewer. Nothing needs rotating; fix the input or the environment and re-run |
 
 Exit 4 means the loop stops **without rolling back** -- the failing
 diff is left in the working tree so you can inspect what went wrong.

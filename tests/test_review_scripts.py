@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -78,6 +79,53 @@ class TestScrubDiff:
         stdout, _, code = self._run_scrub(diff)
         assert "REDACTED" in stdout
         assert code == 1
+
+    def test_redacts_the_whole_private_key_not_just_its_banner(self) -> None:
+        """The body is the key. Redacting only the banner leaks it intact."""
+        body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQ"
+        diff = (
+            "diff --git a/k.pem b/k.pem\n"
+            "+-----BEGIN RSA PRIVATE KEY-----\n"
+            f"+{body}\n"
+            "+-----END RSA PRIVATE KEY-----\n"
+        )
+        stdout, _, code = self._run_scrub(diff)
+        assert body not in stdout
+        assert stdout.count("REDACTED") == 3
+        assert code == 1
+
+    def test_a_key_block_does_not_swallow_the_rest_of_the_diff(self) -> None:
+        diff = (
+            "diff --git a/k.pem b/k.pem\n"
+            "+-----BEGIN PRIVATE KEY-----\n"
+            "+AAAA\n"
+            "+-----END PRIVATE KEY-----\n"
+            "+after the key\n"
+        )
+        stdout, _, _ = self._run_scrub(diff)
+        assert "+after the key" in stdout
+
+    def test_an_unterminated_key_block_ends_at_the_next_file(self) -> None:
+        """A truncated key must not redact every following file wholesale."""
+        diff = (
+            "diff --git a/k.pem b/k.pem\n"
+            "+-----BEGIN PRIVATE KEY-----\n"
+            "+AAAA\n"
+            "diff --git a/ok.py b/ok.py\n"
+            "+def hello(): pass\n"
+        )
+        stdout, _, _ = self._run_scrub(diff)
+        assert "+def hello(): pass" in stdout
+
+    def test_a_fixture_key_banner_in_a_safe_file_opens_no_block(self) -> None:
+        diff = (
+            "diff --git a/scripts/scrub_diff.py b/scripts/scrub_diff.py\n"
+            "+-----BEGIN PRIVATE KEY-----\n"
+            '+re.compile(r"x")\n'
+        )
+        stdout, _, code = self._run_scrub(diff)
+        assert "REDACTED" not in stdout
+        assert code == 0
 
     def test_redacts_gcp_service_account(self) -> None:
         diff = '+  "type": "service_account"\n'
@@ -181,6 +229,39 @@ class TestScrubDiff:
         assert "REDACTED" not in stdout
         assert code == 0
 
+    def test_redacts_a_dotenv_path_added_at_column_zero(self) -> None:
+        """The `+` prefix is not part of the file's text and must not hide it."""
+        stdout, _, code = self._run_scrub("+.env.production\n")
+        assert "REDACTED" in stdout
+        assert code == 1
+
+    def test_a_combined_diff_header_does_not_inherit_a_safe_file(self) -> None:
+        """`in_safe` used to latch: only `diff --git` reset it."""
+        diff = (
+            "diff --git a/scripts/scrub_diff.py b/scripts/scrub_diff.py\n"
+            '+re.compile(r"x")\n'
+            "diff --cc other.py\n"
+            '+re.compile(r"y")  # api_key = "supersecret1"\n'
+        )
+        stdout, _, code = self._run_scrub(diff)
+        assert "supersecret1" not in stdout
+        assert code == 1
+
+    def test_a_non_utf8_byte_does_not_truncate_the_patch(self) -> None:
+        """A crash mid-stream leaves a plausible patch whose tail is unscrubbed."""
+        raw = b'diff --git a/x b/x\n+caf\xe9 api_key = "abcdefghij1"\n+trailing line\n'
+        result = subprocess.run(
+            [sys.executable, str(SCRUB_SCRIPT)],
+            input=raw,
+            capture_output=True,
+            timeout=10,
+            env={**os.environ, "LC_ALL": "C", "PYTHONIOENCODING": "ascii"},
+        )
+        stdout = result.stdout.decode("utf-8", "replace")
+        assert "abcdefghij1" not in stdout
+        assert "+trailing line" in stdout
+        assert result.returncode == 1
+
     def test_empty_input(self) -> None:
         stdout, stderr, code = self._run_scrub("")
         assert stdout == ""
@@ -190,9 +271,7 @@ class TestScrubDiff:
 class TestReviewPreflight:
     """Tests for scripts/review_preflight.py."""
 
-    def _run_preflight(
-        self, tmp_path: Path
-    ) -> tuple[dict, subprocess.CompletedProcess[str]]:
+    def _run_preflight(self, tmp_path: Path) -> tuple[dict, subprocess.CompletedProcess[str]]:
         output = tmp_path / "audit.json"
         proc = subprocess.run(
             [
@@ -474,6 +553,23 @@ class TestRunGate:
             assert label in source
 
 
+def _two_commit_repo(repo: Path) -> Path:
+    """A git repo with two commits, so HEAD~1 resolves."""
+    repo.mkdir(parents=True, exist_ok=True)
+    env = {
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t",
+    }
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True, env=env)
+    for n, body in enumerate(("a = 1\n", "a = 2\n")):
+        (repo / "x.py").write_text(body)
+        subprocess.run(["git", "add", "x.py"], cwd=repo, check=True, env=env)
+        subprocess.run(["git", "commit", "-q", "-m", str(n)], cwd=repo, check=True, env=env)
+    return repo
+
+
 class TestSecretsDetected:
     """The scrubber must STOP the loop, not just warn."""
 
@@ -500,20 +596,14 @@ class TestSecretsDetected:
             "GIT_COMMITTER_NAME": "t",
             "GIT_COMMITTER_EMAIL": "t@t",
         }
-        subprocess.run(
-            ["git", "init", "-q", "-b", "main"], cwd=repo, check=True, env=env
-        )
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True, env=env)
         (repo / "x.py").write_text("a = 1\n")
         subprocess.run(["git", "add", "x.py"], cwd=repo, check=True, env=env)
-        subprocess.run(
-            ["git", "commit", "-q", "-m", "init"], cwd=repo, check=True, env=env
-        )
+        subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True, env=env)
         # Need HEAD~1 to resolve, so make a second commit.
         (repo / "x.py").write_text("a = 2\n")
         subprocess.run(["git", "add", "x.py"], cwd=repo, check=True, env=env)
-        subprocess.run(
-            ["git", "commit", "-q", "-m", "two"], cwd=repo, check=True, env=env
-        )
+        subprocess.run(["git", "commit", "-q", "-m", "two"], cwd=repo, check=True, env=env)
 
         fake_scrubber = tmp_path / "scrub_diff.py"
         fake_scrubber.write_text(
@@ -523,6 +613,56 @@ class TestSecretsDetected:
             with pytest.raises(SecretsDetectedError) as exc_info:
                 collect_diff(round_dir, repo)
         assert "rotated" in str(exc_info.value)
+
+    def test_collect_diff_distinguishes_a_crash_from_a_clean_block(self, tmp_path: Path) -> None:
+        """Exit 2 means the patch is truncated, not that a secret leaked."""
+        from unittest.mock import patch
+
+        from scripts.review_loop.diff import ScrubberFailedError, collect_diff
+
+        round_dir = tmp_path / "round"
+        round_dir.mkdir()
+        repo = _two_commit_repo(tmp_path / "repo")
+
+        fake_scrubber = tmp_path / "scrub_diff.py"
+        fake_scrubber.write_text('import sys\nprint("aborted", file=sys.stderr)\nsys.exit(2)\n')
+        with patch("scripts.review_loop.diff.SCRIPTS_DIR", tmp_path):
+            with pytest.raises(ScrubberFailedError) as exc_info:
+                collect_diff(round_dir, repo)
+        assert "truncated" in str(exc_info.value)
+        assert "rotated" not in str(exc_info.value)
+
+
+class TestPreflightScriptSelection:
+    """Which preflight runs for a `--repo` that is not the agent's own."""
+
+    def test_a_host_project_uses_its_own_installed_preflight(self, tmp_path: Path) -> None:
+        """Its config.py -- SOURCE_DIRS, SIGNED_MANIFESTS -- is the one that applies."""
+        from scripts.review_loop.diff import _preflight_script
+
+        repo = tmp_path / "host"
+        (repo / "scripts").mkdir(parents=True)
+        installed = repo / "scripts" / "review_preflight.py"
+        installed.write_text("")
+        assert _preflight_script(repo) == installed
+
+    def test_the_agents_own_repo_uses_its_own_copy(self, tmp_path: Path) -> None:
+        from scripts.review_loop.config import SCRIPTS_DIR
+        from scripts.review_loop.diff import _preflight_script
+
+        repo = tmp_path / "agent"
+        (repo / "scripts" / "review_loop").mkdir(parents=True)
+        (repo / "install.sh").write_text("")
+        (repo / "scripts" / "review_preflight.py").write_text("")
+        assert _preflight_script(repo) == SCRIPTS_DIR / "review_preflight.py"
+
+    def test_a_project_without_an_installed_copy_falls_back(self, tmp_path: Path) -> None:
+        from scripts.review_loop.config import SCRIPTS_DIR
+        from scripts.review_loop.diff import _preflight_script
+
+        repo = tmp_path / "bare"
+        repo.mkdir()
+        assert _preflight_script(repo) == SCRIPTS_DIR / "review_preflight.py"
 
 
 class TestSourceDirsConfigurable:
@@ -656,9 +796,7 @@ class TestChangedFilesFallback:
     def _repo(self, tmp_path: Path, n_commits: int) -> Path:
         repo = tmp_path / "repo"
         repo.mkdir()
-        subprocess.run(
-            ["git", "init", "-q", "-b", "main"], cwd=repo, check=True, env=_GIT_ENV
-        )
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True, env=_GIT_ENV)
         for i in range(n_commits):
             (repo / "x.py").write_text(f"a = {i}\n")
             subprocess.run(["git", "add", "x.py"], cwd=repo, check=True, env=_GIT_ENV)
@@ -700,20 +838,14 @@ class TestVendoredExclusion:
         repo = tmp_path / "host"
         (repo / "scripts").mkdir(parents=True)
         (repo / "app").mkdir()
-        subprocess.run(
-            ["git", "init", "-q", "-b", "main"], cwd=repo, check=True, env=_GIT_ENV
-        )
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True, env=_GIT_ENV)
         (repo / "README.md").write_text("base\n")
         subprocess.run(["git", "add", "-A"], cwd=repo, check=True, env=_GIT_ENV)
-        subprocess.run(
-            ["git", "commit", "-q", "-m", "base"], cwd=repo, check=True, env=_GIT_ENV
-        )
+        subprocess.run(["git", "commit", "-q", "-m", "base"], cwd=repo, check=True, env=_GIT_ENV)
         (repo / "scripts" / "review_preflight.py").write_text("# vendored\n")
         (repo / "app" / "main.py").write_text("value = 1\n")
         subprocess.run(["git", "add", "-A"], cwd=repo, check=True, env=_GIT_ENV)
-        subprocess.run(
-            ["git", "commit", "-q", "-m", "work"], cwd=repo, check=True, env=_GIT_ENV
-        )
+        subprocess.run(["git", "commit", "-q", "-m", "work"], cwd=repo, check=True, env=_GIT_ENV)
         return repo
 
     def test_agent_repo_still_reviews_itself(self, tmp_path: Path) -> None:
@@ -742,9 +874,7 @@ class TestVendoredExclusion:
         assert len(spec) == len(VENDORED_PATHS) + 1
         assert ":(exclude)scripts/review_loop" in spec
 
-    def test_collect_diff_omits_vendored_but_keeps_project_code(
-        self, tmp_path: Path
-    ) -> None:
+    def test_collect_diff_omits_vendored_but_keeps_project_code(self, tmp_path: Path) -> None:
         """The end-to-end shape: the reviewer sees app/, never scripts/."""
         from unittest.mock import patch
 
@@ -810,9 +940,7 @@ class TestCodexEnvOverrides:
         monkeypatch.delenv("CODEX_REASONING_EFFORT", raising=False)
         assert _codex_extra_args() == ["-m", "gpt-5.5-codex"]
 
-    def test_reasoning_high_is_pro_equivalent(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_reasoning_high_is_pro_equivalent(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from scripts.review_loop.reviewers import _codex_extra_args
 
         monkeypatch.delenv("CODEX_MODEL", raising=False)
@@ -910,6 +1038,8 @@ class TestRunnerScript:
         runner = self._runner()
         # Every slot must yield a result-N.json so the report can be honest about what is missing,
         # and the reason must distinguish the cases a reader would act on differently.
-        assert "124|137" in runner, "a reviewer killed by its own timeout is reported as a parse error"
+        assert "124|137" in runner, (
+            "a reviewer killed by its own timeout is reported as a parse error"
+        )
         assert "never launched" in runner
         assert "killed by the watchdog" in runner

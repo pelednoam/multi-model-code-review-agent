@@ -9,8 +9,16 @@ Lines matching credential patterns are replaced with a redaction marker.
 The diff structure (headers, hunks) is preserved so reviewers can still
 see file/line context.
 
-Exits non-zero if any lines were redacted -- the review pipeline should
-block until the secrets are removed from the branch and rotated.
+Exit codes:
+
+* ``0`` -- nothing redacted, the diff is clean.
+* ``1`` -- at least one line was redacted. The review pipeline should block
+  until the secrets are removed from the branch and rotated.
+* ``2`` -- the scrubber itself failed. The output on stdout is truncated and
+  must not be treated as a scrubbed diff. This is deliberately distinct from
+  ``1``: a crash halfway through writing ``diff.patch`` leaves a plausible
+  looking patch whose tail was never scrubbed, and a caller that cannot tell
+  the two apart will happily ship it to a reviewer.
 """
 
 from __future__ import annotations
@@ -47,6 +55,15 @@ CREDENTIAL_PATTERNS = [
     re.compile(r"(?i)DefaultEndpointsProtocol=https;AccountName="),
     re.compile(r'"type"\s*:\s*"service_account"'),
 ]
+
+# A private key is a *block*, not a line. The `BEGIN ... PRIVATE KEY` pattern
+# above matches one line and one line only; every base64 body line after it
+# matches nothing (it has no `key:`-style prefix, and it is not an `sk-`/`AKIA`
+# /`ghp_` shape), so a line-at-a-time scrubber redacts the banner and writes
+# the usable key straight through. These two bound the block so the body can be
+# redacted as well.
+_PEM_BEGIN = re.compile(r"(?i)BEGIN\s+[A-Z0-9 ]*PRIVATE\s+KEY")
+_PEM_END = re.compile(r"(?i)END\s+[A-Z0-9 ]*PRIVATE\s+KEY")
 
 REDACTED = "# [REDACTED: credential pattern detected]"
 _REDACTED_LINE = REDACTED + "\n"
@@ -122,6 +139,16 @@ def _redact_preserving_prefix(line: str) -> str:
     return _REDACTED_LINE
 
 
+def _is_body_line(line: str) -> bool:
+    """Whether this is a hunk body line rather than diff metadata."""
+    return line[:1] in ("+", "-", " ")
+
+
+def _body(line: str) -> str:
+    """The line without the diff format's one-character prefix."""
+    return line[1:] if _is_body_line(line) else line
+
+
 def scrub_line(line: str, in_safe_file: bool) -> str:
     """Replace a line with a redaction marker if it matches any pattern.
 
@@ -140,22 +167,65 @@ def scrub_line(line: str, in_safe_file: bool) -> str:
     """
     if in_safe_file and _is_intentional_fixture_line(line):
         return line
+    # Match the body, not the `+`/`-`/` ` the diff format puts in front of it.
+    # `+` is neither a line start nor one of the delimiters the anchored
+    # patterns accept, so `^`-anchored patterns could never fire on an added
+    # line -- `+.env.production` went through untouched while the same text in
+    # prose was redacted.
     for pattern in CREDENTIAL_PATTERNS:
-        if pattern.search(line):
+        if pattern.search(_body(line)):
             return _redact_preserving_prefix(line)
     return line
 
 
+def _force_utf8(stream: object) -> None:
+    """Pin a standard stream to UTF-8 with replacement.
+
+    Diffs carry whatever bytes the repository holds -- latin-1 sources,
+    `--text` output of near-binary files -- and CI often runs under `LC_ALL=C`,
+    which makes stdout ASCII. Under the ambient codec either one raises
+    mid-stream, and the exception escapes after an unknown number of lines have
+    already been written: a truncated patch whose tail was never scrubbed.
+    Replacement characters in a reviewer's diff are a far better outcome.
+    """
+    reconfigure = getattr(stream, "reconfigure", None)
+    if reconfigure is not None:  # pragma: no branch - always a TextIOWrapper
+        reconfigure(encoding="utf-8", errors="replace")
+
+
 def main() -> None:
     """Read stdin, scrub, write to stdout. Exit 1 if any redactions."""
+    _force_utf8(sys.stdin)
+    _force_utf8(sys.stdout)
+
     n_redacted = 0
     in_safe = False
+    in_key = False
 
     for line in sys.stdin:
-        if line.startswith("diff --git "):
-            in_safe = _is_safe_file(line)
+        # Fail closed on every header form, not just `diff --git`. `in_safe`
+        # used to latch: a `diff --cc` section from a merge commit following a
+        # safe file inherited its bypass, and any line in it containing
+        # `re.compile(` -- which is to say any Python file defining a regex --
+        # passed through unscrubbed.
+        if line.startswith("diff "):
+            in_safe = line.startswith("diff --git ") and _is_safe_file(line)
+            in_key = False
+        if in_key and not _is_body_line(line):
+            in_key = False
 
-        clean = scrub_line(line, in_safe)
+        if in_key:
+            clean = _redact_preserving_prefix(line)
+            if _PEM_END.search(line):
+                in_key = False
+        else:
+            clean = scrub_line(line, in_safe)
+            # Only a *redacted* BEGIN line opens a block. In a safe file the
+            # banner is an intentional fixture and passes through, and the
+            # fixture's body must not then be swallowed.
+            if clean != line and _PEM_BEGIN.search(line):
+                in_key = True
+
         sys.stdout.write(clean)
         if clean != line and REDACTED in clean:
             n_redacted += 1
@@ -169,4 +239,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except OSError as exc:
+        # Anything already on stdout is a partial, unscrubbed patch. Exit 2 so
+        # the caller can say so rather than reporting a clean block.
+        print(f"# scrub_diff.py: aborted, output is truncated: {exc}", file=sys.stderr)
+        sys.exit(2)

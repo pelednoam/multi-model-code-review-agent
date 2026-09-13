@@ -40,6 +40,7 @@ from scripts.review_loop import (  # noqa: E402
     SCRIPTS_DIR,
     TEST_TIMEOUT,
     FindingKey,
+    ScrubberFailedError,
     SecretsDetectedError,
     _run,
     apply_fixes,
@@ -66,6 +67,7 @@ __all__ = [
     "SCRIPTS_DIR",
     "TEST_TIMEOUT",
     "FindingKey",
+    "ScrubberFailedError",
     "SecretsDetectedError",
     "_run",
     "apply_fixes",
@@ -107,6 +109,9 @@ def _run_one_round(
     except SecretsDetectedError as e:
         print(f"\nABORT: secrets detected in diff.\n\n{e}")
         return 8, previous_fp
+    except ScrubberFailedError as e:
+        print(f"\nABORT: the scrubber failed; the diff is incomplete.\n\n{e}")
+        return 9, previous_fp
     print(f"Diff: {n_lines} lines")
     if n_lines == 0:
         print("No changes -- nothing to review.")
@@ -129,8 +134,7 @@ def _run_one_round(
     print(describe_outputs(round_dir))
     if n_ok == 0:
         print(
-            "\nERROR: no reviewer results could be parsed; "
-            "cannot determine convergence."
+            "\nERROR: no reviewer results could be parsed; cannot determine convergence."
         )
         return 7, previous_fp
 

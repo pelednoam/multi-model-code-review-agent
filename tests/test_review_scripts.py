@@ -109,7 +109,7 @@ class TestScrubDiff:
         assert code == 0
 
     def test_exit_code_nonzero_on_redaction(self) -> None:
-        diff = "+secret_key = abc\n"
+        diff = '+secret_key = "abc123def456"\n'
         _, _, code = self._run_scrub(diff)
         assert code == 1
 
@@ -130,9 +130,50 @@ class TestScrubDiff:
         assert "def main():" in stdout
 
     def test_counts_redactions_on_stderr(self) -> None:
-        diff = "+API_KEY=a\n+password=b\n+token=c\n"
+        diff = (
+            '+API_KEY = "sk-abc123def456ghi"\n'
+            '+password = "hunter22"\n'
+            "+token=ghp_abcdefghij1234567890\n"
+        )
         _, stderr, _ = self._run_scrub(diff)
         assert "3 line(s) redacted" in stderr
+
+    def test_does_not_redact_a_domain_word_called_token(self) -> None:
+        """A token is a game object in Magic, a node in a parser, a colour in a
+        design system. Flagging the word aborts those projects' reviews entirely.
+        """
+        diff = (
+            "+        case CreateTokens(count=count, token=token):\n"
+            "+def encode_token(token: TokenSpec) -> JsonObject:\n"
+            "+    token: TokenSpec\n"
+        )
+        stdout, _, code = self._run_scrub(diff)
+        assert "REDACTED" not in stdout
+        assert code == 0
+
+    def test_does_not_redact_type_annotations(self) -> None:
+        diff = "+    api_key: str\n+    password: str | None = None\n"
+        stdout, _, code = self._run_scrub(diff)
+        assert "REDACTED" not in stdout
+        assert code == 0
+
+    def test_does_not_redact_reading_a_secret_from_the_environment(self) -> None:
+        """Naming a secret is not leaking one."""
+        diff = "+access_token = os.environ['TOKEN']\n"
+        stdout, _, _code = self._run_scrub(diff)
+        assert "REDACTED" not in stdout
+
+    def test_still_redacts_a_quoted_credential(self) -> None:
+        diff = '+token: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"\n'
+        stdout, _, code = self._run_scrub(diff)
+        assert "REDACTED" in stdout
+        assert code == 1
+
+    def test_still_redacts_an_unquoted_credential(self) -> None:
+        diff = "+token=ghp_abcdefghij1234567890abcdef\n"
+        stdout, _, code = self._run_scrub(diff)
+        assert "REDACTED" in stdout
+        assert code == 1
 
     def test_does_not_match_dotenv_in_prose(self) -> None:
         diff = "+# See the .environment docs for details\n"

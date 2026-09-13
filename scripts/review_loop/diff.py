@@ -7,7 +7,7 @@ import sys
 from typing import TYPE_CHECKING
 
 from .backends import _run
-from .config import SCRIPTS_DIR
+from .config import SCRIPTS_DIR, diff_pathspec
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -31,16 +31,22 @@ def collect_diff(round_dir: Path, repo: Path) -> tuple[Path, int]:
             The user must rotate the leaked secret and re-run.
     """
     diff_path = round_dir / "diff.patch"
-    git = _run(["git", "diff", "--merge-base", "origin/main", "--", "."], cwd=repo)
+    # Exclude the agent's own vendored files. install.sh copies them into the
+    # host project, so without this a host's first review spends most of its
+    # budget -- 60% of the diff on a fresh install -- reviewing the reviewer.
+    pathspec = diff_pathspec(repo)
+    git = _run(
+        ["git", "diff", "--merge-base", "origin/main", "--", *pathspec], cwd=repo
+    )
     if git.returncode != 0:
-        fallback = _run(["git", "diff", "HEAD~1"], cwd=repo)
+        fallback = _run(["git", "diff", "HEAD~1", "--", *pathspec], cwd=repo)
         if fallback.returncode != 0:
             raise RuntimeError(
                 f"failed to collect diff: {git.stderr}\n{fallback.stderr}"
             )
         git = fallback
     elif not git.stdout.strip():
-        git = _run(["git", "diff", "HEAD~1"], cwd=repo)
+        git = _run(["git", "diff", "HEAD~1", "--", *pathspec], cwd=repo)
     diff_input = git.stdout or ""
     with open(diff_path, "w") as out_f:
         scrubber = subprocess.Popen(

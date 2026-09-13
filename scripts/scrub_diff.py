@@ -38,13 +38,28 @@ import sys
 # `TokenSpec`, `str` and `os.environ` do not.
 _SECRET_VALUE = r"""(?:['"][^'"]{4,}['"]|(?=[\w.\-]*\d)[\w.\-]{8,})"""
 
+# A private key is a *block*, not a line. A banner matches one line and one
+# line only; every base64 body line after it matches nothing (it has no
+# `key:`-style prefix, and it is not an `sk-`/`AKIA`/`ghp_` shape), so a
+# line-at-a-time scrubber redacts the banner and writes the usable key straight
+# through. These two bound the block so the body can be redacted as well.
+#
+# `_PEM_BEGIN` is also the banner pattern in CREDENTIAL_PATTERNS below, and has
+# to be: an earlier version paired a narrow `BEGIN (RSA )?PRIVATE KEY` there
+# with this broad one here, and opened the block only when the banner had been
+# redacted. `-----BEGIN OPENSSH PRIVATE KEY-----` matched the broad pattern but
+# not the narrow one, so nothing was redacted, the block never opened, and the
+# scrubber exited 0 calling the key clean. One regex, used for both jobs.
+_PEM_BEGIN = re.compile(r"(?i)BEGIN\s+[A-Z0-9 ]*PRIVATE\s+KEY")
+_PEM_END = re.compile(r"(?i)END\s+[A-Z0-9 ]*PRIVATE\s+KEY")
+
 CREDENTIAL_PATTERNS = [
     re.compile(
         r"(?i)(api[_-]?key|secret[_-]?key|access[_-]?key)\s*[:=]\s*" + _SECRET_VALUE
     ),
     re.compile(r"(?i)(password|passwd|pwd)\s*[:=]\s*" + _SECRET_VALUE),
     re.compile(r"(?i)\b(token|bearer)\s*[:=]\s*" + _SECRET_VALUE),
-    re.compile(r"(?i)BEGIN\s+(RSA\s+)?PRIVATE\s+KEY"),
+    _PEM_BEGIN,
     re.compile(r"(?i)(^|[\s'\"/])\.env(\.[a-z]+)?([\s'\"/]|$)"),
     re.compile(r"AKIA[0-9A-Z]{16}"),
     re.compile(r"sk-[a-zA-Z0-9]{20,128}"),
@@ -55,15 +70,6 @@ CREDENTIAL_PATTERNS = [
     re.compile(r"(?i)DefaultEndpointsProtocol=https;AccountName="),
     re.compile(r'"type"\s*:\s*"service_account"'),
 ]
-
-# A private key is a *block*, not a line. The `BEGIN ... PRIVATE KEY` pattern
-# above matches one line and one line only; every base64 body line after it
-# matches nothing (it has no `key:`-style prefix, and it is not an `sk-`/`AKIA`
-# /`ghp_` shape), so a line-at-a-time scrubber redacts the banner and writes
-# the usable key straight through. These two bound the block so the body can be
-# redacted as well.
-_PEM_BEGIN = re.compile(r"(?i)BEGIN\s+[A-Z0-9 ]*PRIVATE\s+KEY")
-_PEM_END = re.compile(r"(?i)END\s+[A-Z0-9 ]*PRIVATE\s+KEY")
 
 REDACTED = "# [REDACTED: credential pattern detected]"
 _REDACTED_LINE = REDACTED + "\n"

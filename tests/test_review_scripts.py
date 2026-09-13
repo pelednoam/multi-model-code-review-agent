@@ -94,6 +94,42 @@ class TestScrubDiff:
         assert stdout.count("REDACTED") == 3
         assert code == 1
 
+    @pytest.mark.parametrize(
+        "kind",
+        ["RSA", "OPENSSH", "EC", "DSA", "ENCRYPTED", "PGP"],
+    )
+    def test_every_private_key_banner_opens_the_block(self, kind: str) -> None:
+        """One narrow banner pattern and one broad one let OPENSSH keys through.
+
+        The block opened only for a banner the credential patterns had already
+        redacted, and `BEGIN OPENSSH PRIVATE KEY` matched only the broad one --
+        so nothing was redacted, the block never opened, and the scrubber
+        exited 0 calling the key clean.
+        """
+        body = "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAAB"
+        diff = (
+            "diff --git a/k b/k\n"
+            f"+-----BEGIN {kind} PRIVATE KEY-----\n"
+            f"+{body}\n"
+            f"+-----END {kind} PRIVATE KEY-----\n"
+        )
+        stdout, _, code = self._run_scrub(diff)
+        assert body not in stdout
+        assert code == 1
+
+    def test_a_pgp_key_block_banner_is_recognised(self) -> None:
+        """Its banner says BLOCK after KEY, which the anchorless search allows."""
+        body = "lQOYBGYAAAABCADQ1example"
+        diff = (
+            "diff --git a/k b/k\n"
+            "+-----BEGIN PGP PRIVATE KEY BLOCK-----\n"
+            f"+{body}\n"
+            "+-----END PGP PRIVATE KEY BLOCK-----\n"
+        )
+        stdout, _, code = self._run_scrub(diff)
+        assert body not in stdout
+        assert code == 1
+
     def test_a_key_block_does_not_swallow_the_rest_of_the_diff(self) -> None:
         diff = (
             "diff --git a/k.pem b/k.pem\n"
@@ -271,7 +307,9 @@ class TestScrubDiff:
 class TestReviewPreflight:
     """Tests for scripts/review_preflight.py."""
 
-    def _run_preflight(self, tmp_path: Path) -> tuple[dict, subprocess.CompletedProcess[str]]:
+    def _run_preflight(
+        self, tmp_path: Path
+    ) -> tuple[dict, subprocess.CompletedProcess[str]]:
         output = tmp_path / "audit.json"
         proc = subprocess.run(
             [
@@ -566,7 +604,9 @@ def _two_commit_repo(repo: Path) -> Path:
     for n, body in enumerate(("a = 1\n", "a = 2\n")):
         (repo / "x.py").write_text(body)
         subprocess.run(["git", "add", "x.py"], cwd=repo, check=True, env=env)
-        subprocess.run(["git", "commit", "-q", "-m", str(n)], cwd=repo, check=True, env=env)
+        subprocess.run(
+            ["git", "commit", "-q", "-m", str(n)], cwd=repo, check=True, env=env
+        )
     return repo
 
 
@@ -596,14 +636,20 @@ class TestSecretsDetected:
             "GIT_COMMITTER_NAME": "t",
             "GIT_COMMITTER_EMAIL": "t@t",
         }
-        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True, env=env)
+        subprocess.run(
+            ["git", "init", "-q", "-b", "main"], cwd=repo, check=True, env=env
+        )
         (repo / "x.py").write_text("a = 1\n")
         subprocess.run(["git", "add", "x.py"], cwd=repo, check=True, env=env)
-        subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True, env=env)
+        subprocess.run(
+            ["git", "commit", "-q", "-m", "init"], cwd=repo, check=True, env=env
+        )
         # Need HEAD~1 to resolve, so make a second commit.
         (repo / "x.py").write_text("a = 2\n")
         subprocess.run(["git", "add", "x.py"], cwd=repo, check=True, env=env)
-        subprocess.run(["git", "commit", "-q", "-m", "two"], cwd=repo, check=True, env=env)
+        subprocess.run(
+            ["git", "commit", "-q", "-m", "two"], cwd=repo, check=True, env=env
+        )
 
         fake_scrubber = tmp_path / "scrub_diff.py"
         fake_scrubber.write_text(
@@ -614,7 +660,9 @@ class TestSecretsDetected:
                 collect_diff(round_dir, repo)
         assert "rotated" in str(exc_info.value)
 
-    def test_collect_diff_distinguishes_a_crash_from_a_clean_block(self, tmp_path: Path) -> None:
+    def test_collect_diff_distinguishes_a_crash_from_a_clean_block(
+        self, tmp_path: Path
+    ) -> None:
         """Exit 2 means the patch is truncated, not that a secret leaked."""
         from unittest.mock import patch
 
@@ -625,7 +673,9 @@ class TestSecretsDetected:
         repo = _two_commit_repo(tmp_path / "repo")
 
         fake_scrubber = tmp_path / "scrub_diff.py"
-        fake_scrubber.write_text('import sys\nprint("aborted", file=sys.stderr)\nsys.exit(2)\n')
+        fake_scrubber.write_text(
+            'import sys\nprint("aborted", file=sys.stderr)\nsys.exit(2)\n'
+        )
         with patch("scripts.review_loop.diff.SCRIPTS_DIR", tmp_path):
             with pytest.raises(ScrubberFailedError) as exc_info:
                 collect_diff(round_dir, repo)
@@ -636,7 +686,9 @@ class TestSecretsDetected:
 class TestPreflightScriptSelection:
     """Which preflight runs for a `--repo` that is not the agent's own."""
 
-    def test_a_host_project_uses_its_own_installed_preflight(self, tmp_path: Path) -> None:
+    def test_a_host_project_uses_its_own_installed_preflight(
+        self, tmp_path: Path
+    ) -> None:
         """Its config.py -- SOURCE_DIRS, SIGNED_MANIFESTS -- is the one that applies."""
         from scripts.review_loop.diff import _preflight_script
 
@@ -656,7 +708,9 @@ class TestPreflightScriptSelection:
         (repo / "scripts" / "review_preflight.py").write_text("")
         assert _preflight_script(repo) == SCRIPTS_DIR / "review_preflight.py"
 
-    def test_a_project_without_an_installed_copy_falls_back(self, tmp_path: Path) -> None:
+    def test_a_project_without_an_installed_copy_falls_back(
+        self, tmp_path: Path
+    ) -> None:
         from scripts.review_loop.config import SCRIPTS_DIR
         from scripts.review_loop.diff import _preflight_script
 
@@ -796,7 +850,9 @@ class TestChangedFilesFallback:
     def _repo(self, tmp_path: Path, n_commits: int) -> Path:
         repo = tmp_path / "repo"
         repo.mkdir()
-        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True, env=_GIT_ENV)
+        subprocess.run(
+            ["git", "init", "-q", "-b", "main"], cwd=repo, check=True, env=_GIT_ENV
+        )
         for i in range(n_commits):
             (repo / "x.py").write_text(f"a = {i}\n")
             subprocess.run(["git", "add", "x.py"], cwd=repo, check=True, env=_GIT_ENV)
@@ -838,14 +894,20 @@ class TestVendoredExclusion:
         repo = tmp_path / "host"
         (repo / "scripts").mkdir(parents=True)
         (repo / "app").mkdir()
-        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True, env=_GIT_ENV)
+        subprocess.run(
+            ["git", "init", "-q", "-b", "main"], cwd=repo, check=True, env=_GIT_ENV
+        )
         (repo / "README.md").write_text("base\n")
         subprocess.run(["git", "add", "-A"], cwd=repo, check=True, env=_GIT_ENV)
-        subprocess.run(["git", "commit", "-q", "-m", "base"], cwd=repo, check=True, env=_GIT_ENV)
+        subprocess.run(
+            ["git", "commit", "-q", "-m", "base"], cwd=repo, check=True, env=_GIT_ENV
+        )
         (repo / "scripts" / "review_preflight.py").write_text("# vendored\n")
         (repo / "app" / "main.py").write_text("value = 1\n")
         subprocess.run(["git", "add", "-A"], cwd=repo, check=True, env=_GIT_ENV)
-        subprocess.run(["git", "commit", "-q", "-m", "work"], cwd=repo, check=True, env=_GIT_ENV)
+        subprocess.run(
+            ["git", "commit", "-q", "-m", "work"], cwd=repo, check=True, env=_GIT_ENV
+        )
         return repo
 
     def test_agent_repo_still_reviews_itself(self, tmp_path: Path) -> None:
@@ -874,7 +936,9 @@ class TestVendoredExclusion:
         assert len(spec) == len(VENDORED_PATHS) + 1
         assert ":(exclude)scripts/review_loop" in spec
 
-    def test_collect_diff_omits_vendored_but_keeps_project_code(self, tmp_path: Path) -> None:
+    def test_collect_diff_omits_vendored_but_keeps_project_code(
+        self, tmp_path: Path
+    ) -> None:
         """The end-to-end shape: the reviewer sees app/, never scripts/."""
         from unittest.mock import patch
 
@@ -940,7 +1004,9 @@ class TestCodexEnvOverrides:
         monkeypatch.delenv("CODEX_REASONING_EFFORT", raising=False)
         assert _codex_extra_args() == ["-m", "gpt-5.5-codex"]
 
-    def test_reasoning_high_is_pro_equivalent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_reasoning_high_is_pro_equivalent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         from scripts.review_loop.reviewers import _codex_extra_args
 
         monkeypatch.delenv("CODEX_MODEL", raising=False)
@@ -980,7 +1046,9 @@ class TestRunnerScript:
 
         doc = self.AGENT_DOC.read_text()
         m = re.search(
-            r"cat > \"\$REVIEW_TMP/run-reviewers\.sh\" <<'RUNNER'\n(.*?)\nRUNNER\n", doc, re.S
+            r"cat > \"\$REVIEW_TMP/run-reviewers\.sh\" <<'RUNNER'\n(.*?)\nRUNNER\n",
+            doc,
+            re.S,
         )
         assert m, "section 6 no longer defines a run-reviewers.sh heredoc"
         return m.group(1)
@@ -1011,7 +1079,9 @@ class TestRunnerScript:
         # A bare `wait` has no deadline of its own, so one wedged reviewer holds the round open
         # forever and the other three results are never reported.
         runner = self._runner()
-        assert "\nwait\n" not in runner, "bare `wait` is back: one wedged reviewer hangs the round"
+        assert "\nwait\n" not in runner, (
+            "bare `wait` is back: one wedged reviewer hangs the round"
+        )
         assert "WATCHDOG" in runner
 
     def test_every_reviewer_records_a_pid_and_an_exit_status(self) -> None:

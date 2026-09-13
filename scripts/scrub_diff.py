@@ -117,7 +117,7 @@ def _is_intentional_fixture_line(line: str) -> bool:
     scrubbed normally, so accidentally committed real secrets are
     still caught.
     """
-    body = _body(line).lstrip()
+    body = line[1:].lstrip() if line[:1] in ("+", "-", " ") else line.lstrip()
     return (
         body.startswith(
             ("re.compile(", "_SECRET_VALUE", "_PEM_", "CREDENTIAL_PATTERNS")
@@ -160,24 +160,32 @@ def _redact_preserving_prefix(line: str) -> str:
 _HEADER_PREFIXES = ("--- ", "+++ ", "---\n", "+++\n")
 
 
-def _is_body_line(line: str) -> bool:
-    """Whether this is a hunk body line rather than diff metadata."""
-    if line.startswith(_HEADER_PREFIXES):
+def _is_body_line(line: str, *, in_hunk: bool) -> bool:
+    """Whether this is a hunk body line rather than diff metadata.
+
+    ``in_hunk`` is what separates the two, and it has to: a removed line of SQL,
+    Lua, Haskell or Ada whose content is a `--` comment arrives as
+    `--- password = "hunter2abc"`, which is indistinguishable from a file header
+    by prefix alone. Treating it as metadata wrote the credential straight
+    through and exited 0. Headers appear before the first `@@` of a file; after
+    one, everything is content until the next `diff` line.
+    """
+    if not in_hunk and line.startswith(_HEADER_PREFIXES):
         return False
     return line[:1] in ("+", "-", " ")
 
 
-def _is_metadata(line: str) -> bool:
+def _is_metadata(line: str, *, in_hunk: bool) -> bool:
     """Whether this line is diff structure rather than file content."""
-    return not _is_body_line(line)
+    return not _is_body_line(line, in_hunk=in_hunk)
 
 
-def _body(line: str) -> str:
+def _body(line: str, *, in_hunk: bool) -> str:
     """The line without the diff format's one-character prefix."""
-    return line[1:] if _is_body_line(line) else line
+    return line[1:] if _is_body_line(line, in_hunk=in_hunk) else line
 
 
-def scrub_line(line: str, in_safe_file: bool) -> str:
+def scrub_line(line: str, in_safe_file: bool, *, in_hunk: bool = True) -> str:
     """Replace a line with a redaction marker if it matches any pattern.
 
     Args:
@@ -193,7 +201,7 @@ def scrub_line(line: str, in_safe_file: bool) -> str:
         diff prefix (``+``, ``-``, or `` ``) so the patch remains
         syntactically valid.
     """
-    if _is_metadata(line):
+    if _is_metadata(line, in_hunk=in_hunk):
         # Headers are structure, not content. A file *named* `.env.example`
         # is not a secret, and redacting its header breaks the patch.
         return line
@@ -205,7 +213,7 @@ def scrub_line(line: str, in_safe_file: bool) -> str:
     # line -- `+.env.production` went through untouched while the same text in
     # prose was redacted.
     for pattern in CREDENTIAL_PATTERNS:
-        if pattern.search(_body(line)):
+        if pattern.search(_body(line, in_hunk=in_hunk)):
             return _redact_preserving_prefix(line)
     return line
 
@@ -233,6 +241,7 @@ def main() -> None:
     n_redacted = 0
     in_safe = False
     in_key = False
+    in_hunk = False
 
     for line in sys.stdin:
         # Fail closed on every header form, not just `diff --git`. `in_safe`
@@ -243,7 +252,10 @@ def main() -> None:
         if line.startswith("diff "):
             in_safe = line.startswith("diff --git ") and _is_safe_file(line)
             in_key = False
-        if in_key and not _is_body_line(line):
+            in_hunk = False
+        elif line.startswith("@@"):
+            in_hunk = True
+        if in_key and not _is_body_line(line, in_hunk=in_hunk):
             in_key = False
 
         if in_key:
@@ -251,7 +263,7 @@ def main() -> None:
             if _PEM_END.search(line):
                 in_key = False
         else:
-            clean = scrub_line(line, in_safe)
+            clean = scrub_line(line, in_safe, in_hunk=in_hunk)
             # Only a *redacted* BEGIN line opens a block. In a safe file the
             # banner is an intentional fixture and passes through, and the
             # fixture's body must not then be swallowed.

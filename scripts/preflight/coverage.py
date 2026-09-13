@@ -21,13 +21,31 @@ def _changed_impl_files(changed_files: list[str]) -> list[str]:
     ]
 
 
-def _run_pytest_with_coverage(
-    impl_files: list[str], warnings: list[str]
-) -> dict[str, Any] | None:
-    """Invoke pytest --cov and parse the JSON report. None on failure."""
+def _run_pytest_with_coverage(warnings: list[str]) -> dict[str, Any] | None:
+    """Invoke pytest --cov over SOURCE_DIRS and parse the JSON report.
+
+    Returns None on failure. Sources are the configured directories rather than
+    the changed files: coverage.py cannot use a .py path as a source.
+    """
     cov_json = REPO_ROOT / ".coverage.json"
     cov_json.unlink(missing_ok=True)
-    sources = ",".join(impl_files)
+    # coverage.py resolves a --cov value as an importable package name or a
+    # directory, never as an individual .py file. Passing changed files made
+    # coverage report "module was never imported", collect nothing, and write
+    # no JSON -- so measure_test_coverage() returned no gaps and the coverage
+    # gate failed open, silently, on every multi-file diff.
+    #
+    # Measure the configured source directories instead. The per-file report is
+    # still filtered down to the changed files below, so the audit output is
+    # unchanged -- it just has data in it now.
+    cov_sources = [
+        "--cov=" + d.rstrip("/") for d in SOURCE_DIRS if (REPO_ROOT / d).exists()
+    ]
+    if not cov_sources:
+        warnings.append(
+            f"coverage gate inoperative: no SOURCE_DIRS exist on disk: {SOURCE_DIRS}"
+        )
+        return None
     try:
         result = subprocess.run(
             [
@@ -35,7 +53,7 @@ def _run_pytest_with_coverage(
                 "-m",
                 "pytest",
                 "tests/",
-                "--cov=" + sources,
+                *cov_sources,
                 "--cov-report=json:" + str(cov_json),
                 "--cov-branch",
                 "-q",
@@ -93,7 +111,7 @@ def measure_test_coverage(
                 "in scripts/preflight/config.py for this repo's layout."
             )
         return []
-    cov_data = _run_pytest_with_coverage(impl_files, warnings)
+    cov_data = _run_pytest_with_coverage(warnings)
     if cov_data is None:
         return []
 

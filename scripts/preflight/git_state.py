@@ -64,6 +64,36 @@ def is_safe_relpath(relpath: str) -> bool:
     return True
 
 
+def _changed_vs_base(warnings: list[str]) -> str:
+    """Names of files changed against the review base.
+
+    Prefers the merge base with ``origin/main``. A branch whose base has not
+    been pushed -- a fresh repository, or a local-only topic branch -- has no
+    ``origin/main`` to resolve against, and returning nothing here leaves the
+    audit reporting zero changed files: the coverage gate then measures nothing
+    and the reviewers receive an empty file list, which reads exactly like a
+    clean tree.
+
+    ``review_loop.diff.collect_diff`` already falls back to ``HEAD~1`` for this
+    reason. The audit now agrees with it rather than failing open.
+    """
+    probe: list[str] = []
+    changed = _run_git(["diff", "--merge-base", "origin/main", "--name-only"], probe)
+    if not probe and changed:
+        return changed
+
+    fallback: list[str] = []
+    changed = _run_git(["diff", "HEAD~1", "--name-only"], fallback)
+    if not fallback:
+        return changed
+
+    warnings.append(
+        "could not resolve changed files against origin/main or HEAD~1; "
+        "the coverage gate has no files to measure"
+    )
+    return ""
+
+
 def collect_git_state(
     warnings: list[str],
 ) -> dict[str, Any]:
@@ -77,9 +107,7 @@ def collect_git_state(
     status_short = _run_git(["status", "--short"], warnings)
     cached = _run_git(["diff", "--cached", "--name-only"], warnings)
     untracked = _run_git(["ls-files", "--others", "--exclude-standard"], warnings)
-    changed_vs_main = _run_git(
-        ["diff", "--merge-base", "origin/main", "--name-only"], warnings
-    )
+    changed_vs_main = _changed_vs_base(warnings)
 
     return {
         "branch": branch,

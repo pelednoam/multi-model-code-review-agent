@@ -18,10 +18,24 @@ from __future__ import annotations
 import re
 import sys
 
+# A credential is a *value*, not a word. Matching `token\s*[:=]` alone flags
+# `token: TokenSpec` and `token=token` -- ordinary code in any project where a
+# token is a domain object rather than a secret: a parser, a design system, a
+# game. Those diffs are not scrubbed, they are *aborted*, so an over-broad
+# pattern does not cost a little noise, it costs the whole review.
+#
+# So the word must be followed by something that could actually be a secret:
+# a quoted string of any real length, or an unquoted run long enough to be a
+# key and containing a digit -- which every generated credential has and
+# `TokenSpec`, `str` and `os.environ` do not.
+_SECRET_VALUE = r"""(?:['"][^'"]{4,}['"]|(?=[\w.\-]*\d)[\w.\-]{8,})"""
+
 CREDENTIAL_PATTERNS = [
-    re.compile(r"(?i)(api[_-]?key|secret[_-]?key|access[_-]?key)\s*[:=]"),
-    re.compile(r"(?i)(password|passwd|pwd)\s*[:=]"),
-    re.compile(r"(?i)\b(token|bearer)\s*[:=]"),
+    re.compile(
+        r"(?i)(api[_-]?key|secret[_-]?key|access[_-]?key)\s*[:=]\s*" + _SECRET_VALUE
+    ),
+    re.compile(r"(?i)(password|passwd|pwd)\s*[:=]\s*" + _SECRET_VALUE),
+    re.compile(r"(?i)\b(token|bearer)\s*[:=]\s*" + _SECRET_VALUE),
     re.compile(r"(?i)BEGIN\s+(RSA\s+)?PRIVATE\s+KEY"),
     re.compile(r"(?i)(^|[\s'\"/])\.env(\.[a-z]+)?([\s'\"/]|$)"),
     re.compile(r"AKIA[0-9A-Z]{16}"),
@@ -29,7 +43,7 @@ CREDENTIAL_PATTERNS = [
     re.compile(r"ghp_[a-zA-Z0-9]{36,}"),
     re.compile(r"gho_[a-zA-Z0-9]{36,}"),
     re.compile(r"glpat-[a-zA-Z0-9\-]{20,}"),
-    re.compile(r"(?i)client[_-]?secret\s*[:=]"),
+    re.compile(r"(?i)client[_-]?secret\s*[:=]\s*" + _SECRET_VALUE),
     re.compile(r"(?i)DefaultEndpointsProtocol=https;AccountName="),
     re.compile(r'"type"\s*:\s*"service_account"'),
 ]

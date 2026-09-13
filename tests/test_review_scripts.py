@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -648,6 +649,107 @@ class TestChangedFilesFallback:
         assert git_state._changed_vs_base(warnings) == ""
         assert len(warnings) == 1
         assert "could not resolve changed files" in warnings[0]
+
+
+class TestVendoredExclusion:
+    """A host project's review must not be spent on the reviewer's own source."""
+
+    def _host_repo(self, tmp_path: Path) -> Path:
+        """A host project with one vendored file and one of its own."""
+        repo = tmp_path / "host"
+        (repo / "scripts").mkdir(parents=True)
+        (repo / "app").mkdir()
+        subprocess.run(
+            ["git", "init", "-q", "-b", "main"], cwd=repo, check=True, env=_GIT_ENV
+        )
+        (repo / "README.md").write_text("base\n")
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True, env=_GIT_ENV)
+        subprocess.run(
+            ["git", "commit", "-q", "-m", "base"], cwd=repo, check=True, env=_GIT_ENV
+        )
+        (repo / "scripts" / "review_preflight.py").write_text("# vendored\n")
+        (repo / "app" / "main.py").write_text("value = 1\n")
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True, env=_GIT_ENV)
+        subprocess.run(
+            ["git", "commit", "-q", "-m", "work"], cwd=repo, check=True, env=_GIT_ENV
+        )
+        return repo
+
+    def test_agent_repo_still_reviews_itself(self, tmp_path: Path) -> None:
+        from scripts.review_loop.config import diff_pathspec, is_agent_repo
+
+        repo = tmp_path / "agent"
+        (repo / "scripts" / "review_loop").mkdir(parents=True)
+        (repo / "install.sh").write_text("#!/bin/sh\n")
+
+        assert is_agent_repo(repo)
+        assert diff_pathspec(repo) == ["."]
+
+    def test_host_project_excludes_the_vendored_paths(self, tmp_path: Path) -> None:
+        from scripts.review_loop.config import (
+            VENDORED_PATHS,
+            diff_pathspec,
+            is_agent_repo,
+        )
+
+        host = tmp_path / "host"
+        host.mkdir()
+
+        assert not is_agent_repo(host)
+        spec = diff_pathspec(host)
+        assert spec[0] == "."
+        assert len(spec) == len(VENDORED_PATHS) + 1
+        assert ":(exclude)scripts/review_loop" in spec
+
+    def test_collect_diff_omits_vendored_but_keeps_project_code(
+        self, tmp_path: Path
+    ) -> None:
+        """The end-to-end shape: the reviewer sees app/, never scripts/."""
+        from unittest.mock import patch
+
+        from scripts.review_loop.diff import collect_diff
+
+        repo = self._host_repo(tmp_path)
+        round_dir = tmp_path / "round"
+        round_dir.mkdir()
+
+        with patch("scripts.review_loop.diff.SCRIPTS_DIR", REPO_ROOT / "scripts"):
+            diff_path, _n_lines = collect_diff(round_dir, repo)
+
+        diff = diff_path.read_text()
+        assert "app/main.py" in diff
+        assert "scripts/review_preflight.py" not in diff
+
+
+class TestVendoredPathsMatchInstaller:
+    """VENDORED_PATHS is a hand-maintained mirror of install.sh. Pin it.
+
+    If the installer starts copying a new file and this list is not updated,
+    that file silently becomes part of every host project's review diff again.
+    """
+
+    def _installed_paths(self) -> set[str]:
+        """The TARGET-relative paths install.sh writes."""
+        installed: set[str] = set()
+        for line in (REPO_ROOT / "install.sh").read_text().splitlines():
+            line = line.strip()
+            if not line.startswith(("cp ", "rsync ")):
+                continue
+            quoted = re.findall(r'"([^"]+)"', line)
+            src = next((q for q in quoted if "$REPO_ROOT/" in q), None)
+            dst = next((q for q in quoted if "$TARGET/" in q), None)
+            if src is None or dst is None:
+                continue
+            rel_dst = dst.split("$TARGET/", 1)[1]
+            if rel_dst.endswith("/") and not line.startswith("rsync "):
+                rel_dst += src.rsplit("/", 1)[-1]
+            installed.add(rel_dst.rstrip("/"))
+        return installed
+
+    def test_no_drift_between_installer_and_exclusion_list(self) -> None:
+        from scripts.review_loop.config import VENDORED_PATHS
+
+        assert self._installed_paths() == set(VENDORED_PATHS)
 
 
 class TestCodexEnvOverrides:

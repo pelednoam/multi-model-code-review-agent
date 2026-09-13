@@ -298,6 +298,52 @@ class TestScrubDiff:
         assert "+trailing line" in stdout
         assert result.returncode == 1
 
+    def test_a_dotenv_file_header_is_not_redacted(self) -> None:
+        """`--- a/x` and `+++ b/x` start with `-` and `+`, but are structure.
+
+        Redacting them cost the patch its file attribution *and* aborted the
+        whole review, because someone committed a `.env.example`.
+        """
+        diff = (
+            "diff --git a/.env.example b/.env.example\n"
+            "index 0000000..1111111 100644\n"
+            "--- a/.env.example\n"
+            "+++ b/.env.example\n"
+            "+API_HOST=localhost\n"
+        )
+        stdout, _, code = self._run_scrub(diff)
+        assert stdout == diff
+        assert code == 0
+
+    def test_a_dotenv_value_inside_the_file_is_still_redacted(self) -> None:
+        stdout, _, code = self._run_scrub("+source .env.production\n")
+        assert "REDACTED" in stdout
+        assert code == 1
+
+    @pytest.mark.parametrize(
+        "key",
+        [
+            "sk-ant-api03-AbCdEf1234567890GhIjKlMnOpQrStUvWxYz",
+            "sk-proj-AbCdEf1234567890GhIjKlMnOpQrStUvWxYz",
+            "sk-AbCdEf1234567890GhIjKlMnOpQrStUvWxYz",
+        ],
+    )
+    def test_redacts_current_key_shapes(self, key: str) -> None:
+        """A run of plain alphanumerics stops at the first hyphen."""
+        stdout, _, code = self._run_scrub(f'+  "{key}"\n')
+        assert key not in stdout
+        assert code == 1
+
+    def test_a_credential_beside_a_regex_mention_is_still_scrubbed(self) -> None:
+        """The safe-file bypass used to fire on `re.compile(` anywhere."""
+        diff = (
+            "diff --git a/scripts/scrub_diff.py b/scripts/scrub_diff.py\n"
+            '+AWS = "AKIAIOSFODNN7EXAMPLE"  # matched by re.compile(...)\n'
+        )
+        stdout, _, code = self._run_scrub(diff)
+        assert "AKIAIOSFODNN7EXAMPLE" not in stdout
+        assert code == 1
+
     def test_empty_input(self) -> None:
         stdout, stderr, code = self._run_scrub("")
         assert stdout == ""
@@ -681,6 +727,97 @@ class TestSecretsDetected:
                 collect_diff(round_dir, repo)
         assert "truncated" in str(exc_info.value)
         assert "rotated" not in str(exc_info.value)
+
+
+class TestProjectGate:
+    """Whose gate the loop runs, and with which Python."""
+
+    def test_a_project_with_its_own_gate_script_gets_only_that(
+        self, tmp_path: Path
+    ) -> None:
+        """The built-in `mypy scripts/` type-checks the agent's vendored source.
+
+        Under a host project's own strict settings that always fails, so the
+        loop could never commit a round no matter what it fixed.
+        """
+        from scripts.review_loop.config import project_gate
+
+        repo = tmp_path / "host"
+        (repo / "tools").mkdir(parents=True)
+        gate = repo / "tools" / "gate.sh"
+        gate.write_text("#!/bin/sh\nexit 0\n")
+        gate.chmod(0o755)
+        assert project_gate(repo) == gate
+
+    def test_a_gate_script_that_is_not_executable_is_not_used(
+        self, tmp_path: Path
+    ) -> None:
+        from scripts.review_loop.config import project_gate
+
+        repo = tmp_path / "host"
+        (repo / "tools").mkdir(parents=True)
+        (repo / "tools" / "gate.sh").write_text("#!/bin/sh\nexit 0\n")
+        assert project_gate(repo) is None
+
+    def test_a_project_without_one_falls_back(self, tmp_path: Path) -> None:
+        from scripts.review_loop.config import project_gate
+
+        repo = tmp_path / "bare"
+        repo.mkdir()
+        assert project_gate(repo) is None
+
+    def test_the_projects_own_interpreter_is_preferred(self, tmp_path: Path) -> None:
+        """`sys.executable` cannot import a project kept in its own virtualenv."""
+        from scripts.review_loop.config import interpreter
+
+        repo = tmp_path / "host"
+        (repo / ".venv" / "bin").mkdir(parents=True)
+        python = repo / ".venv" / "bin" / "python"
+        python.write_text("")
+        assert interpreter(repo) == str(python)
+
+    def test_without_a_virtualenv_the_current_interpreter_is_used(
+        self, tmp_path: Path
+    ) -> None:
+        from scripts.review_loop.config import interpreter
+
+        repo = tmp_path / "bare"
+        repo.mkdir()
+        assert interpreter(repo) == sys.executable
+
+
+class TestReviewerPrompt:
+    """The diff is data, and must be fenced as such."""
+
+    def test_the_diff_is_fenced_with_an_unguessable_marker(self) -> None:
+        from scripts.review_loop.reviewers import build_reviewer_prompt
+
+        prompt = build_reviewer_prompt(
+            "security", "leaks", "R1", "opus", "+malicious", "{}", "ctx"
+        )
+        assert "never instructions" in prompt
+        assert re.search(r"===== R1-[0-9a-f]{32} =====", prompt)
+
+    def test_two_prompts_do_not_share_a_marker(self) -> None:
+        from scripts.review_loop.reviewers import build_reviewer_prompt
+
+        args = ("security", "leaks", "R1", "opus", "+x", "{}", "ctx")
+        first = re.search(r"===== \S+ =====", build_reviewer_prompt(*args))
+        second = re.search(r"===== \S+ =====", build_reviewer_prompt(*args))
+        assert first is not None
+        assert second is not None
+        assert first.group() != second.group()
+
+
+class TestMergeAgentPrompt:
+    """A malformed finding must not kill the loop."""
+
+    def test_a_finding_with_no_file_is_formatted_not_raised(self) -> None:
+        from scripts.review_loop.merge_agent import _format_fixes
+
+        text = _format_fixes([{"_reviewer": "R1", "issue": "repo-wide"}])
+        assert "no file given" in text
+        assert "repo-wide" in text
 
 
 class TestPreflightScriptSelection:

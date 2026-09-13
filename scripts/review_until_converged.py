@@ -118,8 +118,8 @@ def _run_one_round(
         return 0, previous_fp
 
     audit_path = run_preflight(round_dir, repo)
-    diff_text = diff_path.read_text()
-    audit_text = audit_path.read_text()
+    diff_text = diff_path.read_text(encoding="utf-8", errors="replace")
+    audit_text = audit_path.read_text(encoding="utf-8", errors="replace")
 
     t0 = time.time()
     launch_reviewers(round_dir, diff_text, audit_text, context, backends, prefer_hermes)

@@ -21,6 +21,10 @@ def _run(
         cwd=cwd if cwd is not None else REPO_ROOT,
         capture_output=kwargs.pop("capture_output", True),
         text=True,
+        # A repository's own bytes decide this, not the ambient locale: under
+        # LC_ALL=C a single en dash in a source file made `git diff` raise.
+        encoding="utf-8",
+        errors="replace",
         check=False,
         **kwargs,
     )

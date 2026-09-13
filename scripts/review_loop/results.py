@@ -23,7 +23,7 @@ def _try_load_existing_result(result_path: Path, slot: int) -> dict[str, Any] | 
     if not result_path.exists():
         return None
     try:
-        d = json.loads(result_path.read_text())
+        d = json.loads(result_path.read_text(encoding="utf-8", errors="replace"))
     except (json.JSONDecodeError, OSError):
         return None
     return validate_result(d, slot, EXPECTED_REVIEWERS)

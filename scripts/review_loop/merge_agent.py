@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 def _format_fixes(findings: list[dict[str, Any]]) -> str:
     return "\n\n".join(
-        f"### Fix {i} ({f['_reviewer']}): {f['file']}\n"
+        f"### Fix {i} ({f['_reviewer']}): {f.get('file', '(no file given)')}\n"
         f"Issue: {f.get('issue', '')}\n"
         f"Suggested fix: {f.get('suggested_fix', '(no fix provided)')}"
         for i, f in enumerate(findings, 1)
@@ -48,8 +48,12 @@ def apply_fixes(
     (round_dir / "merge-prompt.txt").write_text(prompt)
     print(f"  Launching merge agent for {len(findings)} fixes...")
     # The Popen handles intentionally outlive these open() calls; closed in finally.
-    out_f = open(round_dir / "merge-output.json", "w")  # noqa: SIM115
-    err_f = open(round_dir / "merge-stderr.txt", "w")  # noqa: SIM115
+    out_f = open(
+        round_dir / "merge-output.json", "w", encoding="utf-8", errors="replace"
+    )  # noqa: SIM115
+    err_f = open(
+        round_dir / "merge-stderr.txt", "w", encoding="utf-8", errors="replace"
+    )  # noqa: SIM115
     try:
         proc = subprocess.Popen(
             [
@@ -67,6 +71,8 @@ def apply_fixes(
             stdout=out_f,
             stderr=err_f,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         assert proc.stdin is not None  # PIPE guaranteed above
         proc.stdin.write(prompt)

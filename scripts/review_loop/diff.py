@@ -62,13 +62,20 @@ def collect_diff(round_dir: Path, repo: Path) -> tuple[Path, int]:
     elif not git.stdout.strip():
         git = _run(["git", "diff", "HEAD~1", "--", *pathspec], cwd=repo)
     diff_input = git.stdout or ""
-    with open(diff_path, "w") as out_f:
+    # Every hop is pinned to UTF-8 with replacement. scrub_diff.py pins its own
+    # streams because CI runs under LC_ALL=C, but that was the only hop that
+    # did: git's output, the pipe into the scrubber and the read-back all used
+    # the ambient codec, so one non-ASCII byte anywhere in the tree still
+    # raised -- and this repository's own sources are full of en dashes.
+    with open(diff_path, "w", encoding="utf-8", errors="replace") as out_f:
         scrubber = subprocess.Popen(
             [sys.executable, str(SCRIPTS_DIR / "scrub_diff.py")],
             stdin=subprocess.PIPE,
             stdout=out_f,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         _, scrub_err = scrubber.communicate(input=diff_input)
     if scrubber.returncode == SCRUBBER_ABORTED:
@@ -87,7 +94,7 @@ def collect_diff(round_dir: Path, repo: Path) -> tuple[Path, int]:
             f"Scrubber stderr: {scrub_err.strip()}\n"
             f"Redacted diff saved to: {diff_path}"
         )
-    with open(diff_path) as f:
+    with open(diff_path, encoding="utf-8", errors="replace") as f:
         n_lines = sum(1 for _ in f)
     return diff_path, n_lines
 

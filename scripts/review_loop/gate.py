@@ -3,28 +3,37 @@
 from __future__ import annotations
 
 import subprocess
-import sys
 from typing import TYPE_CHECKING
 
 from .backends import _run
-from .config import TEST_TIMEOUT
+from .config import TEST_TIMEOUT, interpreter, project_gate
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 
 def run_gate(repo: Path) -> tuple[bool, str]:
-    """Run the full CI gate: lint + format + type check + tests.
+    """Run the project's gate, or the built-in four steps if it has none.
 
-    All four must pass for the gate to pass. Returns (ok, combined_output).
+    A project with its own gate script gets that and nothing else. The built-in
+    steps are a default for projects that have none, and their `mypy scripts/`
+    in particular is about *this* repo: run against a host project under its
+    own strict settings it type-checks the agent's vendored source, fails, and
+    so blocks every auto-commit the loop could ever make.
+
+    Returns (ok, combined_output).
     """
     output_parts = []
-    gate_steps = [
-        ("ruff check", ["ruff", "check", "."]),
-        ("ruff format --check", ["ruff", "format", "--check", "."]),
-        ("mypy", ["mypy", "scripts/"]),
-        ("pytest", [sys.executable, "-m", "pytest", "tests/", "-x", "-q"]),
-    ]
+    own = project_gate(repo)
+    if own is not None:
+        gate_steps = [(f"{own.name} (project gate)", [str(own)])]
+    else:
+        gate_steps = [
+            ("ruff check", ["ruff", "check", "."]),
+            ("ruff format --check", ["ruff", "format", "--check", "."]),
+            ("mypy", ["mypy", "scripts/"]),
+            ("pytest", [interpreter(repo), "-m", "pytest", "tests/", "-x", "-q"]),
+        ]
     for label, cmd in gate_steps:
         output_parts.append(f"\n=== {label} ===\n")
         try:

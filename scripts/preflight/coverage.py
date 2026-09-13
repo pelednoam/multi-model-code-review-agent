@@ -21,6 +21,18 @@ def _changed_impl_files(changed_files: list[str]) -> list[str]:
     ]
 
 
+def _interpreter() -> str:
+    """The Python that can import this project.
+
+    ``sys.executable`` is whatever started the preflight, which for a project
+    with its own virtualenv cannot import the package under test: every
+    collection raised ``ModuleNotFoundError``, pytest exited 2, and the
+    coverage gate reported itself skipped on every run.
+    """
+    venv = REPO_ROOT / ".venv" / "bin" / "python"
+    return str(venv) if venv.is_file() else sys.executable
+
+
 def _run_pytest_with_coverage(warnings: list[str]) -> dict[str, Any] | None:
     """Invoke pytest --cov over SOURCE_DIRS and parse the JSON report.
 
@@ -49,7 +61,7 @@ def _run_pytest_with_coverage(warnings: list[str]) -> dict[str, Any] | None:
     try:
         result = subprocess.run(
             [
-                sys.executable,
+                _interpreter(),
                 "-m",
                 "pytest",
                 "tests/",

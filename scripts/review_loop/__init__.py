@@ -19,6 +19,7 @@ from .config import (
 from .diff import (
     ScrubberFailedError,
     SecretsDetectedError,
+    DEFAULT_BASE,
     collect_diff,
     run_preflight,
 )
@@ -49,6 +50,7 @@ __all__ = [
     "apply_fixes",
     "build_reviewer_prompt",
     "collect_blocking_findings",
+    "DEFAULT_BASE",
     "collect_diff",
     "commit_and_push",
     "describe_outputs",

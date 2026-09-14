@@ -48,6 +48,7 @@ from scripts.review_loop import (  # noqa: E402
     apply_fixes,
     build_reviewer_prompt,
     collect_blocking_findings,
+    DEFAULT_BASE,
     collect_diff,
     commit_and_push,
     describe_outputs,
@@ -125,6 +126,7 @@ def _run_one_round(
     auto_commit: bool,
     prefer_hermes: bool = False,
     report_only: bool = False,
+    base: str = DEFAULT_BASE,
 ) -> tuple[int | None, set[FindingKey]]:
     """Execute a single round. Return (exit_code or None, new_fingerprint).
 
@@ -135,7 +137,7 @@ def _run_one_round(
     round_dir.mkdir(exist_ok=True)
 
     try:
-        diff_path, n_lines = collect_diff(round_dir, repo)
+        diff_path, n_lines = collect_diff(round_dir, repo, base)
     except SecretsDetectedError as e:
         print(f"\nABORT: secrets detected in diff.\n\n{e}")
         return 8, previous_fp
@@ -228,6 +230,17 @@ def main() -> int:
     )
     parser.add_argument("--review-dir", type=Path, default=None)
     parser.add_argument(
+        "--base",
+        default=DEFAULT_BASE,
+        metavar="REF",
+        help=(
+            "what to diff against (default: origin/main). Give a commit, tag or "
+            "branch to review a range that is already on the trunk -- after a "
+            "merge, or before a release. A base that names nothing is an error "
+            "rather than a fallback."
+        ),
+    )
+    parser.add_argument(
         "--report-only",
         action="store_true",
         help=(
@@ -289,6 +302,7 @@ def main() -> int:
             args.auto_commit,
             prefer_hermes,
             args.report_only,
+            args.base,
         )
         if exit_code is not None:
             return exit_code

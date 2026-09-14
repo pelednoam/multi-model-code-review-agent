@@ -247,6 +247,26 @@ check from another terminal, the round directory is the truth: mtimes on
 `raw-N.txt` and `stderr-N.txt` say who is moving. The process table does not,
 because `pgrep claude` finds every other session on the machine.
 
+**A reviewer that answers in prose has still reviewed something.** The commonest
+way a reviewer fails is not finding nothing -- it is finding something and
+describing it in a paragraph, which the parser cannot use. That used to be
+reported as `NO RESULT`, indistinguishable from a crash, and the text was left
+in `raw-N.txt` for nobody to read. One slot was binned that way while carrying a
+correct finding about twelve duplicated test functions. The summary now
+distinguishes the two and shows what was actually said:
+
+```
+  NOT JSON   -> R3 answered in prose, so it has no findings the loop
+                can act on. It still said something -- read it:
+                test_app_sockets.py duplicates 12 of the 15 tests already in
+                test_app.py verbatim, which doubles runtime for no added coverage
+                (in full: .../round-1/raw-3.txt)
+```
+
+The prompt also now says what to do when there is nothing to report -- an empty
+findings list -- and that prose is discarded unread, because a reviewer that
+knows its summary will be thrown away has a reason to use the schema.
+
 **A reviewer that found nothing has not reviewed anything.** `Results: 3/4
 reviewers succeeded` used to count a valid-JSON-with-no-findings return as a
 success, which hid a broken slot behind a reassuring number -- one slot returned

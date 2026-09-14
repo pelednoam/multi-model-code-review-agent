@@ -13,6 +13,8 @@ from pathlib import Path
 import pytest
 from types import SimpleNamespace
 
+from scripts.review_loop.artifacts import describe_outputs
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRUB_SCRIPT = REPO_ROOT / "scripts" / "scrub_diff.py"
 PREFLIGHT_SCRIPT = REPO_ROOT / "scripts" / "review_preflight.py"
@@ -957,6 +959,68 @@ class TestReviewerDeadline:
 
         (tmp_path / "result-2.json").write_text("")
         assert not _has_result(tmp_path, 2)
+
+
+class TestSalvagingProse:
+    """A reviewer that answers in prose has still reviewed something."""
+
+    def test_a_prose_reply_is_put_in_front_of_the_operator(
+        self, tmp_path: Path
+    ) -> None:
+        """This is not hypothetical: one was binned carrying a real finding.
+
+        It noticed twelve duplicated tests, wrote it as a paragraph instead of
+        the schema, and the round recorded it as having returned nothing.
+        """
+        (tmp_path / "raw-3.txt").write_text(
+            json.dumps({"result": "test_app_sockets.py duplicates 12 tests verbatim."})
+        )
+        summary = describe_outputs(tmp_path)
+        assert "NOT JSON" in summary
+        assert "duplicates 12 tests verbatim" in summary
+        assert "raw-3.txt" in summary
+
+    def test_a_reviewer_that_wrote_nothing_is_reported_differently(
+        self, tmp_path: Path
+    ) -> None:
+        """ "No output" and "unusable output" read as one thing and are not."""
+        summary = describe_outputs(tmp_path)
+        assert "NO OUTPUT" in summary
+        assert "NOT JSON" not in summary
+
+    def test_an_empty_raw_file_counts_as_nothing(self, tmp_path: Path) -> None:
+        """codex writes straight to result-N.json, so its raw file is empty."""
+        (tmp_path / "raw-2.txt").write_text("")
+        assert "NO OUTPUT" in describe_outputs(tmp_path)
+
+    def test_bare_prose_is_salvaged_too(self, tmp_path: Path) -> None:
+        """Not every backend wraps its reply in an envelope."""
+        (tmp_path / "raw-1.txt").write_text("The diff looks fine to me.")
+        assert "looks fine to me" in describe_outputs(tmp_path)
+
+    def test_a_long_reply_is_trimmed_not_dumped(self, tmp_path: Path) -> None:
+        (tmp_path / "raw-1.txt").write_text("x" * 5000)
+        assert len(describe_outputs(tmp_path)) < 2000
+
+    def test_a_reviewer_with_findings_is_left_alone(self, tmp_path: Path) -> None:
+        (tmp_path / "result-1.json").write_text("{}")
+        summary = describe_outputs(tmp_path, n_slots=1)
+        assert "result-{1}.json" in summary
+        assert "NOT JSON" not in summary
+
+
+class TestSchemaInstruction:
+    """Telling a reviewer what to do when it has nothing to say."""
+
+    def test_the_prompt_says_prose_is_discarded(self) -> None:
+        """The commonest failure is not silence; it is an unparseable answer."""
+        from scripts.review_loop.reviewers import build_reviewer_prompt
+
+        prompt = build_reviewer_prompt(
+            "security", "leaks", "R1", "opus", "+x", "{}", "c"
+        )
+        assert "empty list" in prompt
+        assert "discarded unread" in prompt
 
 
 class TestProjectGate:

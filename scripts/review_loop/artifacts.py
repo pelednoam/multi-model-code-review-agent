@@ -13,6 +13,10 @@ Claude Code session) finds the findings without having to read the source.
 
 from __future__ import annotations
 
+import textwrap
+
+import json
+
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -80,8 +84,49 @@ def describe_outputs(round_dir: Path, n_slots: int = 4) -> str:
         if present
         else "  findings   -> (none produced)",
     ]
-    if missing:
-        slots = ",".join(str(i) for i in missing)
-        lines.append(f"  NO RESULT  -> slots {slots}; see stderr-{{{slots}}}.txt")
+    for slot in missing:
+        lines.extend(_explain_missing(round_dir, slot))
     lines.append(f"  file guide -> {round_dir / ARTIFACTS_FILENAME}")
     return "\n".join(lines)
+
+
+#: How much of an unparseable reply to put in front of the operator. Enough to
+#: see whether it was a real review; the whole thing is in raw-N.txt.
+_SALVAGE_CHARS = 600
+
+
+def _explain_missing(round_dir: Path, slot: int) -> list[str]:
+    """Say why a slot produced no findings, and show what it did produce.
+
+    "NO RESULT" covered two different things and read as one. A reviewer that
+    crashed produced nothing; a reviewer that answered in prose instead of the
+    schema produced a *review* that the parser could not use -- and one of those
+    was silently binned while carrying a correct finding about duplicated tests.
+    Whatever it wrote goes in front of the operator either way.
+    """
+    said = _salvage(round_dir, slot)
+    if not said:
+        return [f"  NO OUTPUT  -> R{slot} produced nothing; see stderr-{slot}.txt"]
+    return [
+        f"  NOT JSON   -> R{slot} answered in prose, so it has no findings the loop",
+        "                can act on. It still said something -- read it:",
+        *[f"                {line}" for line in textwrap.wrap(said, 74)],
+        f"                (in full: {round_dir / f'raw-{slot}.txt'})",
+    ]
+
+
+def _salvage(round_dir: Path, slot: int) -> str:
+    """Whatever this reviewer wrote, unwrapped as far as it can be."""
+    raw = round_dir / f"raw-{slot}.txt"
+    if not raw.exists():
+        return ""
+    text = raw.read_text(encoding="utf-8", errors="replace").strip()
+    if not text:
+        return ""
+    try:
+        wrapper = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return text[:_SALVAGE_CHARS]
+    if isinstance(wrapper, dict) and isinstance(wrapper.get("result"), str):
+        return str(wrapper["result"]).strip()[:_SALVAGE_CHARS]
+    return text[:_SALVAGE_CHARS]

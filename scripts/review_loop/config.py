@@ -9,7 +9,31 @@ from pathlib import Path
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 REPO_ROOT = SCRIPTS_DIR.parent
 
+#: Seconds a reviewer gets on a *small* diff. Scaled by size below, because a
+#: flat budget kills exactly the reviewer worth waiting for: the slowest one is
+#: consistently the one with the most to say, and on a 5,000-line diff it
+#: needed twenty-five minutes to produce fifteen findings.
 REVIEWER_TIMEOUT = 600
+
+#: Extra seconds per line of diff. Measured: the reviewers that finish take
+#: roughly this long per line, and the budget has to cover the slowest.
+REVIEWER_SECONDS_PER_LINE = 0.25
+
+#: The ceiling, so a runaway diff cannot hang a round indefinitely.
+REVIEWER_TIMEOUT_MAX = 2700
+
+#: How long to keep checking for a result after a reviewer was killed. Some
+#: CLIs write their output through a child process that outlives the one we
+#: started, so a review can land *after* the timeout -- and was thrown away.
+LATE_RESULT_GRACE = 120
+
+#: How often to say who is still working. Four models on a large diff is
+#: fifteen minutes of silence otherwise.
+PROGRESS_INTERVAL = 30
+
+#: How often to check whether a reviewer has finished. Short enough that the
+#: round does not sit idle after the last one exits.
+POLL_INTERVAL = 2
 MERGE_TIMEOUT = 900
 TEST_TIMEOUT = 300
 
@@ -78,3 +102,18 @@ def interpreter(repo: Path) -> str:
     """
     venv = repo / ".venv" / "bin" / "python"
     return str(venv) if venv.is_file() else sys.executable
+
+
+def reviewer_timeout(n_lines: int) -> int:
+    """How long a reviewer gets, for a diff of this size.
+
+    Flat timeouts fail in the direction that costs most. A reviewer that is
+    still working at the deadline is not stuck, it is *reading*, and killing it
+    discards the whole round's most detailed output -- measured, the slot that
+    times out most is also the one with the highest findings-per-round.
+    """
+    scaled = REVIEWER_TIMEOUT + int(n_lines * REVIEWER_SECONDS_PER_LINE)
+    override = os.environ.get("REVIEWER_TIMEOUT")
+    if override and override.isdigit():
+        return int(override)
+    return min(scaled, REVIEWER_TIMEOUT_MAX)

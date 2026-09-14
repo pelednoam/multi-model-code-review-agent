@@ -12,6 +12,7 @@ from .config import (
     MERGE_TIMEOUT,
     REPO_ROOT,
     REVIEWER_TIMEOUT,
+    reviewer_timeout,
     SCRIPTS_DIR,
     TEST_TIMEOUT,
 )
@@ -37,6 +38,7 @@ __all__ = [
     "MERGE_TIMEOUT",
     "REPO_ROOT",
     "REVIEWER_TIMEOUT",
+    "reviewer_timeout",
     "SCRIPTS_DIR",
     "TEST_TIMEOUT",
     "FindingKey",

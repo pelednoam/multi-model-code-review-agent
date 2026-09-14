@@ -24,6 +24,7 @@ import argparse
 import sys
 import time
 from datetime import UTC, datetime
+from typing import Any
 from pathlib import Path
 
 # When invoked as `python scripts/review_until_converged.py`, the repo
@@ -37,6 +38,7 @@ from scripts.review_loop import (  # noqa: E402
     MERGE_TIMEOUT,
     REPO_ROOT,
     REVIEWER_TIMEOUT,
+    reviewer_timeout,
     SCRIPTS_DIR,
     TEST_TIMEOUT,
     FindingKey,
@@ -64,6 +66,7 @@ __all__ = [
     "MERGE_TIMEOUT",
     "REPO_ROOT",
     "REVIEWER_TIMEOUT",
+    "reviewer_timeout",
     "SCRIPTS_DIR",
     "TEST_TIMEOUT",
     "FindingKey",
@@ -84,6 +87,32 @@ __all__ = [
     "run_tests",
     "validate_result",
 ]
+
+
+#: Below this many lines, a review with no findings is unremarkable.
+_SUBSTANTIAL_DIFF = 200
+
+
+def _describe_results(results: list[dict[str, Any] | None], n_lines: int) -> str:
+    """Say how many reviewers worked, and how many of those said anything.
+
+    A reviewer that returns valid JSON with an empty findings list has not
+    reviewed anything; counting it as a success hides a broken slot behind a
+    reassuring number. One slot in this agent returned zero findings on every
+    round for eight rounds while reporting success each time.
+    """
+    parsed = [r for r in results if r is not None]
+    spoke = [r for r in parsed if r.get("findings")]
+    line = f"Results: {len(parsed)}/4 reviewers returned output"
+    if len(spoke) == len(parsed):
+        return line
+    silent = [
+        f"R{i}" for i, r in enumerate(results, 1) if r is not None and not r.get("findings")
+    ]
+    note = f"; {', '.join(silent)} found nothing"
+    if n_lines >= _SUBSTANTIAL_DIFF:
+        note += f" on {n_lines} lines -- treat as no coverage, not a clean bill"
+    return line + note
 
 
 def _run_one_round(
@@ -126,13 +155,12 @@ def _run_one_round(
     print(f"Reviewers finished in {time.time() - t0:.0f}s")
 
     results = extract_results(round_dir)
-    n_ok = sum(1 for r in results if r is not None)
-    print(f"Results: {n_ok}/4 reviewers succeeded")
+    print(_describe_results(results, n_lines))
     # Say where the findings are, every round, whatever the outcome -- the
     # round directory is not self-explanatory and `raw-N.txt` is a trap.
     write_artifacts_key(round_dir)
     print(describe_outputs(round_dir))
-    if n_ok == 0:
+    if not any(results):
         print(
             "\nERROR: no reviewer results could be parsed; cannot determine convergence."
         )

@@ -772,6 +772,150 @@ class TestSecretsDetected:
         assert "rotated" not in str(exc_info.value)
 
 
+class TestReviewerProgress:
+    """Knowing which reviewers are still working, without guessing."""
+
+    def test_a_working_reviewer_is_shown_with_what_it_has_written(
+        self, tmp_path: Path
+    ) -> None:
+        """Output size is the only progress signal these CLIs give."""
+        from scripts.review_loop.reviewers import _progress
+
+        (tmp_path / "stderr-2.txt").write_text("x" * 2048)
+        procs = [(1, None, "claude", None, None), (2, None, "codex", None, None)]
+        line = _progress(procs, {2: procs[1]}, tmp_path, 95.0)
+        assert "R1(claude) done" in line
+        assert "R2(codex) 2K" in line
+        assert "1m35s" in line
+
+    def test_a_reviewer_that_has_written_nothing_says_so(self, tmp_path: Path) -> None:
+        from scripts.review_loop.reviewers import _progress
+
+        procs = [(1, None, "gemini", None, None)]
+        assert "R1(gemini) 0B" in _progress(procs, {1: procs[0]}, tmp_path, 5.0)
+
+    def test_codex_progress_is_counted_from_stderr(self, tmp_path: Path) -> None:
+        """It reports progress on stderr and its result on stdout, so stdout
+        stays empty until the very end -- and looked hung for fifteen minutes.
+        """
+        from scripts.review_loop.reviewers import _bytes_written
+
+        (tmp_path / "raw-2.txt").write_text("")
+        (tmp_path / "stderr-2.txt").write_text("y" * 500)
+        assert _bytes_written(tmp_path, 2) == 500
+
+
+class TestEmptyReviews:
+    """A reviewer that found nothing has not reviewed anything."""
+
+    def test_a_silent_reviewer_is_not_counted_as_a_clean_bill(self) -> None:
+        from scripts.review_until_converged import _describe_results
+
+        results = [
+            {"findings": [{"severity": "warning"}]},
+            None,
+            {"findings": []},
+            {"findings": [{"severity": "warning"}]},
+        ]
+        line = _describe_results(results, 5000)
+        assert "3/4 reviewers returned output" in line
+        assert "R3 found nothing" in line
+        assert "not a clean bill" in line
+
+    def test_a_small_diff_with_no_findings_is_unremarkable(self) -> None:
+        from scripts.review_until_converged import _describe_results
+
+        line = _describe_results([{"findings": []}], 12)
+        assert "found nothing" in line
+        assert "not a clean bill" not in line
+
+    def test_everyone_speaking_needs_no_caveat(self) -> None:
+        from scripts.review_until_converged import _describe_results
+
+        results = [{"findings": [{"severity": "warning"}]}] * 4
+        assert (
+            _describe_results(results, 5000) == "Results: 4/4 reviewers returned output"
+        )
+
+
+class TestDiffBudget:
+    """Naming a generated file that is crowding the review out."""
+
+    def _diff(self, *files: tuple[str, int]) -> str:
+        parts = [
+            f"diff --git a/{name} b/{name}\n" + "x\n" * lines for name, lines in files
+        ]
+        return "".join(parts)
+
+    def test_a_lockfile_dominating_the_diff_is_named(self) -> None:
+        """It was 69% of a real review: four models paid to read a lockfile."""
+        from scripts.review_loop.diff import dominant_files
+
+        (note,) = dominant_files(
+            self._diff(("package-lock.json", 9000), ("app.py", 4000))
+        )
+        assert "package-lock.json is 69% of this diff" in note
+        assert "linguist-generated=true" in note
+
+    def test_a_small_diff_is_left_alone(self) -> None:
+        """Half of sixty lines is a small change, not a problem."""
+        from scripts.review_loop.diff import dominant_files
+
+        assert dominant_files(self._diff(("a.py", 30), ("b.py", 30))) == []
+
+    def test_a_balanced_large_diff_is_left_alone(self) -> None:
+        from scripts.review_loop.diff import dominant_files
+
+        assert (
+            dominant_files(self._diff(("a.py", 900), ("b.py", 900), ("c.py", 900)))
+            == []
+        )
+
+    def test_an_empty_diff_says_nothing(self) -> None:
+        from scripts.review_loop.diff import dominant_files
+
+        assert dominant_files("") == []
+
+
+class TestReviewerDeadline:
+    """How long a reviewer gets, and what happens when it runs out."""
+
+    def test_a_bigger_diff_earns_more_time(self) -> None:
+        """The reviewer that runs out is the one with the most to say."""
+        from scripts.review_loop.config import reviewer_timeout
+
+        assert reviewer_timeout(5000) > reviewer_timeout(200)
+
+    def test_there_is_a_ceiling(self) -> None:
+        from scripts.review_loop.config import REVIEWER_TIMEOUT_MAX, reviewer_timeout
+
+        assert reviewer_timeout(10_000_000) == REVIEWER_TIMEOUT_MAX
+
+    def test_the_environment_can_override_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from scripts.review_loop.config import reviewer_timeout
+
+        monkeypatch.setenv("REVIEWER_TIMEOUT", "42")
+        assert reviewer_timeout(5000) == 42
+
+    def test_a_result_that_lands_after_the_deadline_is_recognised(
+        self, tmp_path: Path
+    ) -> None:
+        """A killed reviewer's helper can outlive it and write minutes later."""
+        from scripts.review_loop.reviewers import _has_result
+
+        assert not _has_result(tmp_path, 2)
+        (tmp_path / "result-2.json").write_text("{}")
+        assert _has_result(tmp_path, 2)
+
+    def test_an_empty_result_file_is_not_a_result(self, tmp_path: Path) -> None:
+        from scripts.review_loop.reviewers import _has_result
+
+        (tmp_path / "result-2.json").write_text("")
+        assert not _has_result(tmp_path, 2)
+
+
 class TestProjectGate:
     """Whose gate the loop runs, and with which Python."""
 

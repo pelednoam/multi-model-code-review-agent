@@ -45,6 +45,41 @@ else
     -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 fi
 
+cp "$REPO_ROOT/docs/codex-sandbox.md"                    "$TARGET/docs/" 2>/dev/null || true
+
+# Codex is the one reviewer whose read-only-ness depends on the HOST rather than on a flag
+# we pass, so check it at install time instead of letting a review silently run with a
+# reviewer that can edit the code. Non-fatal: codex is optional, and the review simply drops
+# that slot. See docs/codex-sandbox.md for both causes and their fixes.
+if command -v codex >/dev/null 2>&1; then
+  echo
+  echo "Checking that the codex sandbox is genuinely read-only on this host..."
+  _d=$(mktemp -d); echo original > "$_d/canary.txt"
+  _ran=$(codex sandbox -- sh -c "echo SANDBOX_OK" 2>&1 || true)
+  codex sandbox -- sh -c "echo changed > $_d/canary.txt" >/dev/null 2>&1 || true
+  _after=$(cat "$_d/canary.txt" 2>/dev/null || echo "")
+  if ! printf '%s' "$_ran" | grep -q SANDBOX_OK; then
+    echo "  WARNING: codex's sandbox does not start on this host."
+    echo "  A sandbox that fails to launch leaves a canary file untouched, which looks"
+    echo "  exactly like a correctly refused write - so this cannot be ignored."
+    case "$_ran" in
+      *"uid map"*|*RTM_NEWADDR*|*userns*)
+        echo "  Cause looks like blocked unprivileged user namespaces (Ubuntu 23.10+)."
+        echo "  Fix: docs/codex-sandbox.md (a bwrap-scoped AppArmor profile)." ;;
+      *) echo "  Detail: $(printf '%s' "$_ran" | tail -1)" ;;
+    esac
+    echo "  The codex reviewer slot will be skipped until this is fixed."
+  elif [ "$_after" != "original" ]; then
+    echo "  WARNING: codex's sandbox ALLOWED a write - it is not read-only here."
+    echo "  Check approvals_reviewer in ~/.codex/config.toml: \"auto_review\" escalates"
+    echo "  past -s read-only. See docs/codex-sandbox.md."
+    echo "  The codex reviewer slot will be skipped until this is fixed."
+  else
+    echo "  OK: codex sandbox runs and refuses writes."
+  fi
+  rm -rf "$_d"
+fi
+
 cat <<EOF
 
 Installed multi-model code review agent into:
@@ -59,6 +94,7 @@ Files written:
   scripts/preflight/        (helpers for the preflight audit)
   scripts/review_loop/      (helpers for the convergence loop)
   docs/ensemble_review_result_schema.json
+  docs/codex-sandbox.md      (why codex needs a host check, and how to fix it)
 
 Next step: open Claude Code in that project and say one of:
   "review this"           -- quick mode (2 subagents, ~30s, free)

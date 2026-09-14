@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass, field
 import re
 import subprocess
 import sys
@@ -11,6 +12,8 @@ from pathlib import Path
 
 import pytest
 from types import SimpleNamespace
+
+from scripts.review_loop.artifacts import describe_outputs
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRUB_SCRIPT = REPO_ROOT / "scripts" / "scrub_diff.py"
@@ -876,18 +879,32 @@ class TestSecretsDetected:
         assert "rotated" not in str(exc_info.value)
 
 
+@dataclass(slots=True)
+class _Dead:
+    """A process id nothing can be read for."""
+
+    pid: int = -1
+
+
+@dataclass(slots=True)
+class _Busy:
+    """A process whose CPU time can be read: this one's."""
+
+    pid: int = field(default_factory=os.getpid)
+
+
 class TestReviewerProgress:
     """Knowing which reviewers are still working, without guessing."""
 
     def test_a_working_reviewer_is_shown_with_what_it_has_written(
         self, tmp_path: Path
     ) -> None:
-        """Output size is the only progress signal these CLIs give."""
+        """Output size is the signal the streaming backends give."""
         from scripts.review_loop.reviewers import _progress
 
         (tmp_path / "stderr-2.txt").write_text("x" * 2048)
-        procs = [(1, None, "claude", None, None), (2, None, "codex", None, None)]
-        line = _progress(procs, {2: procs[1]}, tmp_path, 95.0)
+        procs = [(1, _Dead(), "claude", None, None), (2, _Dead(), "codex", None, None)]
+        line = _progress(procs, {2: procs[1]}, tmp_path, 95.0, {})
         assert "R1(claude) done" in line
         assert "R2(codex) 2K" in line
         assert "1m35s" in line
@@ -895,8 +912,36 @@ class TestReviewerProgress:
     def test_a_reviewer_that_has_written_nothing_says_so(self, tmp_path: Path) -> None:
         from scripts.review_loop.reviewers import _progress
 
-        procs = [(1, None, "gemini", None, None)]
-        assert "R1(gemini) 0B" in _progress(procs, {1: procs[0]}, tmp_path, 5.0)
+        procs = [(1, _Dead(), "gemini", None, None)]
+        assert "R1(gemini) 0B" in _progress(procs, {1: procs[0]}, tmp_path, 5.0, {})
+
+    def test_a_buffered_backend_is_shown_busy_by_its_cpu_time(
+        self, tmp_path: Path
+    ) -> None:
+        """`claude -p` writes nothing until it finishes, so size says nothing.
+
+        From start to end its output is 0 bytes, and a line that reports only
+        size cannot tell "thinking" from "hung" -- which is most of the run.
+        """
+        from scripts.review_loop.reviewers import _progress
+
+        procs = [(1, _Busy(), "claude", None, None)]
+        line = _progress(procs, {1: procs[0]}, tmp_path, 30.0, {1: 0.0})
+        assert "R1(claude) 0B busy" in line
+
+    def test_a_quiet_process_is_not_called_busy(self, tmp_path: Path) -> None:
+        """Waiting on a network reply is most of what these do."""
+        from scripts.review_loop.reviewers import _progress
+
+        procs = [(1, _Busy(), "claude", None, None)]
+        line = _progress(procs, {1: procs[0]}, tmp_path, 30.0, {1: 999.0})
+        assert "busy" not in line
+
+    def test_cpu_time_is_optional(self, tmp_path: Path) -> None:
+        """Linux only. Everywhere else the size signal still works."""
+        from scripts.review_loop.reviewers import _cpu_seconds
+
+        assert _cpu_seconds(-1) is None
 
     def test_codex_progress_is_counted_from_stderr(self, tmp_path: Path) -> None:
         """It reports progress on stderr and its result on stdout, so stdout
@@ -1018,6 +1063,68 @@ class TestReviewerDeadline:
 
         (tmp_path / "result-2.json").write_text("")
         assert not _has_result(tmp_path, 2)
+
+
+class TestSalvagingProse:
+    """A reviewer that answers in prose has still reviewed something."""
+
+    def test_a_prose_reply_is_put_in_front_of_the_operator(
+        self, tmp_path: Path
+    ) -> None:
+        """This is not hypothetical: one was binned carrying a real finding.
+
+        It noticed twelve duplicated tests, wrote it as a paragraph instead of
+        the schema, and the round recorded it as having returned nothing.
+        """
+        (tmp_path / "raw-3.txt").write_text(
+            json.dumps({"result": "test_app_sockets.py duplicates 12 tests verbatim."})
+        )
+        summary = describe_outputs(tmp_path)
+        assert "NOT JSON" in summary
+        assert "duplicates 12 tests verbatim" in summary
+        assert "raw-3.txt" in summary
+
+    def test_a_reviewer_that_wrote_nothing_is_reported_differently(
+        self, tmp_path: Path
+    ) -> None:
+        """ "No output" and "unusable output" read as one thing and are not."""
+        summary = describe_outputs(tmp_path)
+        assert "NO OUTPUT" in summary
+        assert "NOT JSON" not in summary
+
+    def test_an_empty_raw_file_counts_as_nothing(self, tmp_path: Path) -> None:
+        """codex writes straight to result-N.json, so its raw file is empty."""
+        (tmp_path / "raw-2.txt").write_text("")
+        assert "NO OUTPUT" in describe_outputs(tmp_path)
+
+    def test_bare_prose_is_salvaged_too(self, tmp_path: Path) -> None:
+        """Not every backend wraps its reply in an envelope."""
+        (tmp_path / "raw-1.txt").write_text("The diff looks fine to me.")
+        assert "looks fine to me" in describe_outputs(tmp_path)
+
+    def test_a_long_reply_is_trimmed_not_dumped(self, tmp_path: Path) -> None:
+        (tmp_path / "raw-1.txt").write_text("x" * 5000)
+        assert len(describe_outputs(tmp_path)) < 2000
+
+    def test_a_reviewer_with_findings_is_left_alone(self, tmp_path: Path) -> None:
+        (tmp_path / "result-1.json").write_text("{}")
+        summary = describe_outputs(tmp_path, n_slots=1)
+        assert "result-{1}.json" in summary
+        assert "NOT JSON" not in summary
+
+
+class TestSchemaInstruction:
+    """Telling a reviewer what to do when it has nothing to say."""
+
+    def test_the_prompt_says_prose_is_discarded(self) -> None:
+        """The commonest failure is not silence; it is an unparseable answer."""
+        from scripts.review_loop.reviewers import build_reviewer_prompt
+
+        prompt = build_reviewer_prompt(
+            "security", "leaks", "R1", "opus", "+x", "{}", "c"
+        )
+        assert "empty list" in prompt
+        assert "discarded unread" in prompt
 
 
 class TestProjectGate:
@@ -1736,3 +1843,52 @@ class TestReviewedFixtures:
         """The body is what is searched, not the `+` in front of it."""
         line = '+TOKEN = "token-for-tests"\n'
         assert scrub_diff.scrub_line(line, False, in_hunk=True) != line
+
+
+class TestReportOnly:
+    """`--report-only`: run the reviewers, write the findings, change nothing.
+
+    The workflow this serves is the one the loop was not built for. Somebody
+    reads the findings and fixes them by hand -- because the merge agent's
+    judgement is not trusted on that codebase, or because the fixes need a
+    person. Left to itself the loop launches the merge agent the moment there
+    is anything blocking, and the reviewer's findings then arrive tangled up
+    with a diff nobody asked for.
+    """
+
+    @staticmethod
+    def _source() -> str:
+        return (REPO_ROOT / "scripts" / "review_until_converged.py").read_text()
+
+    def test_the_flag_exists_and_says_what_it_does(self) -> None:
+        source = self._source()
+        assert '"--report-only"' in source
+        assert "does not touch the working tree" in source
+
+    def test_the_merge_agent_is_skipped(self) -> None:
+        """The whole point. The return must come before `apply_fixes`."""
+        source = self._source()
+        skip = source.index("if report_only:")
+        merge = source.index("if not apply_fixes(")
+        assert skip < merge, "report_only must return before the merge agent runs"
+
+    def test_the_exit_code_is_not_one_the_loop_already_uses(self) -> None:
+        """A caller has to tell "findings, untouched" from every other stop.
+
+        0 is converged, 3 is a failed merge agent, 6 is max rounds without
+        convergence. Reusing any of those makes the flag unscriptable.
+        """
+        source = self._source()
+        assert "return 10, current_fp" in source
+
+    def test_the_reviewers_are_told_nobody_will_fix_it_for_them(self) -> None:
+        """A reviewer asked to "find and fix" writes different findings from
+        one asked to report: the first drifts towards what is easy to patch."""
+        source = self._source()
+        assert "a person will fix them" in source
+
+    def test_the_flag_reaches_the_round(self) -> None:
+        """It is threaded through by position; a missing argument would leave
+        the default in place and silently run the merge agent anyway."""
+        source = self._source()
+        assert "args.report_only,\n        )" in source

@@ -25,6 +25,44 @@ from __future__ import annotations
 
 import re
 import sys
+from pathlib import PurePath
+
+# Files whose *entire content* is a credential, recognised by path rather than
+# by what is in them. No content pattern can do this job: a 43-character
+# base64url blob is indistinguishable from a hash, a build id or a test
+# fixture, so the only thing that knows it is a secret is where it lives.
+#
+# Written after a review shipped one. A project keeping its server token in
+# `data/token` added the file in a branch, the diff went to four model
+# providers, and every pattern here matched nothing -- there was no `token =`
+# for a keyword pattern to see, and the value carried no vendor prefix for a
+# shape pattern to see. The scrubber exited 0 and called it clean.
+#
+# Exact paths are a project's own business and this tool is generic, so the
+# default set is empty and the work is done by name and suffix below. A host
+# project with a credential somewhere unguessable can add to it.
+SECRET_PATHS: frozenset[str] = frozenset()
+
+# Basenames that are a credential wherever they sit in a tree.
+SECRET_NAMES = frozenset(
+    {
+        "token",
+        ".env",
+        ".netrc",
+        ".pgpass",
+        ".htpasswd",
+        "credentials",
+        "id_rsa",
+        "id_dsa",
+        "id_ecdsa",
+        "id_ed25519",
+    }
+)
+
+# Suffixes that say "this file is key material". `.pub` is deliberately not
+# here: a public key is public, and redacting it would cost a reviewer real
+# context for nothing.
+SECRET_SUFFIXES = frozenset({".pem", ".key", ".p12", ".pfx", ".jks", ".keystore"})
 
 # A credential is a *value*, not a word. Matching `token\s*[:=]` alone flags
 # `token: TokenSpec` and `token=token` -- ordinary code in any project where a
@@ -133,6 +171,42 @@ def _is_safe_file(diff_header: str) -> bool:
     return all(p in _SCRUBBER_SAFE_FILES for p in ab_paths)
 
 
+def _is_secret_file(diff_header: str) -> bool:
+    """Check if a diff header names a file that is entirely a credential.
+
+    The mirror image of :func:`_is_safe_file`, and deliberately different in
+    three ways, each because the safe-file version's choice is the wrong one
+    here:
+
+    * *Any* side naming a secret is enough, not both. A rename is a way to move
+      a token's content into a file with an innocent name, and the content is
+      the secret either way.
+    * Every header form, not just ``diff --git``. A ``diff --cc`` section from
+      a merge commit carries bare paths with no ``a/``/``b/`` prefix, and that
+      section still holds the file's contents.
+    * Words that are not paths are read as paths anyway. ``diff`` and
+      ``--git`` are not going to be in the sets below, and a false positive
+      here costs a reviewer one redacted hunk while a false negative costs a
+      credential.
+    """
+    return any(_is_secret_path(part) for part in diff_header.split())
+
+
+def _is_secret_path(part: str) -> bool:
+    """Whether one word from a diff header names key material."""
+    if part.startswith("-"):
+        # `--cc`, `--git`, `--combined`. Not paths, and `PurePath` would read
+        # them as relative names with confusing suffixes.
+        return False
+    path = part[2:] if part.startswith(("a/", "b/")) else part
+    name = PurePath(path)
+    return (
+        path in SECRET_PATHS
+        or name.name in SECRET_NAMES
+        or name.suffix.lower() in SECRET_SUFFIXES
+    )
+
+
 def _is_intentional_fixture_line(line: str) -> bool:
     """Lines containing regex patterns or test credential fixtures.
 
@@ -210,7 +284,13 @@ def _body(line: str, *, in_hunk: bool) -> str:
     return line[1:] if _is_body_line(line, in_hunk=in_hunk) else line
 
 
-def scrub_line(line: str, in_safe_file: bool, *, in_hunk: bool = True) -> str:
+def scrub_line(
+    line: str,
+    in_safe_file: bool,
+    *,
+    in_hunk: bool = True,
+    in_secret_file: bool = False,
+) -> str:
     """Replace a line with a redaction marker if it matches any pattern.
 
     Args:
@@ -220,6 +300,10 @@ def scrub_line(line: str, in_safe_file: bool, *, in_hunk: bool = True) -> str:
             credential patterns as string literals, not real secrets.
             Only lines matching :func:`_is_intentional_fixture_line`
             bypass scrubbing in safe files.
+        in_secret_file: If True, this line belongs to a file whose whole
+            content is a credential (:func:`_is_secret_file`). Every body line
+            is redacted, whatever is in it, and the safe-file bypass does not
+            apply -- a file cannot be both.
 
     Returns:
         The original line, or a redaction marker that preserves the
@@ -230,6 +314,11 @@ def scrub_line(line: str, in_safe_file: bool, *, in_hunk: bool = True) -> str:
         # Headers are structure, not content. A file *named* `.env.example`
         # is not a secret, and redacting its header breaks the patch.
         return line
+    if in_secret_file:
+        # Before any content heuristic, and not subject to the safe-file
+        # bypass. There is no pattern that would have caught this line on its
+        # own -- that is the whole reason for reading the path.
+        return _redact_preserving_prefix(line)
     if in_safe_file and _is_intentional_fixture_line(line):
         return line
     # Match the body, not the `+`/`-`/` ` the diff format puts in front of it.
@@ -281,6 +370,7 @@ def main() -> None:
 
     n_redacted = 0
     in_safe = False
+    in_secret = False
     in_key = False
     in_hunk = False
 
@@ -292,6 +382,10 @@ def main() -> None:
         # passed through unscrubbed.
         if line.startswith("diff "):
             in_safe = line.startswith("diff --git ") and _is_safe_file(line)
+            # Every header form, unlike `in_safe`: a `diff --cc` section
+            # naming the token file is still the token file. See
+            # `_is_secret_file`.
+            in_secret = _is_secret_file(line)
             in_key = False
             in_hunk = False
         elif line.startswith("@@"):
@@ -304,7 +398,7 @@ def main() -> None:
             if _PEM_END.search(line):
                 in_key = False
         else:
-            clean = scrub_line(line, in_safe, in_hunk=in_hunk)
+            clean = scrub_line(line, in_safe, in_hunk=in_hunk, in_secret_file=in_secret)
             # Only a *redacted* BEGIN line opens a block. In a safe file the
             # banner is an intentional fixture and passes through, and the
             # fixture's body must not then be swallowed.

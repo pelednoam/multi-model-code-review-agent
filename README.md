@@ -236,10 +236,13 @@ naming who is still working and how much they have written:
   ...4m30s · R1(claude) done · R2(codex) 736K · R3(claude) done · R4(claude) 12K
 ```
 
-Output size is the only progress signal these CLIs give -- a reviewer that is
-thinking writes nothing, one that is working grows its file -- and both streams
-count, because `codex` reports progress on stderr and its result on stdout, so
-its stdout stays empty until the very end and it looked hung. If you need to
+Two signals, because neither alone covers both kinds of backend. **Output size**
+works for `codex`, which streams progress to stderr while it thinks -- and both
+streams count, because it writes its *result* to stdout, so stdout stays empty
+until the very end and it looked hung for its whole run. **CPU time** is there
+for `claude -p --output-format json`, which buffers everything and writes at the
+end: its output is 0 bytes from start to finish, so size cannot tell "thinking"
+from "hung". A slot burning CPU between reports is marked `busy`. If you need to
 check from another terminal, the round directory is the truth: mtimes on
 `raw-N.txt` and `stderr-N.txt` say who is moving. The process table does not,
 because `pgrep claude` finds every other session on the machine.

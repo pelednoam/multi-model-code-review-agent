@@ -1665,3 +1665,51 @@ class TestCodexSandboxVerification:
         assert ok is False
         assert "could not start" in reason
         assert "user namespace" in reason  # points at the actual remedy
+
+class TestReportOnly:
+    """`--report-only`: run the reviewers, write the findings, change nothing.
+
+    The workflow this serves is the one the loop was not built for. Somebody
+    reads the findings and fixes them by hand -- because the merge agent's
+    judgement is not trusted on that codebase, or because the fixes need a
+    person. Left to itself the loop launches the merge agent the moment there
+    is anything blocking, and the reviewer's findings then arrive tangled up
+    with a diff nobody asked for.
+    """
+
+    @staticmethod
+    def _source() -> str:
+        return (REPO_ROOT / "scripts" / "review_until_converged.py").read_text()
+
+    def test_the_flag_exists_and_says_what_it_does(self) -> None:
+        source = self._source()
+        assert '"--report-only"' in source
+        assert "does not touch the working tree" in source
+
+    def test_the_merge_agent_is_skipped(self) -> None:
+        """The whole point. The return must come before `apply_fixes`."""
+        source = self._source()
+        skip = source.index("if report_only:")
+        merge = source.index("if not apply_fixes(")
+        assert skip < merge, "report_only must return before the merge agent runs"
+
+    def test_the_exit_code_is_not_one_the_loop_already_uses(self) -> None:
+        """A caller has to tell "findings, untouched" from every other stop.
+
+        0 is converged, 3 is a failed merge agent, 6 is max rounds without
+        convergence. Reusing any of those makes the flag unscriptable.
+        """
+        source = self._source()
+        assert "return 10, current_fp" in source
+
+    def test_the_reviewers_are_told_nobody_will_fix_it_for_them(self) -> None:
+        """A reviewer asked to "find and fix" writes different findings from
+        one asked to report: the first drifts towards what is easy to patch."""
+        source = self._source()
+        assert "a person will fix them" in source
+
+    def test_the_flag_reaches_the_round(self) -> None:
+        """It is threaded through by position; a missing argument would leave
+        the default in place and silently run the merge agent anyway."""
+        source = self._source()
+        assert "args.report_only,\n        )" in source

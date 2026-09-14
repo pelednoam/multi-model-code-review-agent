@@ -124,6 +124,7 @@ def _run_one_round(
     previous_fp: set[FindingKey],
     auto_commit: bool,
     prefer_hermes: bool = False,
+    report_only: bool = False,
 ) -> tuple[int | None, set[FindingKey]]:
     """Execute a single round. Return (exit_code or None, new_fingerprint).
 
@@ -181,6 +182,17 @@ def _run_one_round(
         repeat = current_fp & previous_fp
         print(f"  New: {len(new)}, Repeated: {len(repeat)}")
 
+    if report_only:
+        # The reviewers have been paid for and their findings are written out.
+        # Stopping here is the whole point of the flag: the person who asked
+        # for the review is going to fix these by hand, and a merge agent
+        # editing the tree underneath them is not help, it is a second diff to
+        # disentangle. Exit 10 so a script can tell "findings, untouched"
+        # from "converged" (0), from "the merge agent failed" (3), and from
+        # "max rounds without convergence" (6), which already owned 6.
+        print("\nREPORT ONLY: findings written, nothing changed.")
+        return 10, current_fp
+
     if not apply_fixes(blocking, round_dir, backends, repo):
         print("\nMerge agent failed -- stopping.")
         return 3, current_fp
@@ -215,6 +227,15 @@ def main() -> int:
         "--auto-commit", action="store_true", help="Commit and push after each round"
     )
     parser.add_argument("--review-dir", type=Path, default=None)
+    parser.add_argument(
+        "--report-only",
+        action="store_true",
+        help=(
+            "Run the reviewers and write their findings, then stop. Does not "
+            "run the merge agent and does not touch the working tree. Exits "
+            "10 when there are blocking findings, 0 when there are none."
+        ),
+    )
     parser.add_argument(
         "--prefer-hermes",
         action="store_true",
@@ -251,7 +272,11 @@ def main() -> int:
     print(f"Session: {session_dir}")
 
     previous_fp: set[FindingKey] = set()
-    context = "Autonomous review loop. Find and fix all issues until convergence."
+    context = (
+        "Autonomous review. Find and report all issues; a person will fix them."
+        if args.report_only
+        else "Autonomous review loop. Find and fix all issues until convergence."
+    )
 
     for round_num in range(1, args.max_rounds + 1):
         exit_code, previous_fp = _run_one_round(
@@ -263,6 +288,7 @@ def main() -> int:
             previous_fp,
             args.auto_commit,
             prefer_hermes,
+            args.report_only,
         )
         if exit_code is not None:
             return exit_code

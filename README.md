@@ -227,6 +227,7 @@ The loop exits on the first of:
 | 7 | No reviewer results | Zero of 4 reviewers produced parseable JSON (rare, usually a CLI auth or network failure) |
 | 8 | **Secrets detected** | `scrub_diff.py` redacted at least one line. Rotate the leaked secret and re-stage the diff before re-running |
 | 9 | **Scrubber failed** | `scrub_diff.py` aborted part-way through. The patch on disk is truncated and its tail was never scrubbed, so it is not shown to a reviewer. Nothing needs rotating; fix the input or the environment and re-run |
+| 10 | **Report only** | `--report-only` was set and there are blocking findings. Nothing was changed; read them and fix them yourself |
 
 **Watching a round.** Four models on a large diff is fifteen minutes, and the
 loop used to say nothing during it. It now prints a line every 30 seconds
@@ -365,6 +366,7 @@ Common patterns:
 | Goal | Flags |
 |---|---|
 | One-shot: review + fix + gate, then stop | `--max-rounds 1` |
+| Findings only -- you do the fixing | `--report-only` (exits 10 when there are any) |
 | Iterate locally without polluting git | omit `--auto-commit`, inspect each round's working tree |
 | CI gate enforcement only | use the loop with `--max-rounds 1`; the gate runs unconditionally |
 | Long autonomous session | `--max-rounds 10 --auto-commit` |
@@ -373,6 +375,12 @@ Common patterns:
 
 - **Quick mode**: every commit -- catch obvious problems, ~30s
 - **Full mode**: pre-merge gate -- cross-provider diversity, ~3 min
+- **Report only** (`--report-only`): when you want four models' findings and
+  nothing else. The merge agent never runs and the working tree is untouched,
+  so the findings arrive as findings rather than tangled up with a diff you
+  did not ask for. Good for: a codebase where you do not want the merge
+  agent's judgement, a milestone review you intend to fix by hand, or any
+  review where the fixes need a person.
 - **Convergence loop**: when you want the agent to *finish* the
   review-and-fix cycle, not just identify problems. Good for: large
   refactors, post-rebase cleanup, "make this PR mergeable", catching

@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import subprocess
+import time
 import uuid
 from typing import IO, TYPE_CHECKING
 
-from .config import REVIEWER_TIMEOUT
+from .config import POLL_INTERVAL, PROGRESS_INTERVAL, REVIEWER_TIMEOUT
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -147,6 +148,17 @@ def _gemini_model() -> str:
     return os.environ.get("GEMINI_MODEL", _GEMINI_MODEL_DEFAULT)
 
 
+def _gemini_enabled() -> bool:
+    """Whether to use the gemini CLI for slot 3.
+
+    Off by default. See ``_choose_command``: it has never produced a finding.
+    Set ``REVIEW_USE_GEMINI=1`` to try it again.
+    """
+    import os
+
+    return os.environ.get("REVIEW_USE_GEMINI", "") == "1"
+
+
 def _codex_extra_args() -> list[str]:
     """Build the extra ``codex exec`` flags from CODEX_* env vars.
 
@@ -215,7 +227,14 @@ def _choose_command(
             str(result_path),
             "-",
         ], None
-    if slot == 3 and backends["gemini"]:
+    if slot == 3 and _gemini_enabled() and backends["gemini"]:
+        # Opt-in, because in practice it does not review. Across eight rounds
+        # on a real project this slot returned zero findings every single time,
+        # while the other three returned six to nineteen each. `stderr` shows
+        # why: the gemini CLI treats the prompt as a task and goes exploring the
+        # repository with its own tools, finishing a 200 KB diff in sixty
+        # seconds where the Claude reviewers take six minutes. Until that is
+        # understood, the default for slot 3 is the backend that works.
         return [
             "gemini",
             "--model",
@@ -223,7 +242,7 @@ def _choose_command(
             "--approval-mode",
             "plan",
             "--skip-trust",
-        ], None
+        ], _gemini_model()
     if backends["claude"]:
         return _claude_cmd(slot), None
 
@@ -307,7 +326,14 @@ def launch_reviewers(
     backends: dict[str, bool],
     prefer_hermes: bool = False,
 ) -> None:
-    """Launch 4 reviewers in parallel, write raw outputs to round_dir."""
+    """Launch 4 reviewers in parallel, write raw outputs to round_dir.
+
+    Reports progress while it waits. Four models on a large diff is fifteen
+    minutes of silence otherwise, during which the only way to tell a working
+    reviewer from a hung one was to guess at the process table -- and `pgrep`
+    finds other people's CLI sessions on the same machine, so the guess is
+    wrong as often as it is right.
+    """
     procs: list[ReviewerProc] = []
     for i, lens_args in enumerate(_LENSES, 1):
         tracked = _launch_one(
@@ -315,15 +341,86 @@ def launch_reviewers(
         )
         if tracked is not None:
             procs.append(tracked)
-    for slot, proc, backend, out_f, err_f in procs:
-        rc: int | None = None
-        try:
-            rc = proc.wait(timeout=REVIEWER_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            print(f"  R{slot}: TIMEOUT after {REVIEWER_TIMEOUT}s")
-        finally:
+    _await_reviewers(procs, round_dir)
+
+
+def _await_reviewers(procs: list[ReviewerProc], round_dir: Path) -> None:
+    """Wait for every reviewer, reporting who is still working.
+
+    One deadline for the whole round, not one per reviewer. `proc.wait(timeout)`
+    per slot in turn gave each its own fresh budget starting when its turn came,
+    so a reviewer behind a slow one silently got double the timeout and
+    "TIMEOUT after 600s" was printed after fifteen real minutes.
+    """
+    deadline = time.monotonic() + REVIEWER_TIMEOUT
+    started = time.monotonic()
+    pending = {slot: tracked for tracked in procs for slot in (tracked[0],)}
+    last_report = 0.0
+
+    while pending:
+        for slot, tracked in list(pending.items()):
+            _, proc, backend, out_f, err_f = tracked
+            rc = proc.poll()
+            if rc is None:
+                continue
             out_f.close()
             err_f.close()
-        if rc is not None and rc != 0:
-            print(f"  R{slot}: exit {rc} ({backend}) -- see stderr-{slot}.txt")
+            del pending[slot]
+            if rc != 0:
+                print(f"  R{slot}: exit {rc} ({backend}) -- see stderr-{slot}.txt")
+        if not pending:
+            break
+        now = time.monotonic()
+        if now >= deadline:
+            for slot, tracked in pending.items():
+                _, proc, _, out_f, err_f = tracked
+                proc.kill()
+                out_f.close()
+                err_f.close()
+                print(f"  R{slot}: TIMEOUT after {REVIEWER_TIMEOUT}s")
+            return
+        if now - last_report >= PROGRESS_INTERVAL:
+            print(_progress(procs, pending, round_dir, now - started))
+            last_report = now
+        time.sleep(POLL_INTERVAL)
+
+
+def _progress(
+    procs: list[ReviewerProc],
+    pending: dict[int, ReviewerProc],
+    round_dir: Path,
+    elapsed: float,
+) -> str:
+    """One line saying who is still working and how much they have written.
+
+    Output size is the only progress signal these CLIs give: a reviewer that is
+    thinking writes nothing, one that is working grows its file. Both stdout and
+    stderr count, because codex reports progress on stderr and its result on
+    stdout, so stdout stays empty until the very end.
+    """
+    parts: list[str] = []
+    for slot, _proc, backend, _out, _err in procs:
+        written = _bytes_written(round_dir, slot)
+        state = f"{_size(written)}" if slot in pending else "done"
+        parts.append(f"R{slot}({backend}) {state}")
+    return f"  ...{_clock(elapsed)} · " + " · ".join(parts)
+
+
+def _bytes_written(round_dir: Path, slot: int) -> int:
+    """How much this reviewer has produced, on either stream."""
+    total = 0
+    for name in (f"raw-{slot}.txt", f"stderr-{slot}.txt", f"result-{slot}.json"):
+        path = round_dir / name
+        if path.exists():
+            total += path.stat().st_size
+    return total
+
+
+def _size(written: int) -> str:
+    """Bytes, roughly, for a progress line."""
+    return f"{written / 1024:.0f}K" if written >= 1024 else f"{written}B"
+
+
+def _clock(seconds: float) -> str:
+    """Elapsed time as a person reads it."""
+    return f"{int(seconds) // 60}m{int(seconds) % 60:02d}s"

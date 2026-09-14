@@ -771,6 +771,72 @@ class TestSecretsDetected:
         assert "rotated" not in str(exc_info.value)
 
 
+class TestReviewerProgress:
+    """Knowing which reviewers are still working, without guessing."""
+
+    def test_a_working_reviewer_is_shown_with_what_it_has_written(
+        self, tmp_path: Path
+    ) -> None:
+        """Output size is the only progress signal these CLIs give."""
+        from scripts.review_loop.reviewers import _progress
+
+        (tmp_path / "stderr-2.txt").write_text("x" * 2048)
+        procs = [(1, None, "claude", None, None), (2, None, "codex", None, None)]
+        line = _progress(procs, {2: procs[1]}, tmp_path, 95.0)
+        assert "R1(claude) done" in line
+        assert "R2(codex) 2K" in line
+        assert "1m35s" in line
+
+    def test_a_reviewer_that_has_written_nothing_says_so(self, tmp_path: Path) -> None:
+        from scripts.review_loop.reviewers import _progress
+
+        procs = [(1, None, "gemini", None, None)]
+        assert "R1(gemini) 0B" in _progress(procs, {1: procs[0]}, tmp_path, 5.0)
+
+    def test_codex_progress_is_counted_from_stderr(self, tmp_path: Path) -> None:
+        """It reports progress on stderr and its result on stdout, so stdout
+        stays empty until the very end -- and looked hung for fifteen minutes.
+        """
+        from scripts.review_loop.reviewers import _bytes_written
+
+        (tmp_path / "raw-2.txt").write_text("")
+        (tmp_path / "stderr-2.txt").write_text("y" * 500)
+        assert _bytes_written(tmp_path, 2) == 500
+
+
+class TestEmptyReviews:
+    """A reviewer that found nothing has not reviewed anything."""
+
+    def test_a_silent_reviewer_is_not_counted_as_a_clean_bill(self) -> None:
+        from scripts.review_until_converged import _describe_results
+
+        results = [
+            {"findings": [{"severity": "warning"}]},
+            None,
+            {"findings": []},
+            {"findings": [{"severity": "warning"}]},
+        ]
+        line = _describe_results(results, 5000)
+        assert "3/4 reviewers returned output" in line
+        assert "R3 found nothing" in line
+        assert "not a clean bill" in line
+
+    def test_a_small_diff_with_no_findings_is_unremarkable(self) -> None:
+        from scripts.review_until_converged import _describe_results
+
+        line = _describe_results([{"findings": []}], 12)
+        assert "found nothing" in line
+        assert "not a clean bill" not in line
+
+    def test_everyone_speaking_needs_no_caveat(self) -> None:
+        from scripts.review_until_converged import _describe_results
+
+        results = [{"findings": [{"severity": "warning"}]}] * 4
+        assert (
+            _describe_results(results, 5000) == "Results: 4/4 reviewers returned output"
+        )
+
+
 class TestProjectGate:
     """Whose gate the loop runs, and with which Python."""
 

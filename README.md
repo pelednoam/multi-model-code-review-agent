@@ -228,6 +228,43 @@ The loop exits on the first of:
 | 8 | **Secrets detected** | `scrub_diff.py` redacted at least one line. Rotate the leaked secret and re-stage the diff before re-running |
 | 9 | **Scrubber failed** | `scrub_diff.py` aborted part-way through. The patch on disk is truncated and its tail was never scrubbed, so it is not shown to a reviewer. Nothing needs rotating; fix the input or the environment and re-run |
 
+**Watching a round.** Four models on a large diff is fifteen minutes, and the
+loop used to say nothing during it. It now prints a line every 30 seconds
+naming who is still working and how much they have written:
+
+```
+  ...4m30s · R1(claude) done · R2(codex) 736K · R3(claude) done · R4(claude) 12K
+```
+
+Output size is the only progress signal these CLIs give -- a reviewer that is
+thinking writes nothing, one that is working grows its file -- and both streams
+count, because `codex` reports progress on stderr and its result on stdout, so
+its stdout stays empty until the very end and it looked hung. If you need to
+check from another terminal, the round directory is the truth: mtimes on
+`raw-N.txt` and `stderr-N.txt` say who is moving. The process table does not,
+because `pgrep claude` finds every other session on the machine.
+
+**A reviewer that found nothing has not reviewed anything.** `Results: 3/4
+reviewers succeeded` used to count a valid-JSON-with-no-findings return as a
+success, which hid a broken slot behind a reassuring number -- one slot returned
+zero findings on eight consecutive rounds while reporting success each time. The
+line now names the silent ones and, on a substantial diff, says what that means:
+
+```
+Results: 3/4 reviewers returned output; R3 found nothing on 5234 lines -- treat as no coverage, not a clean bill
+```
+
+**Slot 3 and the gemini CLI.** That slot is the one above. Its `stderr` shows
+why: the gemini CLI treats the prompt as a task and goes exploring the
+repository with its own tools, finishing a 200 KB diff in sixty seconds where
+the Claude reviewers take six minutes on the same input. It is opt-in now --
+`REVIEW_USE_GEMINI=1` -- and slot 3 falls through to the backend that works.
+
+**The round has one deadline, not four.** `proc.wait(timeout=...)` was called
+per slot in turn, so each reviewer got a fresh budget starting when its turn
+came: a reviewer behind a slow one silently got double the timeout, and
+"TIMEOUT after 600s" was printed after fifteen real minutes.
+
 **The gate is yours if you have one.** If the target repo has an executable
 `tools/gate.sh`, `scripts/gate.sh` or `gate.sh`, the loop runs that and nothing
 else. Otherwise it falls back to `ruff check` / `ruff format --check` /

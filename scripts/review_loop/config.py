@@ -10,6 +10,14 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 REPO_ROOT = SCRIPTS_DIR.parent
 
 REVIEWER_TIMEOUT = 600
+
+#: How often to say who is still working. Four models on a large diff is
+#: fifteen minutes of silence otherwise.
+PROGRESS_INTERVAL = 30
+
+#: How often to check whether a reviewer has finished. Short enough that the
+#: round does not sit idle after the last one exits.
+POLL_INTERVAL = 2
 MERGE_TIMEOUT = 900
 TEST_TIMEOUT = 300
 

@@ -7,10 +7,24 @@ import sys
 from typing import TYPE_CHECKING
 
 from .backends import _run
-from .config import SCRIPTS_DIR, diff_pathspec
+from .config import SCRIPTS_DIR, diff_pathspec, is_agent_repo
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+#: scrub_diff.py exits 2 when it failed part-way through. What reached stdout
+#: is a truncated patch whose tail was never scrubbed.
+SCRUBBER_ABORTED = 2
+
+
+class ScrubberFailedError(RuntimeError):
+    """Raised when scrub_diff.py crashed instead of finishing.
+
+    Distinct from :class:`SecretsDetectedError` because the remedy is
+    different: nothing leaked that rotating a credential would fix, but the
+    patch on disk is incomplete and must not be shown to a reviewer.
+    """
 
 
 class SecretsDetectedError(RuntimeError):
@@ -48,15 +62,30 @@ def collect_diff(round_dir: Path, repo: Path) -> tuple[Path, int]:
     elif not git.stdout.strip():
         git = _run(["git", "diff", "HEAD~1", "--", *pathspec], cwd=repo)
     diff_input = git.stdout or ""
-    with open(diff_path, "w") as out_f:
+    # Every hop is pinned to UTF-8 with replacement. scrub_diff.py pins its own
+    # streams because CI runs under LC_ALL=C, but that was the only hop that
+    # did: git's output, the pipe into the scrubber and the read-back all used
+    # the ambient codec, so one non-ASCII byte anywhere in the tree still
+    # raised -- and this repository's own sources are full of en dashes.
+    with open(diff_path, "w", encoding="utf-8", errors="replace") as out_f:
         scrubber = subprocess.Popen(
             [sys.executable, str(SCRIPTS_DIR / "scrub_diff.py")],
             stdin=subprocess.PIPE,
             stdout=out_f,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         _, scrub_err = scrubber.communicate(input=diff_input)
+    if scrubber.returncode == SCRUBBER_ABORTED:
+        raise ScrubberFailedError(
+            "scrub_diff.py aborted part-way through. The diff on disk is "
+            "truncated and was not fully scrubbed, so it must not be "
+            "reviewed.\n"
+            f"Scrubber stderr: {scrub_err.strip()}\n"
+            f"Partial diff saved to: {diff_path}"
+        )
     if scrubber.returncode != 0:
         raise SecretsDetectedError(
             "scrub_diff.py redacted at least one line from the diff. "
@@ -65,9 +94,26 @@ def collect_diff(round_dir: Path, repo: Path) -> tuple[Path, int]:
             f"Scrubber stderr: {scrub_err.strip()}\n"
             f"Redacted diff saved to: {diff_path}"
         )
-    with open(diff_path) as f:
+    with open(diff_path, encoding="utf-8", errors="replace") as f:
         n_lines = sum(1 for _ in f)
     return diff_path, n_lines
+
+
+def _preflight_script(repo: Path) -> Path:
+    """The preflight to run for ``repo`` -- its own installed copy if it has one.
+
+    The preflight reads ``scripts/preflight/config.py`` *next to itself*:
+    SOURCE_DIRS, TEST_DIRS, SIGNED_MANIFESTS, all of it. Running this repo's
+    copy against another project therefore audits the wrong tree's layout, and
+    does it silently -- the coverage gate reports "no Python file matched
+    SOURCE_DIRS", the changed-file list belongs to the agent rather than the
+    project, and reviewers reason from both. Prefer the copy install.sh put in
+    the project.
+    """
+    installed = repo / "scripts" / "review_preflight.py"
+    if installed.is_file() and not is_agent_repo(repo):
+        return installed
+    return SCRIPTS_DIR / "review_preflight.py"
 
 
 def run_preflight(round_dir: Path, repo: Path) -> Path:
@@ -84,7 +130,7 @@ def run_preflight(round_dir: Path, repo: Path) -> Path:
     result = _run(
         [
             sys.executable,
-            str(SCRIPTS_DIR / "review_preflight.py"),
+            str(_preflight_script(repo)),
             "--output",
             str(audit_path),
         ],
@@ -92,7 +138,6 @@ def run_preflight(round_dir: Path, repo: Path) -> Path:
     )
     if not audit_path.exists():
         raise RuntimeError(
-            f"preflight failed (no audit JSON, exit {result.returncode}): "
-            f"{result.stderr}"
+            f"preflight failed (no audit JSON, exit {result.returncode}): {result.stderr}"
         )
     return audit_path

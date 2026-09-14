@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -79,6 +80,89 @@ class TestScrubDiff:
         stdout, _, code = self._run_scrub(diff)
         assert "REDACTED" in stdout
         assert code == 1
+
+    def test_redacts_the_whole_private_key_not_just_its_banner(self) -> None:
+        """The body is the key. Redacting only the banner leaks it intact."""
+        body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQ"
+        diff = (
+            "diff --git a/k.pem b/k.pem\n"
+            "+-----BEGIN RSA PRIVATE KEY-----\n"
+            f"+{body}\n"
+            "+-----END RSA PRIVATE KEY-----\n"
+        )
+        stdout, _, code = self._run_scrub(diff)
+        assert body not in stdout
+        assert stdout.count("REDACTED") == 3
+        assert code == 1
+
+    @pytest.mark.parametrize(
+        "kind",
+        ["RSA", "OPENSSH", "EC", "DSA", "ENCRYPTED", "PGP"],
+    )
+    def test_every_private_key_banner_opens_the_block(self, kind: str) -> None:
+        """One narrow banner pattern and one broad one let OPENSSH keys through.
+
+        The block opened only for a banner the credential patterns had already
+        redacted, and `BEGIN OPENSSH PRIVATE KEY` matched only the broad one --
+        so nothing was redacted, the block never opened, and the scrubber
+        exited 0 calling the key clean.
+        """
+        body = "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAAB"
+        diff = (
+            "diff --git a/k b/k\n"
+            f"+-----BEGIN {kind} PRIVATE KEY-----\n"
+            f"+{body}\n"
+            f"+-----END {kind} PRIVATE KEY-----\n"
+        )
+        stdout, _, code = self._run_scrub(diff)
+        assert body not in stdout
+        assert code == 1
+
+    def test_a_pgp_key_block_banner_is_recognised(self) -> None:
+        """Its banner says BLOCK after KEY, which the anchorless search allows."""
+        body = "lQOYBGYAAAABCADQ1example"
+        diff = (
+            "diff --git a/k b/k\n"
+            "+-----BEGIN PGP PRIVATE KEY BLOCK-----\n"
+            f"+{body}\n"
+            "+-----END PGP PRIVATE KEY BLOCK-----\n"
+        )
+        stdout, _, code = self._run_scrub(diff)
+        assert body not in stdout
+        assert code == 1
+
+    def test_a_key_block_does_not_swallow_the_rest_of_the_diff(self) -> None:
+        diff = (
+            "diff --git a/k.pem b/k.pem\n"
+            "+-----BEGIN PRIVATE KEY-----\n"
+            "+AAAA\n"
+            "+-----END PRIVATE KEY-----\n"
+            "+after the key\n"
+        )
+        stdout, _, _ = self._run_scrub(diff)
+        assert "+after the key" in stdout
+
+    def test_an_unterminated_key_block_ends_at_the_next_file(self) -> None:
+        """A truncated key must not redact every following file wholesale."""
+        diff = (
+            "diff --git a/k.pem b/k.pem\n"
+            "+-----BEGIN PRIVATE KEY-----\n"
+            "+AAAA\n"
+            "diff --git a/ok.py b/ok.py\n"
+            "+def hello(): pass\n"
+        )
+        stdout, _, _ = self._run_scrub(diff)
+        assert "+def hello(): pass" in stdout
+
+    def test_a_fixture_key_banner_in_a_safe_file_opens_no_block(self) -> None:
+        diff = (
+            "diff --git a/scripts/scrub_diff.py b/scripts/scrub_diff.py\n"
+            "+-----BEGIN PRIVATE KEY-----\n"
+            '+re.compile(r"x")\n'
+        )
+        stdout, _, code = self._run_scrub(diff)
+        assert "REDACTED" not in stdout
+        assert code == 0
 
     def test_redacts_gcp_service_account(self) -> None:
         diff = '+  "type": "service_account"\n'
@@ -180,6 +264,127 @@ class TestScrubDiff:
         diff = "+# See the .environment docs for details\n"
         stdout, _, code = self._run_scrub(diff)
         assert "REDACTED" not in stdout
+        assert code == 0
+
+    def test_redacts_a_dotenv_path_added_at_column_zero(self) -> None:
+        """The `+` prefix is not part of the file's text and must not hide it."""
+        stdout, _, code = self._run_scrub("+.env.production\n")
+        assert "REDACTED" in stdout
+        assert code == 1
+
+    def test_a_combined_diff_header_does_not_inherit_a_safe_file(self) -> None:
+        """`in_safe` used to latch: only `diff --git` reset it."""
+        diff = (
+            "diff --git a/scripts/scrub_diff.py b/scripts/scrub_diff.py\n"
+            '+re.compile(r"x")\n'
+            "diff --cc other.py\n"
+            '+re.compile(r"y")  # api_key = "supersecret1"\n'
+        )
+        stdout, _, code = self._run_scrub(diff)
+        assert "supersecret1" not in stdout
+        assert code == 1
+
+    def test_a_non_utf8_byte_does_not_truncate_the_patch(self) -> None:
+        """A crash mid-stream leaves a plausible patch whose tail is unscrubbed."""
+        raw = b'diff --git a/x b/x\n+caf\xe9 api_key = "abcdefghij1"\n+trailing line\n'
+        result = subprocess.run(
+            [sys.executable, str(SCRUB_SCRIPT)],
+            input=raw,
+            capture_output=True,
+            timeout=10,
+            env={**os.environ, "LC_ALL": "C", "PYTHONIOENCODING": "ascii"},
+        )
+        stdout = result.stdout.decode("utf-8", "replace")
+        assert "abcdefghij1" not in stdout
+        assert "+trailing line" in stdout
+        assert result.returncode == 1
+
+    def test_a_dotenv_file_header_is_not_redacted(self) -> None:
+        """`--- a/x` and `+++ b/x` start with `-` and `+`, but are structure.
+
+        Redacting them cost the patch its file attribution *and* aborted the
+        whole review, because someone committed a `.env.example`.
+        """
+        diff = (
+            "diff --git a/.env.example b/.env.example\n"
+            "index 0000000..1111111 100644\n"
+            "--- a/.env.example\n"
+            "+++ b/.env.example\n"
+            "+API_HOST=localhost\n"
+        )
+        stdout, _, code = self._run_scrub(diff)
+        assert stdout == diff
+        assert code == 0
+
+    def test_a_dotenv_value_inside_the_file_is_still_redacted(self) -> None:
+        stdout, _, code = self._run_scrub("+source .env.production\n")
+        assert "REDACTED" in stdout
+        assert code == 1
+
+    @pytest.mark.parametrize(
+        "key",
+        [
+            "sk-ant-api03-AbCdEf1234567890GhIjKlMnOpQrStUvWxYz",
+            "sk-proj-AbCdEf1234567890GhIjKlMnOpQrStUvWxYz",
+            "sk-AbCdEf1234567890GhIjKlMnOpQrStUvWxYz",
+        ],
+    )
+    def test_redacts_current_key_shapes(self, key: str) -> None:
+        """A run of plain alphanumerics stops at the first hyphen."""
+        stdout, _, code = self._run_scrub(f'+  "{key}"\n')
+        assert key not in stdout
+        assert code == 1
+
+    def test_a_credential_beside_a_regex_mention_is_still_scrubbed(self) -> None:
+        """The safe-file bypass used to fire on `re.compile(` anywhere."""
+        diff = (
+            "diff --git a/scripts/scrub_diff.py b/scripts/scrub_diff.py\n"
+            '+AWS = "AKIAIOSFODNN7EXAMPLE"  # matched by re.compile(...)\n'
+        )
+        stdout, _, code = self._run_scrub(diff)
+        assert "AKIAIOSFODNN7EXAMPLE" not in stdout
+        assert code == 1
+
+    def test_a_removed_comment_line_is_not_mistaken_for_a_header(self) -> None:
+        """`-- password = ...` removed arrives as `--- password = ...`.
+
+        Indistinguishable from a file header by prefix alone, and classifying it
+        as metadata wrote the credential straight through with exit 0.
+        """
+        diff = (
+            "diff --git a/q.sql b/q.sql\n"
+            "--- a/q.sql\n"
+            "+++ b/q.sql\n"
+            "@@ -1 +1 @@\n"
+            '-- password = "hunter2abc"\n'
+            "+SELECT 1\n"
+        )
+        stdout, _, code = self._run_scrub(diff)
+        assert "hunter2abc" not in stdout
+        assert code == 1
+
+    def test_an_added_comment_line_is_not_mistaken_for_a_header_either(self) -> None:
+        diff = (
+            "diff --git a/q.sql b/q.sql\n"
+            "--- a/q.sql\n"
+            "+++ b/q.sql\n"
+            "@@ -1 +1 @@\n"
+            '+++ password = "hunter2abc"\n'
+        )
+        stdout, _, code = self._run_scrub(diff)
+        assert "hunter2abc" not in stdout
+        assert code == 1
+
+    def test_the_real_file_headers_are_still_left_alone(self) -> None:
+        diff = (
+            "diff --git a/.env.example b/.env.example\n"
+            "--- a/.env.example\n"
+            "+++ b/.env.example\n"
+            "@@ -1 +1 @@\n"
+            "+API_HOST=localhost\n"
+        )
+        stdout, _, code = self._run_scrub(diff)
+        assert stdout == diff
         assert code == 0
 
     def test_empty_input(self) -> None:
@@ -475,6 +680,25 @@ class TestRunGate:
             assert label in source
 
 
+def _two_commit_repo(repo: Path) -> Path:
+    """A git repo with two commits, so HEAD~1 resolves."""
+    repo.mkdir(parents=True, exist_ok=True)
+    env = {
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t",
+    }
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True, env=env)
+    for n, body in enumerate(("a = 1\n", "a = 2\n")):
+        (repo / "x.py").write_text(body)
+        subprocess.run(["git", "add", "x.py"], cwd=repo, check=True, env=env)
+        subprocess.run(
+            ["git", "commit", "-q", "-m", str(n)], cwd=repo, check=True, env=env
+        )
+    return repo
+
+
 class TestSecretsDetected:
     """The scrubber must STOP the loop, not just warn."""
 
@@ -524,6 +748,197 @@ class TestSecretsDetected:
             with pytest.raises(SecretsDetectedError) as exc_info:
                 collect_diff(round_dir, repo)
         assert "rotated" in str(exc_info.value)
+
+    def test_collect_diff_distinguishes_a_crash_from_a_clean_block(
+        self, tmp_path: Path
+    ) -> None:
+        """Exit 2 means the patch is truncated, not that a secret leaked."""
+        from unittest.mock import patch
+
+        from scripts.review_loop.diff import ScrubberFailedError, collect_diff
+
+        round_dir = tmp_path / "round"
+        round_dir.mkdir()
+        repo = _two_commit_repo(tmp_path / "repo")
+
+        fake_scrubber = tmp_path / "scrub_diff.py"
+        fake_scrubber.write_text(
+            'import sys\nprint("aborted", file=sys.stderr)\nsys.exit(2)\n'
+        )
+        with patch("scripts.review_loop.diff.SCRIPTS_DIR", tmp_path):
+            with pytest.raises(ScrubberFailedError) as exc_info:
+                collect_diff(round_dir, repo)
+        assert "truncated" in str(exc_info.value)
+        assert "rotated" not in str(exc_info.value)
+
+
+class TestProjectGate:
+    """Whose gate the loop runs, and with which Python."""
+
+    def test_a_project_with_its_own_gate_script_gets_only_that(
+        self, tmp_path: Path
+    ) -> None:
+        """The built-in `mypy scripts/` type-checks the agent's vendored source.
+
+        Under a host project's own strict settings that always fails, so the
+        loop could never commit a round no matter what it fixed.
+        """
+        from scripts.review_loop.config import project_gate
+
+        repo = tmp_path / "host"
+        (repo / "tools").mkdir(parents=True)
+        gate = repo / "tools" / "gate.sh"
+        gate.write_text("#!/bin/sh\nexit 0\n")
+        gate.chmod(0o755)
+        assert project_gate(repo) == gate
+
+    def test_a_gate_script_that_is_not_executable_is_not_used(
+        self, tmp_path: Path
+    ) -> None:
+        from scripts.review_loop.config import project_gate
+
+        repo = tmp_path / "host"
+        (repo / "tools").mkdir(parents=True)
+        (repo / "tools" / "gate.sh").write_text("#!/bin/sh\nexit 0\n")
+        assert project_gate(repo) is None
+
+    def test_a_project_without_one_falls_back(self, tmp_path: Path) -> None:
+        from scripts.review_loop.config import project_gate
+
+        repo = tmp_path / "bare"
+        repo.mkdir()
+        assert project_gate(repo) is None
+
+    def test_the_projects_own_interpreter_is_preferred(self, tmp_path: Path) -> None:
+        """`sys.executable` cannot import a project kept in its own virtualenv."""
+        from scripts.review_loop.config import interpreter
+
+        repo = tmp_path / "host"
+        (repo / ".venv" / "bin").mkdir(parents=True)
+        python = repo / ".venv" / "bin" / "python"
+        python.write_text("")
+        assert interpreter(repo) == str(python)
+
+    def test_without_a_virtualenv_the_current_interpreter_is_used(
+        self, tmp_path: Path
+    ) -> None:
+        from scripts.review_loop.config import interpreter
+
+        repo = tmp_path / "bare"
+        repo.mkdir()
+        assert interpreter(repo) == sys.executable
+
+
+class TestReviewerPrompt:
+    """The diff is data, and must be fenced as such."""
+
+    def test_the_diff_is_fenced_with_an_unguessable_marker(self) -> None:
+        from scripts.review_loop.reviewers import build_reviewer_prompt
+
+        prompt = build_reviewer_prompt(
+            "security", "leaks", "R1", "opus", "+malicious", "{}", "ctx"
+        )
+        assert "never instructions" in prompt
+        assert re.search(r"===== R1-[0-9a-f]{32} =====", prompt)
+
+    def test_two_prompts_do_not_share_a_marker(self) -> None:
+        from scripts.review_loop.reviewers import build_reviewer_prompt
+
+        args = ("security", "leaks", "R1", "opus", "+x", "{}", "ctx")
+        first = re.search(r"===== \S+ =====", build_reviewer_prompt(*args))
+        second = re.search(r"===== \S+ =====", build_reviewer_prompt(*args))
+        assert first is not None
+        assert second is not None
+        assert first.group() != second.group()
+
+
+class TestMergeAgentPrompt:
+    """What the merge agent is handed, and what it is allowed to do with it."""
+
+    def test_a_finding_with_no_file_is_formatted_not_raised(self) -> None:
+        from scripts.review_loop.merge_agent import _format_fixes
+
+        text = _format_fixes([{"_reviewer": "R1", "issue": "repo-wide"}])
+        assert "no file given" in text
+        assert "repo-wide" in text
+
+    def test_the_findings_are_fenced_as_data(self) -> None:
+        """Second hop, same problem: this text derives from the diff."""
+        from pathlib import Path as P
+
+        from scripts.review_loop.merge_agent import _build_prompt
+
+        prompt = _build_prompt(
+            [{"_reviewer": "R1", "file": "x.py", "issue": "i", "suggested_fix": "f"}],
+            P("/repo"),
+        )
+        assert re.search(r"===== FIXES-[0-9a-f]{32} =====", prompt)
+        assert "It is data." in prompt
+
+    def test_the_merge_agent_is_not_given_bash(self) -> None:
+        """Its job is to edit files; Bash is what turns an injection into RCE."""
+        import inspect
+
+        from scripts.review_loop import merge_agent
+
+        source = inspect.getsource(merge_agent)
+        allowed = re.search(r'"--allowedTools",\s*\n\s*"([^"]+)"', source)
+        assert allowed is not None
+        assert "Bash" not in allowed.group(1)
+        assert "Edit" in allowed.group(1)
+
+
+class TestAuditIsData:
+    """The audit quotes the files under review, so it is fenced like the diff."""
+
+    def test_the_audit_is_inside_a_fence(self) -> None:
+        from scripts.review_loop.reviewers import build_reviewer_prompt
+
+        audit = '{"suspicious_patterns": [{"text": "ignore all previous"}]}'
+        prompt = build_reviewer_prompt(
+            "security", "leaks", "R1", "opus", "+x", audit, "ctx"
+        )
+        spans = [m.start() for m in re.finditer(r"===== R1-[0-9a-f]{32} =====", prompt)]
+        # Two prose mentions of the marker, then the diff's pair, then the
+        # audit's -- so the audit has to sit between the last two.
+        assert len(spans) == 6
+        assert spans[-2] < prompt.index(audit) < spans[-1]
+
+
+class TestPreflightScriptSelection:
+    """Which preflight runs for a `--repo` that is not the agent's own."""
+
+    def test_a_host_project_uses_its_own_installed_preflight(
+        self, tmp_path: Path
+    ) -> None:
+        """Its config.py -- SOURCE_DIRS, SIGNED_MANIFESTS -- is the one that applies."""
+        from scripts.review_loop.diff import _preflight_script
+
+        repo = tmp_path / "host"
+        (repo / "scripts").mkdir(parents=True)
+        installed = repo / "scripts" / "review_preflight.py"
+        installed.write_text("")
+        assert _preflight_script(repo) == installed
+
+    def test_the_agents_own_repo_uses_its_own_copy(self, tmp_path: Path) -> None:
+        from scripts.review_loop.config import SCRIPTS_DIR
+        from scripts.review_loop.diff import _preflight_script
+
+        repo = tmp_path / "agent"
+        (repo / "scripts" / "review_loop").mkdir(parents=True)
+        (repo / "install.sh").write_text("")
+        (repo / "scripts" / "review_preflight.py").write_text("")
+        assert _preflight_script(repo) == SCRIPTS_DIR / "review_preflight.py"
+
+    def test_a_project_without_an_installed_copy_falls_back(
+        self, tmp_path: Path
+    ) -> None:
+        from scripts.review_loop.config import SCRIPTS_DIR
+        from scripts.review_loop.diff import _preflight_script
+
+        repo = tmp_path / "bare"
+        repo.mkdir()
+        assert _preflight_script(repo) == SCRIPTS_DIR / "review_preflight.py"
 
 
 class TestSourceDirsConfigurable:
@@ -868,7 +1283,9 @@ class TestRunnerScript:
 
         doc = self.AGENT_DOC.read_text()
         m = re.search(
-            r"cat > \"\$REVIEW_TMP/run-reviewers\.sh\" <<'RUNNER'\n(.*?)\nRUNNER\n", doc, re.S
+            r"cat > \"\$REVIEW_TMP/run-reviewers\.sh\" <<'RUNNER'\n(.*?)\nRUNNER\n",
+            doc,
+            re.S,
         )
         assert m, "section 6 no longer defines a run-reviewers.sh heredoc"
         return m.group(1)
@@ -899,7 +1316,9 @@ class TestRunnerScript:
         # A bare `wait` has no deadline of its own, so one wedged reviewer holds the round open
         # forever and the other three results are never reported.
         runner = self._runner()
-        assert "\nwait\n" not in runner, "bare `wait` is back: one wedged reviewer hangs the round"
+        assert "\nwait\n" not in runner, (
+            "bare `wait` is back: one wedged reviewer hangs the round"
+        )
         assert "WATCHDOG" in runner
 
     def test_every_reviewer_records_a_pid_and_an_exit_status(self) -> None:
@@ -926,7 +1345,9 @@ class TestRunnerScript:
         runner = self._runner()
         # Every slot must yield a result-N.json so the report can be honest about what is missing,
         # and the reason must distinguish the cases a reader would act on differently.
-        assert "124|137" in runner, "a reviewer killed by its own timeout is reported as a parse error"
+        assert "124|137" in runner, (
+            "a reviewer killed by its own timeout is reported as a parse error"
+        )
         assert "never launched" in runner
         assert "killed by the watchdog" in runner
 

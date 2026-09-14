@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent
@@ -43,3 +45,36 @@ def diff_pathspec(repo: Path) -> list[str]:
     if is_agent_repo(repo):
         return ["."]
     return [".", *(f":(exclude){path}" for path in VENDORED_PATHS)]
+
+
+#: A project that ships its own gate knows better than this one does what its
+#: gate is. Checked in order; the first that exists and is executable replaces
+#: the four built-in steps entirely.
+GATE_SCRIPTS: tuple[str, ...] = (
+    "tools/gate.sh",
+    "scripts/gate.sh",
+    "gate.sh",
+)
+
+
+def project_gate(repo: Path) -> Path | None:
+    """The project's own gate script, if it has one."""
+    for candidate in GATE_SCRIPTS:
+        path = repo / candidate
+        if path.is_file() and os.access(path, os.X_OK):
+            return path
+    return None
+
+
+def interpreter(repo: Path) -> str:
+    """The Python that can import the project under review.
+
+    ``sys.executable`` is this agent's interpreter, which for any project with
+    its own virtualenv -- uv, poetry, plain venv -- cannot import the package
+    being reviewed. Running ``python -m pytest`` with it collected nothing but
+    ``ModuleNotFoundError``, so both the coverage measurement and the mandatory
+    gate reported failure for every such project, and no round could ever
+    commit.
+    """
+    venv = repo / ".venv" / "bin" / "python"
+    return str(venv) if venv.is_file() else sys.executable

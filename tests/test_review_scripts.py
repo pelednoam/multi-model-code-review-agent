@@ -138,8 +138,14 @@ class TestScrubDiff:
         assert code == 1
 
     def test_a_key_block_does_not_swallow_the_rest_of_the_diff(self) -> None:
+        """The state machine, not the path rule.
+
+        This used to use `k.pem`, which `_is_secret_file` now redacts whole --
+        so the assertion would have passed or failed for the wrong reason. A
+        key pasted into a document is where the block logic actually matters.
+        """
         diff = (
-            "diff --git a/k.pem b/k.pem\n"
+            "diff --git a/docs/setup.md b/docs/setup.md\n"
             "+-----BEGIN PRIVATE KEY-----\n"
             "+AAAA\n"
             "+-----END PRIVATE KEY-----\n"
@@ -147,6 +153,24 @@ class TestScrubDiff:
         )
         stdout, _, _ = self._run_scrub(diff)
         assert "+after the key" in stdout
+
+    def test_a_pem_file_is_redacted_to_its_last_line(self) -> None:
+        """Including whatever follows the END banner.
+
+        The block logic stops at `END`; the path rule does not, and in a file
+        that *is* key material there is nothing after it worth a reviewer's
+        eyes.
+        """
+        diff = (
+            "diff --git a/k.pem b/k.pem\n"
+            "+-----BEGIN PRIVATE KEY-----\n"
+            "+AAAA\n"
+            "+-----END PRIVATE KEY-----\n"
+            "+after the key\n"
+        )
+        stdout, _, code = self._run_scrub(diff)
+        assert "after the key" not in stdout
+        assert code == 1
 
     def test_an_unterminated_key_block_ends_at_the_next_file(self) -> None:
         """A truncated key must not redact every following file wholesale."""
@@ -389,6 +413,80 @@ class TestScrubDiff:
             "@@ -1 +1 @@\n"
             "+API_HOST=localhost\n"
         )
+        stdout, _, code = self._run_scrub(diff)
+        assert stdout == diff
+        assert code == 0
+
+    def test_a_file_that_is_entirely_a_credential_is_redacted_by_path(self) -> None:
+        """No content pattern can catch this.
+
+        Written after a review shipped one: a project keeping its server token
+        in `data/token` added the file in a branch, the diff went to four model
+        providers, and every pattern here matched nothing. There is no
+        `token =` for a keyword pattern to see, and a 43-character base64url
+        blob carries no vendor prefix for a shape pattern to see. The scrubber
+        exited 0 and called it clean.
+        """
+        diff = (
+            "diff --git a/data/token b/data/token\n"
+            "new file mode 100600\n"
+            "--- /dev/null\n"
+            "+++ b/data/token\n"
+            "@@ -0,0 +1 @@\n"
+            "+ZbSkuZvQTHh3wnGcs7PDHkM6ccH3EIdcBji_vFNFCg\n"
+        )
+        stdout, _, code = self._run_scrub(diff)
+        assert "ZbSkuZvQTHh3" not in stdout
+        assert code == 1
+        # The structure survives, so a reviewer still sees which file changed.
+        assert "+++ b/data/token" in stdout
+
+    def test_a_secret_file_in_a_combined_diff_is_redacted_too(self) -> None:
+        """`diff --cc` carries bare paths with no `a/`/`b/` prefix, and the
+        section still holds the file's contents. `_is_safe_file` reads only
+        prefixed words, which is right for a bypass and wrong for a refusal.
+        """
+        diff = (
+            "diff --cc data/token\n"
+            "@@@ -1,1 -1,1 +1,1 @@@\n"
+            "++a-live-token-value-0123456789abcd\n"
+        )
+        stdout, _, code = self._run_scrub(diff)
+        assert "a-live-token-value" not in stdout
+        assert code == 1
+
+    def test_a_secret_file_renamed_to_an_innocent_name_is_still_redacted(self) -> None:
+        """Either side naming key material is enough. A rename is a way to move
+        a token's content into a file called `notes.txt`, and the content is the
+        secret either way.
+        """
+        diff = (
+            "diff --git a/data/token b/data/notes.txt\n"
+            "similarity index 100%\n"
+            "@@ -1 +1 @@\n"
+            "+a-live-token-value-0123456789abcd\n"
+        )
+        stdout, _, code = self._run_scrub(diff)
+        assert "a-live-token-value" not in stdout
+        assert code == 1
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "src/token.py",
+            "src/tokens.json",
+            "docs/token-design.md",
+            ".env.example",
+            "keys/server.pub",
+        ],
+    )
+    def test_a_file_that_merely_sounds_like_a_credential_is_left_alone(self, path: str) -> None:
+        """The cost of a false positive here is a reviewer losing a whole file.
+
+        `token.py` is a parser in half the projects that have one, and a public
+        key is public -- redacting it buys nothing and costs context.
+        """
+        diff = f"diff --git a/{path} b/{path}\n@@ -1 +1 @@\n+def parse(text):\n"
         stdout, _, code = self._run_scrub(diff)
         assert stdout == diff
         assert code == 0

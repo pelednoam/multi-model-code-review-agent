@@ -1675,13 +1675,24 @@ class TestHostConfig:
             assert preflight_config._dirs("source_dirs", ["src/"]) == ["src/"]
 
     @pytest.mark.parametrize(
-        "body", ["{not json", "[]", '{"source_dirs": "packages/"}', '{"source_dirs": []}']
+        "body",
+        [
+            "{not json",
+            "[]",
+            '{"source_dirs": "packages/"}',
+            '{"source_dirs": []}',
+            '{"source_dirs": [7, "", null]}',
+        ],
     )
-    def test_an_unusable_host_config_keeps_the_defaults(
-        self, tmp_path: Path, body: str
+    def test_an_unusable_host_config_keeps_the_defaults_and_says_so(
+        self, tmp_path: Path, body: str, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """A review that refuses to start over a stray comma is worse than one
-        that runs with the defaults.
+        that runs with the defaults -- but silence is worse than either.
+
+        A host writes this file precisely because the defaults do not cover its
+        layout, so falling back to them without a word recreates the blind
+        coverage gate the file exists to prevent.
         """
         from scripts.preflight import config as preflight_config
 
@@ -1689,6 +1700,17 @@ class TestHostConfig:
         where.write_text(body, encoding="utf-8")
         with mock.patch.object(preflight_config, "HOST_CONFIG", where):
             assert preflight_config._dirs("source_dirs", ["src/"]) == ["src/"]
+        assert "using the agent's defaults" in capsys.readouterr().err
+
+    def test_an_absent_host_config_says_nothing(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Most projects do not have one, and that is not a problem."""
+        from scripts.preflight import config as preflight_config
+
+        with mock.patch.object(preflight_config, "HOST_CONFIG", tmp_path / "absent.json"):
+            assert preflight_config._dirs("source_dirs", ["src/"]) == ["src/"]
+        assert capsys.readouterr().err == ""
 
     def test_entries_that_are_not_strings_are_dropped(self, tmp_path: Path) -> None:
         from scripts.preflight import config as preflight_config

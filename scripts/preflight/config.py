@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -33,23 +34,54 @@ HOST_CONFIG = REPO_ROOT / "review-config.json"
 def _overrides() -> dict[str, object]:
     """Whatever the host project put in ``review-config.json``.
 
-    Empty on anything unreadable rather than raising: this is configuration for
-    a review, and a review that refuses to start over a stray comma is worse
-    than one that runs with the defaults and says so.
+    Defaults on anything unreadable rather than raising: this is configuration
+    for a review, and one that refuses to start over a stray comma is worse
+    than one that runs with the defaults.
+
+    But it *says so*, on stderr, and that is the whole difference. A host
+    writes this file precisely because the defaults do not cover its layout, so
+    falling back to them in silence recreates the blind coverage gate the file
+    exists to prevent -- which is the failure this whole mechanism was written
+    for, one level up.
     """
+    if not HOST_CONFIG.exists():
+        return {}
     try:
         loaded = json.loads(HOST_CONFIG.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError) as exc:
+        _complain(f"could not be read ({type(exc).__name__}: {exc})")
         return {}
-    return loaded if isinstance(loaded, dict) else {}
+    if not isinstance(loaded, dict):
+        _complain(f"is a {type(loaded).__name__}, not an object")
+        return {}
+    return loaded
+
+
+def _complain(problem: str) -> None:
+    """Say on stderr that the host config is being ignored, and why."""
+    print(
+        f"WARNING: {HOST_CONFIG.name} {problem}; using the agent's defaults, "
+        "which probably do not cover this project's layout.",
+        file=sys.stderr,
+    )
 
 
 def _dirs(name: str, fallback: list[str]) -> list[str]:
     """A list-of-directories setting, from the host config or the default."""
     found = _overrides().get(name)
-    if not isinstance(found, list) or not found:
+    if found is None:
         return fallback
-    return [str(entry) for entry in found if isinstance(entry, str) and entry]
+    if not isinstance(found, list):
+        _complain(f"has a {name!r} that is not a list")
+        return fallback
+    kept = [entry for entry in found if isinstance(entry, str) and entry.strip()]
+    if not kept:
+        # An empty list, or one filtered down to nothing, is not a setting --
+        # and returning it would leave the gate matching no directory at all,
+        # which is worse than the wrong directories.
+        _complain(f"has no usable entries in {name!r}")
+        return fallback
+    return kept
 
 # Map logical names to repo-relative paths of JSON artifacts whose
 # contents should be audited.

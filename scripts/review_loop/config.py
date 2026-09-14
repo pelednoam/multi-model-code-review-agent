@@ -42,6 +42,11 @@ TEST_TIMEOUT = 300
 #: own source. Kept in sync with install.sh by a test.
 VENDORED_PATHS: tuple[str, ...] = (
     ".claude/agents/ensemble-review.md",
+    # Copied into host projects by install.sh, so a host project reviewing
+    # itself was reviewing this document -- which is not its code, has not
+    # changed, and is 100 lines of budget spent on the agent's own manual.
+    # The drift test caught it the moment the installer learned to copy it.
+    "docs/codex-sandbox.md",
     "docs/ensemble_review_result_schema.json",
     "scripts/scrub_diff.py",
     "scripts/review_preflight.py",

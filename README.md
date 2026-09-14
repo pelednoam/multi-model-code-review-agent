@@ -241,6 +241,7 @@ like a live key — `sk-ant-…`, `AKIA…`, `ghp_…`, a PEM block — is redac
 says, because a comment calling one a fixture is exactly what somebody would write to get a
 key past a scrubber.
 | 9 | **Scrubber failed** | `scrub_diff.py` aborted part-way through. The patch on disk is truncated and its tail was never scrubbed, so it is not shown to a reviewer. Nothing needs rotating; fix the input or the environment and re-run |
+| 10 | **Report only** | `--report-only` was set and there are blocking findings. Nothing was changed; read them and fix them yourself |
 
 **Watching a round.** Four models on a large diff is fifteen minutes, and the
 loop used to say nothing during it. It now prints a line every 30 seconds
@@ -250,13 +251,36 @@ naming who is still working and how much they have written:
   ...4m30s · R1(claude) done · R2(codex) 736K · R3(claude) done · R4(claude) 12K
 ```
 
-Output size is the only progress signal these CLIs give -- a reviewer that is
-thinking writes nothing, one that is working grows its file -- and both streams
-count, because `codex` reports progress on stderr and its result on stdout, so
-its stdout stays empty until the very end and it looked hung. If you need to
+Two signals, because neither alone covers both kinds of backend. **Output size**
+works for `codex`, which streams progress to stderr while it thinks -- and both
+streams count, because it writes its *result* to stdout, so stdout stays empty
+until the very end and it looked hung for its whole run. **CPU time** is there
+for `claude -p --output-format json`, which buffers everything and writes at the
+end: its output is 0 bytes from start to finish, so size cannot tell "thinking"
+from "hung". A slot burning CPU between reports is marked `busy`. If you need to
 check from another terminal, the round directory is the truth: mtimes on
 `raw-N.txt` and `stderr-N.txt` say who is moving. The process table does not,
 because `pgrep claude` finds every other session on the machine.
+
+**A reviewer that answers in prose has still reviewed something.** The commonest
+way a reviewer fails is not finding nothing -- it is finding something and
+describing it in a paragraph, which the parser cannot use. That used to be
+reported as `NO RESULT`, indistinguishable from a crash, and the text was left
+in `raw-N.txt` for nobody to read. One slot was binned that way while carrying a
+correct finding about twelve duplicated test functions. The summary now
+distinguishes the two and shows what was actually said:
+
+```
+  NOT JSON   -> R3 answered in prose, so it has no findings the loop
+                can act on. It still said something -- read it:
+                test_app_sockets.py duplicates 12 of the 15 tests already in
+                test_app.py verbatim, which doubles runtime for no added coverage
+                (in full: .../round-1/raw-3.txt)
+```
+
+The prompt also now says what to do when there is nothing to report -- an empty
+findings list -- and that prose is discarded unread, because a reviewer that
+knows its summary will be thrown away has a reason to use the schema.
 
 **A reviewer that found nothing has not reviewed anything.** `Results: 3/4
 reviewers succeeded` used to count a valid-JSON-with-no-findings return as a
@@ -356,6 +380,7 @@ Common patterns:
 | Goal | Flags |
 |---|---|
 | One-shot: review + fix + gate, then stop | `--max-rounds 1` |
+| Findings only -- you do the fixing | `--report-only` (exits 10 when there are any) |
 | Iterate locally without polluting git | omit `--auto-commit`, inspect each round's working tree |
 | CI gate enforcement only | use the loop with `--max-rounds 1`; the gate runs unconditionally |
 | Long autonomous session | `--max-rounds 10 --auto-commit` |
@@ -364,6 +389,12 @@ Common patterns:
 
 - **Quick mode**: every commit -- catch obvious problems, ~30s
 - **Full mode**: pre-merge gate -- cross-provider diversity, ~3 min
+- **Report only** (`--report-only`): when you want four models' findings and
+  nothing else. The merge agent never runs and the working tree is untouched,
+  so the findings arrive as findings rather than tangled up with a diff you
+  did not ask for. Good for: a codebase where you do not want the merge
+  agent's judgement, a milestone review you intend to fix by hand, or any
+  review where the fixes need a person.
 - **Convergence loop**: when you want the agent to *finish* the
   review-and-fix cycle, not just identify problems. Good for: large
   refactors, post-rebase cleanup, "make this PR mergeable", catching

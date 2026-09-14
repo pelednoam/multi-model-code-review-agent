@@ -72,6 +72,13 @@ def build_reviewer_prompt(
         '"blocking":false,"suggested_fix":"<concrete before/after code>",'
         '"repro_command":null,"contract_reference":null}],'
         '"overall_assessment":"<2-3 sentences>"}'
+        # Said explicitly because the commonest way a reviewer fails is not
+        # finding nothing -- it is finding something and describing it in
+        # prose, which the loop cannot parse and therefore discards. One slot
+        # wrote a correct finding about duplicated tests in a paragraph and was
+        # recorded as having returned nothing at all.
+        " Findings may be an empty list; prose instead of this object is"
+        " discarded unread, so report even a single finding inside it."
     )
     # The diff is the material under review: contributor-controlled text, and
     # on an open repository attacker-controlled. Spliced in with a bare `DIFF:`

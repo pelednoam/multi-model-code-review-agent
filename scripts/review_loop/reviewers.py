@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import os
+import signal
 import subprocess
 import time
 import uuid
 from typing import IO, TYPE_CHECKING
 
-from .config import POLL_INTERVAL, PROGRESS_INTERVAL, REVIEWER_TIMEOUT
+from .config import (
+    LATE_RESULT_GRACE,
+    POLL_INTERVAL,
+    PROGRESS_INTERVAL,
+    reviewer_timeout,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -302,6 +309,9 @@ def _launch_one(
         text=True,
         encoding="utf-8",
         errors="replace",
+        # Its own process group, so a timeout can take down the helpers a CLI
+        # started rather than orphaning them to finish unread.
+        start_new_session=True,
     )
     if cmd[0] in _stdin_backends():
         assert proc.stdin is not None  # PIPE guaranteed above
@@ -341,18 +351,22 @@ def launch_reviewers(
         )
         if tracked is not None:
             procs.append(tracked)
-    _await_reviewers(procs, round_dir)
+    _await_reviewers(procs, round_dir, diff.count("\n") + 1)
 
 
-def _await_reviewers(procs: list[ReviewerProc], round_dir: Path) -> None:
+def _await_reviewers(procs: list[ReviewerProc], round_dir: Path, n_lines: int) -> None:
     """Wait for every reviewer, reporting who is still working.
 
     One deadline for the whole round, not one per reviewer. `proc.wait(timeout)`
     per slot in turn gave each its own fresh budget starting when its turn came,
     so a reviewer behind a slow one silently got double the timeout and
     "TIMEOUT after 600s" was printed after fifteen real minutes.
+
+    The deadline scales with the diff, because the reviewer that runs out of
+    time is the one with the most to say.
     """
-    deadline = time.monotonic() + REVIEWER_TIMEOUT
+    budget = reviewer_timeout(n_lines)
+    deadline = time.monotonic() + budget
     started = time.monotonic()
     pending = {slot: tracked for tracked in procs for slot in (tracked[0],)}
     last_report = 0.0
@@ -372,17 +386,72 @@ def _await_reviewers(procs: list[ReviewerProc], round_dir: Path) -> None:
             break
         now = time.monotonic()
         if now >= deadline:
-            for slot, tracked in pending.items():
-                _, proc, _, out_f, err_f = tracked
-                proc.kill()
-                out_f.close()
-                err_f.close()
-                print(f"  R{slot}: TIMEOUT after {REVIEWER_TIMEOUT}s")
+            _give_up(pending, round_dir, budget)
             return
         if now - last_report >= PROGRESS_INTERVAL:
             print(_progress(procs, pending, round_dir, now - started))
             last_report = now
         time.sleep(POLL_INTERVAL)
+
+
+def _give_up(pending: dict[int, ReviewerProc], round_dir: Path, budget: int) -> None:
+    """Stop waiting, and take what arrives anyway.
+
+    ``proc.kill()`` kills the process we started, which is not always the one
+    doing the work: a CLI that shells out to a helper leaves it running, and the
+    review lands minutes later. That was not theoretical -- a reviewer killed at
+    ten minutes wrote fifteen findings, four of them critical, at nineteen. The
+    loop had collected results nine minutes earlier and threw the whole review
+    away.
+
+    So: kill the process *group* where the platform has them, then keep looking
+    for a result file for a short grace period before giving up.
+    """
+    for slot, tracked in pending.items():
+        _, proc, _, out_f, err_f = tracked
+        _kill_group(proc)
+        out_f.close()
+        err_f.close()
+        print(f"  R{slot}: TIMEOUT after {budget}s")
+
+    waiting = {slot for slot in pending if not _has_result(round_dir, slot)}
+    if not waiting:
+        return
+    print(f"  ...watching {LATE_RESULT_GRACE}s for a late result from {_slots(waiting)}")
+    until = time.monotonic() + LATE_RESULT_GRACE
+    while waiting and time.monotonic() < until:
+        for slot in sorted(waiting):
+            if _has_result(round_dir, slot):
+                print(f"  R{slot}: arrived after the deadline -- kept")
+                waiting.discard(slot)
+        time.sleep(POLL_INTERVAL)
+    if waiting:
+        print(f"  {_slots(waiting)}: nothing arrived; see stderr-N.txt")
+
+
+def _slots(slots: set[int]) -> str:
+    """A set of reviewer slots, named the way the log names them."""
+    return ", ".join(f"R{slot}" for slot in sorted(slots))
+
+
+def _has_result(round_dir: Path, slot: int) -> bool:
+    """Whether this reviewer has written a result file with something in it."""
+    path = round_dir / f"result-{slot}.json"
+    return path.exists() and path.stat().st_size > 0
+
+
+def _kill_group(proc: subprocess.Popen[str]) -> None:
+    """Kill the reviewer and anything it started.
+
+    A CLI that spawns a helper leaves it running when only the parent is
+    killed, and that orphan goes on burning quota for a review nobody will
+    read. ``start_new_session`` at launch puts each reviewer in its own process
+    group so the whole tree can be taken down together.
+    """
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        proc.kill()
 
 
 def _progress(

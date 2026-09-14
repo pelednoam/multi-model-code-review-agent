@@ -837,6 +837,84 @@ class TestEmptyReviews:
         )
 
 
+class TestDiffBudget:
+    """Naming a generated file that is crowding the review out."""
+
+    def _diff(self, *files: tuple[str, int]) -> str:
+        parts = [
+            f"diff --git a/{name} b/{name}\n" + "x\n" * lines for name, lines in files
+        ]
+        return "".join(parts)
+
+    def test_a_lockfile_dominating_the_diff_is_named(self) -> None:
+        """It was 69% of a real review: four models paid to read a lockfile."""
+        from scripts.review_loop.diff import dominant_files
+
+        (note,) = dominant_files(
+            self._diff(("package-lock.json", 9000), ("app.py", 4000))
+        )
+        assert "package-lock.json is 69% of this diff" in note
+        assert "linguist-generated=true" in note
+
+    def test_a_small_diff_is_left_alone(self) -> None:
+        """Half of sixty lines is a small change, not a problem."""
+        from scripts.review_loop.diff import dominant_files
+
+        assert dominant_files(self._diff(("a.py", 30), ("b.py", 30))) == []
+
+    def test_a_balanced_large_diff_is_left_alone(self) -> None:
+        from scripts.review_loop.diff import dominant_files
+
+        assert (
+            dominant_files(self._diff(("a.py", 900), ("b.py", 900), ("c.py", 900)))
+            == []
+        )
+
+    def test_an_empty_diff_says_nothing(self) -> None:
+        from scripts.review_loop.diff import dominant_files
+
+        assert dominant_files("") == []
+
+
+class TestReviewerDeadline:
+    """How long a reviewer gets, and what happens when it runs out."""
+
+    def test_a_bigger_diff_earns_more_time(self) -> None:
+        """The reviewer that runs out is the one with the most to say."""
+        from scripts.review_loop.config import reviewer_timeout
+
+        assert reviewer_timeout(5000) > reviewer_timeout(200)
+
+    def test_there_is_a_ceiling(self) -> None:
+        from scripts.review_loop.config import REVIEWER_TIMEOUT_MAX, reviewer_timeout
+
+        assert reviewer_timeout(10_000_000) == REVIEWER_TIMEOUT_MAX
+
+    def test_the_environment_can_override_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from scripts.review_loop.config import reviewer_timeout
+
+        monkeypatch.setenv("REVIEWER_TIMEOUT", "42")
+        assert reviewer_timeout(5000) == 42
+
+    def test_a_result_that_lands_after_the_deadline_is_recognised(
+        self, tmp_path: Path
+    ) -> None:
+        """A killed reviewer's helper can outlive it and write minutes later."""
+        from scripts.review_loop.reviewers import _has_result
+
+        assert not _has_result(tmp_path, 2)
+        (tmp_path / "result-2.json").write_text("{}")
+        assert _has_result(tmp_path, 2)
+
+    def test_an_empty_result_file_is_not_a_result(self, tmp_path: Path) -> None:
+        from scripts.review_loop.reviewers import _has_result
+
+        (tmp_path / "result-2.json").write_text("")
+        assert not _has_result(tmp_path, 2)
+
+
 class TestProjectGate:
     """Whose gate the loop runs, and with which Python."""
 

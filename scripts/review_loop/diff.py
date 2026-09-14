@@ -94,8 +94,10 @@ def collect_diff(round_dir: Path, repo: Path) -> tuple[Path, int]:
             f"Scrubber stderr: {scrub_err.strip()}\n"
             f"Redacted diff saved to: {diff_path}"
         )
-    with open(diff_path, encoding="utf-8", errors="replace") as f:
-        n_lines = sum(1 for _ in f)
+    text = diff_path.read_text(encoding="utf-8", errors="replace")
+    n_lines = len(text.splitlines())
+    for note in dominant_files(text):
+        print(f"  NOTE: {note}")
     return diff_path, n_lines
 
 
@@ -141,3 +143,57 @@ def run_preflight(round_dir: Path, repo: Path) -> Path:
             f"preflight failed (no audit JSON, exit {result.returncode}): {result.stderr}"
         )
     return audit_path
+
+
+#: A single file bigger than this share of the diff is worth mentioning...
+_DOMINANT_SHARE = 0.4
+
+#: ...but only once it is big enough to matter. Half of a sixty-line diff is
+#: just a small change to one file; half of a fifteen-thousand-line one is a
+#: lockfile in front of four models.
+_DOMINANT_MINIMUM = 500
+
+
+def dominant_files(diff: str) -> list[str]:
+    """Name any single file that is most of the diff.
+
+    Reviewers are paid by the token and read in one pass, so a generated file
+    left in the diff does not just waste money -- it crowds out the code. A
+    lockfile was once 69% of a review: ten thousand lines of resolved dependency
+    tree, in front of four models, instead of the change being reviewed.
+
+    Reported rather than excluded. What counts as generated is the project's
+    call, and ``.gitattributes`` is where that call belongs.
+    """
+    sizes = _lines_per_file(diff)
+    total = sum(sizes.values())
+    if total == 0:
+        return []
+    return [
+        f"{path} is {count / total:.0%} of this diff ({count} lines). "
+        f"If it is generated, `{path} -diff linguist-generated=true` in "
+        f".gitattributes keeps it out of the review."
+        for path, count in sorted(sizes.items(), key=lambda kv: -kv[1])
+        if count / total >= _DOMINANT_SHARE and count >= _DOMINANT_MINIMUM
+    ]
+
+
+def _lines_per_file(diff: str) -> dict[str, int]:
+    """How many lines of the diff belong to each file."""
+    sizes: dict[str, int] = {}
+    current = ""
+    for line in diff.splitlines():
+        if line.startswith("diff --git "):
+            current = _path_of(line)
+            sizes.setdefault(current, 0)
+        elif current:
+            sizes[current] += 1
+    return sizes
+
+
+def _path_of(header: str) -> str:
+    """The file a `diff --git` header is about."""
+    for part in header.split():
+        if part.startswith("b/"):
+            return part[2:]
+    return header

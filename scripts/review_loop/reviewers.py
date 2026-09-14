@@ -7,7 +7,8 @@ import signal
 import subprocess
 import time
 import uuid
-from typing import IO, TYPE_CHECKING
+from pathlib import Path
+from typing import IO
 
 from .config import (
     LATE_RESULT_GRACE,
@@ -15,9 +16,6 @@ from .config import (
     PROGRESS_INTERVAL,
     reviewer_timeout,
 )
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 ReviewerProc = tuple[int, "subprocess.Popen[str]", str, IO[str], IO[str]]
 
@@ -370,6 +368,7 @@ def _await_reviewers(procs: list[ReviewerProc], round_dir: Path, n_lines: int) -
     started = time.monotonic()
     pending = {slot: tracked for tracked in procs for slot in (tracked[0],)}
     last_report = 0.0
+    cpu: dict[int, float] = {}
 
     while pending:
         for slot, tracked in list(pending.items()):
@@ -389,7 +388,7 @@ def _await_reviewers(procs: list[ReviewerProc], round_dir: Path, n_lines: int) -
             _give_up(pending, round_dir, budget)
             return
         if now - last_report >= PROGRESS_INTERVAL:
-            print(_progress(procs, pending, round_dir, now - started))
+            print(_progress(procs, pending, round_dir, now - started, cpu))
             last_report = now
         time.sleep(POLL_INTERVAL)
 
@@ -459,20 +458,66 @@ def _progress(
     pending: dict[int, ReviewerProc],
     round_dir: Path,
     elapsed: float,
+    cpu: dict[int, float],
 ) -> str:
-    """One line saying who is still working and how much they have written.
+    """One line saying who is still working, and what says so.
 
-    Output size is the only progress signal these CLIs give: a reviewer that is
-    thinking writes nothing, one that is working grows its file. Both stdout and
-    stderr count, because codex reports progress on stderr and its result on
-    stdout, so stdout stays empty until the very end.
+    Two signals, because neither alone covers both kinds of backend:
+
+    - **Output size.** `codex` streams progress to stderr, so its file grows
+      while it works. Both streams count: it writes its *result* to stdout, so
+      stdout stays empty until the very end and looked hung for its whole run.
+    - **CPU time.** `claude -p --output-format json` buffers everything and
+      writes at the end, so its output is 0 bytes from start to finish and size
+      cannot tell "thinking" from "hung". Rising CPU can.
+
+    Neither is a guarantee; together they are the difference between a line that
+    reports progress and one that reports only completion.
     """
     parts: list[str] = []
-    for slot, _proc, backend, _out, _err in procs:
-        written = _bytes_written(round_dir, slot)
-        state = f"{_size(written)}" if slot in pending else "done"
-        parts.append(f"R{slot}({backend}) {state}")
+    for slot, proc, backend, _out, _err in procs:
+        if slot not in pending:
+            parts.append(f"R{slot}({backend}) done")
+            continue
+        parts.append(f"R{slot}({backend}) {_working(round_dir, slot, proc, cpu)}")
     return f"  ...{_clock(elapsed)} · " + " · ".join(parts)
+
+
+def _working(
+    round_dir: Path, slot: int, proc: subprocess.Popen[str], cpu: dict[int, float]
+) -> str:
+    """What this reviewer has to show for itself since the last report."""
+    written = _bytes_written(round_dir, slot)
+    used = _cpu_seconds(proc.pid)
+    if used is None:
+        return _size(written)
+    burned = used - cpu.get(slot, 0.0)
+    cpu[slot] = used
+    # A tenth of a second between reports thirty seconds apart is a process
+    # waiting on a network reply, which is what these spend most of their time
+    # doing. Anything above it is work.
+    return f"{_size(written)}" if burned < _BUSY_SECONDS else f"{_size(written)} busy"
+
+
+#: CPU seconds between reports above which a reviewer is certainly working.
+_BUSY_SECONDS = 0.1
+
+
+def _cpu_seconds(pid: int) -> float | None:
+    """CPU time this process and its children have used, or None if unknowable.
+
+    Linux only, and optional by design: everything else still gets the output
+    size, which is the signal that matters for the backends that stream.
+    """
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        # The command name is parenthesised and may contain spaces, so the
+        # fields after it are what can be split safely.
+        fields = stat.rsplit(") ", 1)[1].split()
+        ticks = sum(int(fields[index]) for index in (11, 12, 13, 14))
+    except (OSError, IndexError, ValueError):
+        return None
+    return ticks / os.sysconf("SC_CLK_TCK")
 
 
 def _bytes_written(round_dir: Path, slot: int) -> int:

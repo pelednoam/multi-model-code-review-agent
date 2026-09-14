@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass, field
 import re
 import subprocess
 import sys
@@ -771,18 +772,32 @@ class TestSecretsDetected:
         assert "rotated" not in str(exc_info.value)
 
 
+@dataclass(slots=True)
+class _Dead:
+    """A process id nothing can be read for."""
+
+    pid: int = -1
+
+
+@dataclass(slots=True)
+class _Busy:
+    """A process whose CPU time can be read: this one's."""
+
+    pid: int = field(default_factory=os.getpid)
+
+
 class TestReviewerProgress:
     """Knowing which reviewers are still working, without guessing."""
 
     def test_a_working_reviewer_is_shown_with_what_it_has_written(
         self, tmp_path: Path
     ) -> None:
-        """Output size is the only progress signal these CLIs give."""
+        """Output size is the signal the streaming backends give."""
         from scripts.review_loop.reviewers import _progress
 
         (tmp_path / "stderr-2.txt").write_text("x" * 2048)
-        procs = [(1, None, "claude", None, None), (2, None, "codex", None, None)]
-        line = _progress(procs, {2: procs[1]}, tmp_path, 95.0)
+        procs = [(1, _Dead(), "claude", None, None), (2, _Dead(), "codex", None, None)]
+        line = _progress(procs, {2: procs[1]}, tmp_path, 95.0, {})
         assert "R1(claude) done" in line
         assert "R2(codex) 2K" in line
         assert "1m35s" in line
@@ -790,8 +805,36 @@ class TestReviewerProgress:
     def test_a_reviewer_that_has_written_nothing_says_so(self, tmp_path: Path) -> None:
         from scripts.review_loop.reviewers import _progress
 
-        procs = [(1, None, "gemini", None, None)]
-        assert "R1(gemini) 0B" in _progress(procs, {1: procs[0]}, tmp_path, 5.0)
+        procs = [(1, _Dead(), "gemini", None, None)]
+        assert "R1(gemini) 0B" in _progress(procs, {1: procs[0]}, tmp_path, 5.0, {})
+
+    def test_a_buffered_backend_is_shown_busy_by_its_cpu_time(
+        self, tmp_path: Path
+    ) -> None:
+        """`claude -p` writes nothing until it finishes, so size says nothing.
+
+        From start to end its output is 0 bytes, and a line that reports only
+        size cannot tell "thinking" from "hung" -- which is most of the run.
+        """
+        from scripts.review_loop.reviewers import _progress
+
+        procs = [(1, _Busy(), "claude", None, None)]
+        line = _progress(procs, {1: procs[0]}, tmp_path, 30.0, {1: 0.0})
+        assert "R1(claude) 0B busy" in line
+
+    def test_a_quiet_process_is_not_called_busy(self, tmp_path: Path) -> None:
+        """Waiting on a network reply is most of what these do."""
+        from scripts.review_loop.reviewers import _progress
+
+        procs = [(1, _Busy(), "claude", None, None)]
+        line = _progress(procs, {1: procs[0]}, tmp_path, 30.0, {1: 999.0})
+        assert "busy" not in line
+
+    def test_cpu_time_is_optional(self, tmp_path: Path) -> None:
+        """Linux only. Everywhere else the size signal still works."""
+        from scripts.review_loop.reviewers import _cpu_seconds
+
+        assert _cpu_seconds(-1) is None
 
     def test_codex_progress_is_counted_from_stderr(self, tmp_path: Path) -> None:
         """It reports progress on stderr and its result on stdout, so stdout

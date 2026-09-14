@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 import re
 import subprocess
 import sys
+from unittest import mock
 from pathlib import Path
 
 import pytest
@@ -1637,6 +1638,65 @@ class TestChosenBase:
         assert '"--base"' in source
         assert "collect_diff(round_dir, repo, base)" in source
         assert _threaded_into_the_round("args.base")
+
+
+class TestHostConfig:
+    """A host project overriding SOURCE_DIRS without editing a vendored file.
+
+    The comment on SOURCE_DIRS says "override this for monorepos" -- and
+    `install.sh` copies the file, so any override is destroyed the next time
+    the agent is re-vendored. Silently: the only symptom is a coverage gate
+    that stops covering anything. A reviewer caught exactly that, on a
+    monorepo whose code lives under `packages/*/src`.
+    """
+
+    def test_a_host_config_replaces_the_defaults(self, tmp_path: Path) -> None:
+        import importlib
+        import json
+
+        from scripts.preflight import config as preflight_config
+
+        (tmp_path / "review-config.json").write_text(
+            json.dumps({"source_dirs": ["packages/", "services/"], "test_dirs": ["spec/"]}),
+            encoding="utf-8",
+        )
+        with mock.patch.object(preflight_config, "HOST_CONFIG", tmp_path / "review-config.json"):
+            assert preflight_config._dirs("source_dirs", ["src/"]) == [
+                "packages/",
+                "services/",
+            ]
+            assert preflight_config._dirs("test_dirs", ["tests/"]) == ["spec/"]
+        importlib.reload(preflight_config)
+
+    def test_no_host_config_keeps_the_defaults(self, tmp_path: Path) -> None:
+        from scripts.preflight import config as preflight_config
+
+        with mock.patch.object(preflight_config, "HOST_CONFIG", tmp_path / "absent.json"):
+            assert preflight_config._dirs("source_dirs", ["src/"]) == ["src/"]
+
+    @pytest.mark.parametrize(
+        "body", ["{not json", "[]", '{"source_dirs": "packages/"}', '{"source_dirs": []}']
+    )
+    def test_an_unusable_host_config_keeps_the_defaults(
+        self, tmp_path: Path, body: str
+    ) -> None:
+        """A review that refuses to start over a stray comma is worse than one
+        that runs with the defaults.
+        """
+        from scripts.preflight import config as preflight_config
+
+        where = tmp_path / "review-config.json"
+        where.write_text(body, encoding="utf-8")
+        with mock.patch.object(preflight_config, "HOST_CONFIG", where):
+            assert preflight_config._dirs("source_dirs", ["src/"]) == ["src/"]
+
+    def test_entries_that_are_not_strings_are_dropped(self, tmp_path: Path) -> None:
+        from scripts.preflight import config as preflight_config
+
+        where = tmp_path / "review-config.json"
+        where.write_text('{"source_dirs": ["packages/", 7, "", null]}', encoding="utf-8")
+        with mock.patch.object(preflight_config, "HOST_CONFIG", where):
+            assert preflight_config._dirs("source_dirs", ["src/"]) == ["packages/"]
 
 
 class TestVendoredPathsMatchInstaller:

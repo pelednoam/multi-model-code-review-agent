@@ -1533,6 +1533,112 @@ class TestVendoredExclusion:
         assert "scripts/review_preflight.py" not in diff
 
 
+def _threaded_into_the_round(argument: str) -> bool:
+    """Whether ``argument`` is passed in the `_run_one_round` call.
+
+    Reads the call rather than looking for the argument immediately before the
+    closing paren. The "is it last" form broke the first time an argument was
+    added after it -- which is the one change it existed to survive.
+    """
+    source = (REPO_ROOT / "scripts" / "review_until_converged.py").read_text()
+    # The call, not the definition -- both start with the function's name.
+    start = source.index("= _run_one_round(")
+    return argument in source[start : source.index("\n        )", start)]
+
+
+class TestChosenBase:
+    """`--base`: review a range that is already on the trunk.
+
+    Without it the base is always `origin/main`, which is right while the work
+    is on a branch and wrong the moment it is pushed -- the merge-base diff
+    goes empty, the fallback picks `HEAD~1`, and "review everything I did
+    today" silently becomes "review the last commit".
+    """
+
+    def _repo(self, tmp_path: Path) -> Path:
+        """Three commits on main, so a base can name each of them."""
+        repo = tmp_path / "host"
+        (repo / "app").mkdir(parents=True)
+        subprocess.run(
+            ["git", "init", "-q", "-b", "main"], cwd=repo, check=True, env=_GIT_ENV
+        )
+        for n, line in enumerate(["base", "first", "second"]):
+            (repo / "app" / f"{line}.py").write_text(f"value = {n}\n")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True, env=_GIT_ENV)
+            subprocess.run(
+                ["git", "commit", "-q", "-m", line], cwd=repo, check=True, env=_GIT_ENV
+            )
+        return repo
+
+    def _collect(self, repo: Path, round_dir: Path, *args: str) -> str:
+        from unittest.mock import patch
+
+        from scripts.review_loop.diff import collect_diff
+
+        with patch("scripts.review_loop.diff.SCRIPTS_DIR", REPO_ROOT / "scripts"):
+            diff_path, _n = collect_diff(round_dir, repo, *args)
+        return diff_path.read_text()
+
+    def test_a_named_base_reviews_everything_since_it(self, tmp_path: Path) -> None:
+        repo = self._repo(tmp_path)
+        round_dir = tmp_path / "round"
+        round_dir.mkdir()
+        diff = self._collect(repo, round_dir, "HEAD~2")
+        assert "app/first.py" in diff
+        assert "app/second.py" in diff
+
+    def test_a_nearer_base_reviews_less(self, tmp_path: Path) -> None:
+        """The point of naming one at all."""
+        repo = self._repo(tmp_path)
+        round_dir = tmp_path / "round"
+        round_dir.mkdir()
+        diff = self._collect(repo, round_dir, "HEAD~1")
+        assert "app/second.py" in diff
+        assert "app/first.py" not in diff
+
+    def test_a_base_that_names_nothing_is_an_error(self, tmp_path: Path) -> None:
+        """Not a fallback.
+
+        A caller that named a base meant it, and quietly reviewing `HEAD~1`
+        instead is how you end up believing something was reviewed that never
+        was.
+        """
+        repo = self._repo(tmp_path)
+        round_dir = tmp_path / "round"
+        round_dir.mkdir()
+        with pytest.raises(RuntimeError, match="does not name a commit"):
+            self._collect(repo, round_dir, "no-such-ref")
+
+    def test_an_empty_diff_against_a_named_base_stays_empty(self, tmp_path: Path) -> None:
+        """"Nothing changed since there" is an answer, not a reason to review
+        something else. The `HEAD~1` fallback is for the default base only.
+        """
+        repo = self._repo(tmp_path)
+        round_dir = tmp_path / "round"
+        round_dir.mkdir()
+        assert self._collect(repo, round_dir, "HEAD").strip() == ""
+
+    def test_the_default_is_unchanged(self, tmp_path: Path) -> None:
+        """No `origin/main` here, so the default falls back to `HEAD~1` exactly
+        as it did before this flag existed.
+        """
+        repo = self._repo(tmp_path)
+        round_dir = tmp_path / "round"
+        round_dir.mkdir()
+        diff = self._collect(repo, round_dir)
+        assert "app/second.py" in diff
+        assert "app/first.py" not in diff
+
+    def test_the_flag_reaches_the_round(self) -> None:
+        """Threaded through by position; a missing argument would leave the
+        default in place and review the wrong range without saying so.
+        """
+        source = (REPO_ROOT / "scripts" / "review_until_converged.py").read_text()
+        assert '"--base"' in source
+        assert "collect_diff(round_dir, repo, base)" in source
+        assert _threaded_into_the_round("args.base")
+
+
 class TestVendoredPathsMatchInstaller:
     """VENDORED_PATHS is a hand-maintained mirror of install.sh. Pin it.
 
@@ -1890,5 +1996,4 @@ class TestReportOnly:
     def test_the_flag_reaches_the_round(self) -> None:
         """It is threaded through by position; a missing argument would leave
         the default in place and silently run the merge agent anyway."""
-        source = self._source()
-        assert "args.report_only,\n        )" in source
+        assert _threaded_into_the_round("args.report_only")

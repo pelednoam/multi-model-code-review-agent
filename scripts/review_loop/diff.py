@@ -37,21 +37,40 @@ class SecretsDetectedError(RuntimeError):
     """
 
 
-def collect_diff(round_dir: Path, repo: Path) -> tuple[Path, int]:
-    """Collect scrubbed diff against origin/main.
+#: What to diff against when the caller does not say. The common case: a
+#: branch under review, against the trunk it will land on.
+DEFAULT_BASE = "origin/main"
+
+
+def collect_diff(round_dir: Path, repo: Path, base: str = DEFAULT_BASE) -> tuple[Path, int]:
+    """Collect the scrubbed diff between ``base`` and the working tree.
+
+    ``base`` defaults to ``origin/main``, which is right while the work is on a
+    branch. It is wrong the moment the work is *pushed*: the merge-base diff is
+    then empty, this falls back to ``HEAD~1``, and a review of "everything I
+    did today" silently becomes a review of the last commit. Reviewing a
+    range that is already on the trunk -- after a merge, or before a release --
+    is a real thing to want, and there was no way to ask for it.
 
     Raises:
         SecretsDetectedError: scrub_diff.py redacted at least one line.
             The user must rotate the leaked secret and re-run.
+        RuntimeError: If ``base`` names nothing git can resolve. Deliberately
+            not a fallback: a caller that named a base meant it, and quietly
+            reviewing ``HEAD~1`` instead is how you end up believing something
+            was reviewed that never was.
     """
+    if base != DEFAULT_BASE:
+        named = _run(["git", "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"], cwd=repo)
+        if named.returncode != 0:
+            msg = f"--base {base!r} does not name a commit in this repository"
+            raise RuntimeError(msg)
     diff_path = round_dir / "diff.patch"
     # Exclude the agent's own vendored files. install.sh copies them into the
     # host project, so without this a host's first review spends most of its
     # budget -- 60% of the diff on a fresh install -- reviewing the reviewer.
     pathspec = diff_pathspec(repo)
-    git = _run(
-        ["git", "diff", "--merge-base", "origin/main", "--", *pathspec], cwd=repo
-    )
+    git = _run(["git", "diff", "--merge-base", base, "--", *pathspec], cwd=repo)
     if git.returncode != 0:
         fallback = _run(["git", "diff", "HEAD~1", "--", *pathspec], cwd=repo)
         if fallback.returncode != 0:
@@ -59,7 +78,10 @@ def collect_diff(round_dir: Path, repo: Path) -> tuple[Path, int]:
                 f"failed to collect diff: {git.stderr}\n{fallback.stderr}"
             )
         git = fallback
-    elif not git.stdout.strip():
+    elif not git.stdout.strip() and base == DEFAULT_BASE:
+        # Only for the default. An empty diff against a base somebody named is
+        # an answer -- "nothing changed since there" -- not a reason to review
+        # something else.
         git = _run(["git", "diff", "HEAD~1", "--", *pathspec], cwd=repo)
     diff_input = git.stdout or ""
     # Every hop is pinned to UTF-8 with replacement. scrub_diff.py pins its own

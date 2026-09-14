@@ -53,12 +53,28 @@ _SECRET_VALUE = r"""(?:['"][^'"]{4,}['"]|(?=[\w.\-]*\d)[\w.\-]{8,})"""
 _PEM_BEGIN = re.compile(r"(?i)BEGIN\s+[A-Z0-9 ]*PRIVATE\s+KEY")
 _PEM_END = re.compile(r"(?i)END\s+[A-Z0-9 ]*PRIVATE\s+KEY")
 
-CREDENTIAL_PATTERNS = [
+# Two kinds, and the difference decides what a human is allowed to wave away.
+#
+# KEYWORD_PATTERNS recognise a credential by the *name* next to it: `token =`,
+# `password:`, `api_key=`. They are the ones that fire on ordinary code in any
+# project where a token is a domain object, so they are the ones a reviewed
+# fixture suppression may excuse.
+KEYWORD_PATTERNS = [
     re.compile(
         r"(?i)(api[_-]?key|secret[_-]?key|access[_-]?key)\s*[:=]\s*" + _SECRET_VALUE
     ),
     re.compile(r"(?i)(password|passwd|pwd)\s*[:=]\s*" + _SECRET_VALUE),
     re.compile(r"(?i)\b(token|bearer)\s*[:=]\s*" + _SECRET_VALUE),
+    re.compile(r"(?i)client[_-]?secret\s*[:=]\s*" + _SECRET_VALUE),
+]
+
+# SHAPE_PATTERNS recognise a credential by its own shape, with no help from a
+# name: `sk-ant-...`, `AKIA...`, a PEM block, a service-account blob. Nothing
+# excuses these. A string shaped like a live key *is* a live key as far as this
+# is concerned -- a comment calling it a fixture is exactly what somebody would
+# write to smuggle one past, and a fixture that really is shaped like a key
+# should be redacted from a review diff anyway.
+SHAPE_PATTERNS = [
     _PEM_BEGIN,
     re.compile(r"(?i)(^|[\s'\"/])\.env(\.[a-z]+)?([\s'\"/]|$)"),
     re.compile(r"AKIA[0-9A-Z]{16}"),
@@ -70,10 +86,19 @@ CREDENTIAL_PATTERNS = [
     re.compile(r"ghp_[a-zA-Z0-9]{36,}"),
     re.compile(r"gho_[a-zA-Z0-9]{36,}"),
     re.compile(r"glpat-[a-zA-Z0-9\-]{20,}"),
-    re.compile(r"(?i)client[_-]?secret\s*[:=]\s*" + _SECRET_VALUE),
     re.compile(r"(?i)DefaultEndpointsProtocol=https;AccountName="),
     re.compile(r'"type"\s*:\s*"service_account"'),
 ]
+
+#: Every pattern, for callers and tests that do not care about the split.
+CREDENTIAL_PATTERNS = [*KEYWORD_PATTERNS, *SHAPE_PATTERNS]
+
+#: A line a linter flagged as a possible hardcoded credential and a person
+#: then marked as a fixture. ruff's `S105` (a name like `token` or `password`
+#: assigned a literal), `S106` (the same as a keyword argument) and `S107` (as
+#: a default) are the three checks that ask this question, so their
+#: suppressions are the three answers worth honouring.
+_REVIEWED_FIXTURE = re.compile(r"#\s*noqa:[^#\n]*\bS10[567]\b")
 
 REDACTED = "# [REDACTED: credential pattern detected]"
 _REDACTED_LINE = REDACTED + "\n"
@@ -212,8 +237,24 @@ def scrub_line(line: str, in_safe_file: bool, *, in_hunk: bool = True) -> str:
     # patterns accept, so `^`-anchored patterns could never fire on an added
     # line -- `+.env.production` went through untouched while the same text in
     # prose was redacted.
-    for pattern in CREDENTIAL_PATTERNS:
-        if pattern.search(_body(line, in_hunk=in_hunk)):
+    body = _body(line, in_hunk=in_hunk)
+    for pattern in SHAPE_PATTERNS:
+        if pattern.search(body):
+            return _redact_preserving_prefix(line)
+    # A linter already asked the keyword question and a person already answered
+    # it. `S105`/`S106`/`S107` are ruff's "possible hardcoded password", so a
+    # line carrying the suppression is one somebody looked at and called a
+    # fixture -- which is exactly the judgement this scrubber cannot make for
+    # itself, and the alternative was aborting a whole review over
+    # `TOKEN = "token-for-tests"`.
+    #
+    # Only the keyword patterns, and deliberately: the shapes above have
+    # already had their say, because a comment calling a live `sk-ant-` key a
+    # fixture is what somebody would write to smuggle one past.
+    if _REVIEWED_FIXTURE.search(body):
+        return line
+    for pattern in KEYWORD_PATTERNS:
+        if pattern.search(body):
             return _redact_preserving_prefix(line)
     return line
 

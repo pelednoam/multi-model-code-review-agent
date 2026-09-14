@@ -226,6 +226,20 @@ The loop exits on the first of:
 | 6 | Max rounds reached | `--max-rounds` (default 5) hit without convergence |
 | 7 | No reviewer results | Zero of 4 reviewers produced parseable JSON (rare, usually a CLI auth or network failure) |
 | 8 | **Secrets detected** | `scrub_diff.py` redacted at least one line. Rotate the leaked secret and re-stage the diff before re-running |
+
+**When it was not a secret.** Exit 8 aborts the whole review, so a false positive is
+expensive: `TOKEN = "token-for-tests"` in a test used to cost a round. Where ruff has already
+asked the question — `S105`, `S106`, `S107`, "possible hardcoded password" — and you have
+already answered it on that line, the answer is honoured:
+
+```python
+TOKEN = "token-for-tests"  # noqa: S105 - a test fixture, not a credential
+```
+
+Only for the patterns that recognise a credential by the *name* beside it. A string shaped
+like a live key — `sk-ant-…`, `AKIA…`, `ghp_…`, a PEM block — is redacted whatever the comment
+says, because a comment calling one a fixture is exactly what somebody would write to get a
+key past a scrubber.
 | 9 | **Scrubber failed** | `scrub_diff.py` aborted part-way through. The patch on disk is truncated and its tail was never scrubbed, so it is not shown to a reviewer. Nothing needs rotating; fix the input or the environment and re-run |
 | 10 | **Report only** | `--report-only` was set and there are blocking findings. Nothing was changed; read them and fix them yourself |
 

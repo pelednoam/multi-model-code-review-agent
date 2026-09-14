@@ -21,6 +21,12 @@ PREFLIGHT_SCRIPT = REPO_ROOT / "scripts" / "review_preflight.py"
 VALIDATE_SCRIPT = REPO_ROOT / "scripts" / "validate_review_results.py"
 SCHEMA_PATH = REPO_ROOT / "docs" / "ensemble_review_result_schema.json"
 
+# Imported as well as run as a subprocess. Most of the scrubber's behaviour is
+# about a whole diff and is tested through its real entry point below; the
+# per-line decisions are clearer asserted one line at a time.
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+import scrub_diff  # noqa: E402
+
 
 class TestScrubDiff:
     """Tests for scripts/scrub_diff.py."""
@@ -1665,6 +1671,81 @@ class TestCodexSandboxVerification:
         assert ok is False
         assert "could not start" in reason
         assert "user namespace" in reason  # points at the actual remedy
+
+
+class TestReviewedFixtures:
+    """A line a linter flagged and a person then marked as a fixture.
+
+    The scrubber cannot tell `TOKEN = "token-for-tests"` from a live
+    credential, and getting it wrong is expensive in one direction: a
+    redaction does not scrub the review, it *aborts* it. So where ruff has
+    already asked the question -- `S105`, `S106`, `S107`, "possible hardcoded
+    password" -- and somebody has already answered it on that line, the answer
+    is honoured.
+
+    Only for the patterns that recognise a credential by the *name* beside it.
+    A string shaped like a live key is not excusable, because a comment calling
+    one a fixture is exactly what somebody would write to smuggle one past.
+    """
+
+    @pytest.mark.parametrize("code", ["S105", "S106", "S107"])
+    def test_a_suppressed_keyword_match_is_kept(self, code: str) -> None:
+        line = f'+TOKEN = "token-for-tests"  # noqa: {code} - a fixture\n'
+        assert scrub_diff.scrub_line(line, False) == line
+
+    def test_a_suppression_among_others_still_counts(self) -> None:
+        line = '+TOKEN = "token-for-tests"  # noqa: E501, S105\n'
+        assert scrub_diff.scrub_line(line, False) == line
+
+    def test_the_same_line_without_the_suppression_is_redacted(self) -> None:
+        """The suppression is the whole signal, so it has to be load-bearing."""
+        line = '+TOKEN = "token-for-tests"\n'
+        assert scrub_diff.scrub_line(line, False) != line
+
+    def test_an_unrelated_suppression_does_not_count(self) -> None:
+        line = '+TOKEN = "token-for-tests"  # noqa: E501\n'
+        assert scrub_diff.scrub_line(line, False) != line
+
+    @pytest.mark.parametrize(
+        "secret",
+        [
+            "sk-ant-api03-aaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "AKIAIOSFODNN7EXAMPLE",
+            "ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "glpat-aaaaaaaaaaaaaaaaaaaaaa",
+        ],
+    )
+    def test_a_credential_shape_is_redacted_whatever_the_comment_says(
+        self, secret: str
+    ) -> None:
+        """The bypass this must not have.
+
+        A live key with `# noqa: S105` on it is what somebody writes to get a
+        key past a scrubber, deliberately or by copying a line that worked.
+        """
+        line = f'+api_key = "{secret}"  # noqa: S105 - honestly a fixture\n'
+        assert scrub_diff.scrub_line(line, False) != line
+
+    def test_a_private_key_banner_is_redacted_whatever_the_comment_says(self) -> None:
+        line = "+-----BEGIN OPENSSH PRIVATE KEY-----  # noqa: S105\n"
+        assert scrub_diff.scrub_line(line, False) != line
+
+    def test_a_dotenv_path_is_redacted_whatever_the_comment_says(self) -> None:
+        line = '+path = ".env.production"  # noqa: S105\n'
+        assert scrub_diff.scrub_line(line, False) != line
+
+    def test_the_two_pattern_lists_are_the_whole_of_the_old_one(self) -> None:
+        """Nothing may be dropped by the split, in either direction."""
+        assert set(scrub_diff.CREDENTIAL_PATTERNS) == set(
+            scrub_diff.KEYWORD_PATTERNS
+        ) | set(scrub_diff.SHAPE_PATTERNS)
+        assert not set(scrub_diff.KEYWORD_PATTERNS) & set(scrub_diff.SHAPE_PATTERNS)
+
+    def test_a_suppression_cannot_be_smuggled_in_the_diff_prefix(self) -> None:
+        """The body is what is searched, not the `+` in front of it."""
+        line = '+TOKEN = "token-for-tests"\n'
+        assert scrub_diff.scrub_line(line, False, in_hunk=True) != line
+
 
 class TestReportOnly:
     """`--report-only`: run the reviewers, write the findings, change nothing.

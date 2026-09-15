@@ -56,6 +56,7 @@ from scripts.review_loop import (  # noqa: E402
     run_gate,
     run_preflight,
     run_tests,
+    tamper,
     validate_result,
 )
 
@@ -117,8 +118,13 @@ def _run_one_round(
     audit_text = audit_path.read_text()
 
     t0 = time.time()
+    # Reviewers read and report. Some backends are only *asked* to -- hermes
+    # runs --yolo with the file toolset -- so the outcome is checked rather
+    # than the permissions, which covers a backend added tomorrow too.
+    untouched = tamper.snapshot(repo)
     launch_reviewers(round_dir, diff_text, audit_text, context, backends, prefer_hermes)
     print(f"Reviewers finished in {time.time() - t0:.0f}s")
+    tamper.report(repo, untouched)
 
     results = extract_results(round_dir)
     n_ok = sum(1 for r in results if r is not None)

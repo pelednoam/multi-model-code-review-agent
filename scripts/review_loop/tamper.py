@@ -6,12 +6,23 @@ working tree". Neither statement is enforced by the thing that makes it: a
 reviewer is a CLI agent, and what it may do is whatever its own flags allow.
 
 The claude backend is confined by ``--disallowedTools`` and was verified with a
-canary. The hermes backend runs ``--yolo`` with the ``file`` toolset, which is
-every file operation with no approval prompt -- so it can write anywhere it can
-reach, including the repository under review. It did: a 96 KB review document
-appeared in a reviewed project's ``docs/``, was swept into a commit by a
-routine ``git add -A``, and was only noticed because the secret scrubber
-flagged a fixture string inside it.
+canary; the comment in ``_claude_cmd`` records that ``--allowedTools`` alone was
+not enough. The hermes backend runs ``--yolo`` with the ``file`` toolset, which
+is every file operation with no approval prompt -- so it can write anywhere it
+can reach, including the repository under review -- and nothing checks whether
+it did.
+
+**No confirmed instance.** A 96 KB document appearing in a reviewed project's
+``docs/`` looked like one and was not: it was an outside review a person had
+put there, and attributing it to a reviewer was wrong. What remains is an
+unrestricted capability with nothing watching its outcome, plus one unexplained
+artefact -- an untracked ``analysis/provenance.py`` belonging to an entirely
+different project, sitting in this repository's own tree.
+
+Enough to justify looking; not enough to justify a prohibition. So this
+reports and does not fail the round. A capability that can write into the tree
+under review should leave a trace somebody reads, whether or not it has been
+exercised yet -- and the cost is one ``git status`` per round.
 
 Rather than chase each backend's flags, this watches the outcome. Take the
 tree's state before the reviewers run and compare it after: anything that moved

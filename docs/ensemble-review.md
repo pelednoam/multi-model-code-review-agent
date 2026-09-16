@@ -400,8 +400,11 @@ Two consequences, and neither is optional:
 1. `wait` only works on children of the CURRENT shell. Shell state does not persist between Bash
    tool calls, so a `wait` in a later call has no children and returns instantly, reporting
    success while the reviewers are still running. Launch and wait therefore go in one script.
-2. That script is run with `run_in_background: true`, which is not subject to the tool timeout and
-   re-invokes you when it exits. You do not poll it, and you do not need to.
+2. That script is run with `run_in_background: true`, which is not subject to the tool timeout, so
+   the round survives past the 600 second cap. The harness will USUALLY also re-invoke you when it
+   exits - but do not build on that, because when it does not fire you are parked next to four
+   finished result files with nothing to move them. Launch in the background, then wait for it
+   yourself in 6c.
 
 Write the whole thing to a file and run the file. Do not paste the launch block and the wait into
 separate Bash calls.
@@ -689,34 +692,60 @@ chmod +x "$REVIEW_TMP/run-reviewers.sh"
 
 ### 6b. Run it in the background, once
 
-Run with `run_in_background: true`. The harness re-invokes you when it exits, so there is nothing
-to poll and no timeout to lose the round to. Export the detection variables first: the script runs
-in its own shell and inherits nothing from the call that wrote it.
+Run with `run_in_background: true`. Export the detection variables first: the script runs in its own
+shell and inherits nothing from the call that wrote it.
 
 ```bash
 export REVIEW_TMP HAS_CLAUDE HAS_HERMES HAS_CODEX HAS_GEMINI PREFER_HERMES
 "$REVIEW_TMP/run-reviewers.sh" 2>&1 | tee "$REVIEW_TMP/round.log"
 ```
 
-When it exits, `round.log` ends with `ROUND COMPLETE` and every `result-N.json` exists, including
-synthetic ones for slots that failed. Go straight to section 7. Do not relaunch anything.
+Launch it ONCE. Everything after this point only ever reads files.
 
-### 6c. If you lose the background run
+### 6c. Then wait for it YOURSELF. Do not rely on being woken.
 
-Only if the background task is gone (the session was interrupted, or you genuinely do not know
-whether it is still going). This is safe to run repeatedly and never launches anything:
+**A completed round that nobody collects is the same outcome as a lost one.** Observed 2026-09-15:
+the round finished cleanly - `ROUND COMPLETE` in `round.log`, all four `done-N` markers `0`, all
+four `result-N.json` written - and the orchestrator sat idle beside them until a human asked what
+had happened. Nothing was lost and nothing was broken; the wake simply never arrived. This is the
+same end state 6's preamble warns about, reached from the opposite direction, and it is more
+dangerous because every artifact on disk says success.
+
+So the wake is not something to depend on. Make it the fallback and make the poll the contract:
+after launching, issue this as a NORMAL foreground Bash call with `timeout: 600000`. It launches
+nothing, reads only marker files, and is safe to run as many times as you need.
 
 ```bash
+# Files, not shell children. `wait` cannot cross tool calls - a marker on disk can, which is why
+# this works from a later call when a bare `wait` there would return instantly and lie.
+deadline=$((SECONDS + 570))
+while [ "$SECONDS" -lt "$deadline" ]; do
+  [ "$(ls "$REVIEW_TMP"/done-* 2>/dev/null | wc -l)" -ge 4 ] && break
+  grep -q "ROUND COMPLETE" "$REVIEW_TMP/round.log" 2>/dev/null && break
+  sleep 10
+done
 for num in 1 2 3 4; do
   if   [ ! -f "$REVIEW_TMP/pid-$num" ];  then echo "R$num: not launched"
   elif [ -f "$REVIEW_TMP/done-$num" ];   then echo "R$num: done (status $(cat "$REVIEW_TMP/done-$num"))"
   elif kill -0 "$(cat "$REVIEW_TMP/pid-$num")" 2>/dev/null; then echo "R$num: still running"
   else echo "R$num: process gone, no done-marker (died without being reaped)"; fi
 done
+tail -1 "$REVIEW_TMP/round.log" 2>/dev/null
 ```
 
-Report what this says rather than guessing. "Three of four are still running" is a useful thing to
-tell a waiting human; silence is not.
+A reviewer is wrapped in `timeout 600`, so a round can outlast one 570 second wait. If the output
+still says "still running", call the SAME block again - do not relaunch the runner, and do not treat
+a second wait as a sign anything is wrong.
+
+When it reports four done-markers and `ROUND COMPLETE`, go straight to section 7. `result-N.json`
+exists for every slot, including synthetic ones for slots that failed.
+
+**If you are woken by the background task before the poll returns, that is fine** - take the wake,
+skip the rest of the wait, and go to section 7. The poll exists so that the wake is an optimisation
+rather than a dependency.
+
+Report what the status lines say rather than guessing. "Three of four are still running" is a useful
+thing to tell a waiting human; silence is not.
 
 
 **Tool restriction**: Hermes uses `-t file` (best isolation). Claude CLI uses `--allowedTools "Read Grep Glob"` (read-only). Codex uses its default sandbox. Gemini uses `--approval-mode plan` (read-only). Extraction errors logged to `$REVIEW_TMP/extract-N.err`.

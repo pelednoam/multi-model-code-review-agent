@@ -74,3 +74,14 @@ def extract_results(round_dir: Path) -> list[dict[str, Any] | None]:
         d = _try_load_existing_result(result_path, i) or _extract_from_raw(round_dir, i)
         results.append(d)
     return results
+
+
+def missing_reviewers(results: list[dict[str, Any] | None]) -> list[int]:
+    """The slots (1-based, as in ``result-N.json``) whose reviewer produced nothing.
+
+    A reviewer that failed -- a revoked API key, a network drop, a timeout --
+    leaves a hole in the round, not a clean bill of health. Its findings are
+    unknown, so "no blocking findings" among the others is not convergence.
+    """
+    return [slot for slot, one in enumerate(results, start=1) if one is None]
+

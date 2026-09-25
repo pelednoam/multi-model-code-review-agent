@@ -2079,3 +2079,84 @@ class TestReportOnly:
         """It is threaded through by position; a missing argument would leave
         the default in place and silently run the merge agent anyway."""
         assert _threaded_into_the_round("args.report_only")
+
+
+class TestAMissingReviewerIsNotConvergence:
+    """A round in which a reviewer produced nothing is incomplete, not converged.
+
+    Found in use: a reviewer's API key was revoked mid-session, its slot came back
+    empty, and the three that answered had nothing blocking -- so the loop printed
+    CONVERGED and exited 0, and a quarter of the review had silently not happened.
+    `if not any(results)` only caught the case where *every* reviewer failed.
+    """
+
+    @staticmethod
+    def _round(tmp_path: Path, results: list, report_only: bool = False):
+        """One round with the reviewers stubbed out, returning (code, fingerprint, stdout)."""
+        import io
+        from contextlib import redirect_stdout
+
+        import scripts.review_until_converged as loop
+
+        diff = tmp_path / "diff.patch"
+        diff.write_text("+ a line\n")
+        audit = tmp_path / "audit.json"
+        audit.write_text("{}")
+        out = io.StringIO()
+        with (
+            mock.patch.object(loop, "collect_diff", return_value=(diff, 1)),
+            mock.patch.object(loop, "run_preflight", return_value=audit),
+            mock.patch.object(loop, "launch_reviewers"),
+            mock.patch.object(loop, "extract_results", return_value=results),
+            mock.patch.object(loop, "write_artifacts_key"),
+            mock.patch.object(loop, "describe_outputs", return_value=""),
+            redirect_stdout(out),
+        ):
+            code, fp = loop._run_one_round(
+                1, tmp_path, tmp_path, {}, "", set(), False, report_only=report_only
+            )
+        return code, fp, out.getvalue()
+
+    @staticmethod
+    def _clean(name: str) -> dict:
+        return {"reviewer": name, "findings": [{"severity": "suggestion", "issue": "x"}]}
+
+    @staticmethod
+    def _blocking(name: str) -> dict:
+        return {"reviewer": name, "findings": [{"severity": "critical", "issue": "y"}]}
+
+    def test_the_missing_slots_are_named(self) -> None:
+        from scripts.review_loop import missing_reviewers
+
+        assert missing_reviewers([self._clean("a"), None, self._clean("c"), None]) == [2, 4]
+        assert missing_reviewers([self._clean("a")] * 4) == []
+
+    def test_nothing_blocking_with_a_reviewer_missing_is_exit_11(self, tmp_path: Path) -> None:
+        results = [self._clean("a"), None, self._clean("c"), self._clean("d")]
+        code, _, said = self._round(tmp_path, results)
+        assert code == 11
+        assert "INCOMPLETE: R2 produced no result" in said
+        assert "3 of 4 reviewers" in said
+        assert "CONVERGED: only suggestions remain" not in said
+        assert "NOT CONVERGED" in said
+
+    def test_every_reviewer_answering_still_converges(self, tmp_path: Path) -> None:
+        """The contrast: the new exit is about the hole, not about suggestions."""
+        code, _, said = self._round(tmp_path, [self._clean(n) for n in "abcd"])
+        assert code == 0
+        assert "CONVERGED: only suggestions remain" in said
+        assert "INCOMPLETE" not in said
+
+    def test_blocking_findings_are_still_reported_and_the_hole_is_still_said(
+        self, tmp_path: Path
+    ) -> None:
+        """With something blocking the round goes on as before -- and says it is partial."""
+        results = [self._blocking("a"), None, self._clean("c"), self._clean("d")]
+        code, _, said = self._round(tmp_path, results, report_only=True)
+        assert code == 10
+        assert "INCOMPLETE: R2 produced no result" in said
+        assert "Blocking findings: 1" in said
+
+    def test_the_new_exit_code_is_documented(self) -> None:
+        readme = (REPO_ROOT / "README.md").read_text()
+        assert "| 11 | **Incomplete** |" in readme

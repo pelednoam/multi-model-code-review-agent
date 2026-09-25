@@ -2,7 +2,8 @@
 
 Each round: preflight audit + 4 parallel reviewers + merge agent + tests.
 Stops when:
-  - Only suggestions remain (converged)
+  - Only suggestions remain (converged) -- from every reviewer: a round in
+    which one produced nothing is incomplete, not converged (exit 11)
   - Same blocking findings appear twice in a row (stuck)
   - Tests fail after fixes (regression -- stops without rollback)
   - Max rounds reached
@@ -54,6 +55,7 @@ from scripts.review_loop import (  # noqa: E402
     describe_outputs,
     detect_backends,
     extract_results,
+    missing_reviewers,
     fingerprint,
     write_artifacts_key,
     launch_reviewers,
@@ -175,9 +177,28 @@ def _run_one_round(
         )
         return 7, previous_fp
 
+    # A reviewer that produced nothing is a hole in the round, not a pass: its
+    # findings are unknown. Said every round, and it stops a round with no
+    # blocking findings from calling itself converged -- which is exactly the
+    # round a failed reviewer produces most often, since it contributes none.
+    missing = missing_reviewers(results)
+    if missing:
+        slots = ", ".join(f"R{slot}" for slot in missing)
+        print(
+            f"\nINCOMPLETE: {slots} produced no result, so this round heard from "
+            f"{len(results) - len(missing)} of {len(results)} reviewers."
+        )
+
     blocking = collect_blocking_findings(results)
     print(f"Blocking findings: {len(blocking)} (blocking=true or critical)")
     if not blocking:
+        if missing:
+            print(
+                "\nNOT CONVERGED: nothing blocking among the reviewers that answered, "
+                "but a missing reviewer's findings are unknown. Fix what stopped it "
+                "(see its stderr file) and re-run."
+            )
+            return 11, previous_fp
         print("\nCONVERGED: only suggestions remain.")
         return 0, previous_fp
 

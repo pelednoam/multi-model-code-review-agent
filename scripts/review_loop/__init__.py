@@ -32,7 +32,7 @@ from .findings import (
 from .gate import run_gate, run_tests
 from .git_ops import commit_and_push
 from .merge_agent import apply_fixes
-from .results import extract_results
+from .results import extract_results, missing_reviewers
 from .reviewers import build_reviewer_prompt, launch_reviewers
 
 __all__ = [
@@ -56,6 +56,7 @@ __all__ = [
     "describe_outputs",
     "detect_backends",
     "extract_results",
+    "missing_reviewers",
     "fingerprint",
     "launch_reviewers",
     "run_gate",

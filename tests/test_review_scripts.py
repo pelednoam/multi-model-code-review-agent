@@ -1640,6 +1640,96 @@ class TestChosenBase:
         assert _threaded_into_the_round("args.base")
 
 
+class TestUntrackedFiles:
+    """A file nobody has `git add`-ed yet is part of the working tree.
+
+    `git diff` compares tracked files only, so a new module was absent from the
+    review while the preflight counted it -- the reviewers were paid to read a
+    branch with its most important file missing, and nothing said so.
+    """
+
+    def _repo(self, tmp_path: Path) -> Path:
+        """Two commits on main, and a `.gitignore` that hides one name."""
+        repo = tmp_path / "host"
+        (repo / "app").mkdir(parents=True)
+        subprocess.run(
+            ["git", "init", "-q", "-b", "main"], cwd=repo, check=True, env=_GIT_ENV
+        )
+        (repo / ".gitignore").write_text("hidden.txt\n")
+        for n, line in enumerate(["base", "last"]):
+            (repo / "app" / f"{line}.py").write_text(f"value = {n}\n")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True, env=_GIT_ENV)
+            subprocess.run(
+                ["git", "commit", "-q", "-m", line], cwd=repo, check=True, env=_GIT_ENV
+            )
+        return repo
+
+    def _collect(self, repo: Path, tmp_path: Path, *args: str) -> str:
+        from unittest.mock import patch
+
+        from scripts.review_loop.diff import collect_diff
+
+        round_dir = tmp_path / "round"
+        round_dir.mkdir()
+        with patch("scripts.review_loop.diff.SCRIPTS_DIR", REPO_ROOT / "scripts"):
+            diff_path, _n = collect_diff(round_dir, repo, *args)
+        return diff_path.read_text()
+
+    def test_a_new_file_nobody_added_is_reviewed(self, tmp_path: Path) -> None:
+        repo = self._repo(tmp_path)
+        (repo / "app" / "new.py").write_text("brand_new = True\n")
+        diff = self._collect(repo, tmp_path, "HEAD")
+        assert "app/new.py" in diff
+        assert "+brand_new = True" in diff
+
+    def test_an_ignored_file_stays_out(self, tmp_path: Path) -> None:
+        repo = self._repo(tmp_path)
+        (repo / "hidden.txt").write_text("not for reviewers\n")
+        assert self._collect(repo, tmp_path, "HEAD").strip() == ""
+
+    def test_an_untracked_vendored_file_stays_out(self, tmp_path: Path) -> None:
+        """The pathspec that keeps the agent out of a host's review applies to
+        new files as well as changed ones.
+        """
+        repo = self._repo(tmp_path)
+        (repo / "scripts").mkdir()
+        (repo / "scripts" / "review_preflight.py").write_text("# vendored\n")
+        (repo / "app" / "mine.py").write_text("mine = 1\n")
+        diff = self._collect(repo, tmp_path, "HEAD")
+        assert "app/mine.py" in diff
+        assert "review_preflight.py" not in diff
+
+    def test_new_files_are_the_change_the_default_base_reviews(
+        self, tmp_path: Path
+    ) -> None:
+        """With `origin/main` at HEAD the tracked diff is empty, which is when
+        the default falls back to the last commit -- a pushed branch. New files
+        mean there *is* work here, and it is what gets reviewed.
+        """
+        repo = self._repo(tmp_path)
+        subprocess.run(
+            ["git", "update-ref", "refs/remotes/origin/main", "HEAD"],
+            cwd=repo,
+            check=True,
+            env=_GIT_ENV,
+        )
+        (repo / "app" / "new.py").write_text("brand_new = True\n")
+        diff = self._collect(repo, tmp_path)
+        assert "app/new.py" in diff
+        assert "app/last.py" not in diff
+
+    def test_with_nothing_new_the_default_still_falls_back(self, tmp_path: Path) -> None:
+        """The other half, so the condition above is pinned both ways."""
+        repo = self._repo(tmp_path)
+        subprocess.run(
+            ["git", "update-ref", "refs/remotes/origin/main", "HEAD"],
+            cwd=repo,
+            check=True,
+            env=_GIT_ENV,
+        )
+        assert "app/last.py" in self._collect(repo, tmp_path)
+
+
 class TestHostConfig:
     """A host project overriding SOURCE_DIRS without editing a vendored file.
 

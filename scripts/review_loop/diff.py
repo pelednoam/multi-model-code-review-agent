@@ -45,6 +45,9 @@ DEFAULT_BASE = "origin/main"
 def collect_diff(round_dir: Path, repo: Path, base: str = DEFAULT_BASE) -> tuple[Path, int]:
     """Collect the scrubbed diff between ``base`` and the working tree.
 
+    The working tree includes files git does not track yet (``_untracked``):
+    a new module is part of the change whether or not anybody has staged it.
+
     ``base`` defaults to ``origin/main``, which is right while the work is on a
     branch. It is wrong the moment the work is *pushed*: the merge-base diff is
     then empty, this falls back to ``HEAD~1``, and a review of "everything I
@@ -70,6 +73,7 @@ def collect_diff(round_dir: Path, repo: Path, base: str = DEFAULT_BASE) -> tuple
     # host project, so without this a host's first review spends most of its
     # budget -- 60% of the diff on a fresh install -- reviewing the reviewer.
     pathspec = diff_pathspec(repo)
+    untracked = _untracked(repo, pathspec)
     git = _run(["git", "diff", "--merge-base", base, "--", *pathspec], cwd=repo)
     if git.returncode != 0:
         fallback = _run(["git", "diff", "HEAD~1", "--", *pathspec], cwd=repo)
@@ -78,12 +82,14 @@ def collect_diff(round_dir: Path, repo: Path, base: str = DEFAULT_BASE) -> tuple
                 f"failed to collect diff: {git.stderr}\n{fallback.stderr}"
             )
         git = fallback
-    elif not git.stdout.strip() and base == DEFAULT_BASE:
+    elif not git.stdout.strip() and not untracked and base == DEFAULT_BASE:
         # Only for the default. An empty diff against a base somebody named is
         # an answer -- "nothing changed since there" -- not a reason to review
-        # something else.
+        # something else. And not when there are new files: those *are* the
+        # change, and reviewing the last commit instead would review the
+        # wrong thing without saying so.
         git = _run(["git", "diff", "HEAD~1", "--", *pathspec], cwd=repo)
-    diff_input = git.stdout or ""
+    diff_input = (git.stdout or "") + untracked
     # Every hop is pinned to UTF-8 with replacement. scrub_diff.py pins its own
     # streams because CI runs under LC_ALL=C, but that was the only hop that
     # did: git's output, the pipe into the scrubber and the read-back all used
@@ -121,6 +127,42 @@ def collect_diff(round_dir: Path, repo: Path, base: str = DEFAULT_BASE) -> tuple
     for note in dominant_files(text):
         print(f"  NOTE: {note}")
     return diff_path, n_lines
+
+
+def _untracked(repo: Path, pathspec: list[str]) -> str:
+    """The files git does not track yet, as a diff that adds each one.
+
+    ``git diff`` compares *tracked* files with the base, so a module written
+    and never ``git add``-ed was absent from the review -- silently, while the
+    docstring above promised "the working tree". The preflight counted it
+    ("Untracked: 1") and the reviewers never saw a line of it: a new file is
+    the change most likely to be the whole point of a branch.
+
+    Ignored files stay out (``--exclude-standard``), and the same pathspec
+    applies, so an untracked copy of the vendored agent is still not reviewed.
+
+    Raises:
+        RuntimeError: If git cannot list the untracked files, or cannot diff
+            one of them. A review that silently dropped a file is the failure
+            this exists to end, so it does not get to happen quietly here.
+    """
+    listed = _run(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z", "--", *pathspec],
+        cwd=repo,
+    )
+    if listed.returncode != 0:
+        raise RuntimeError(f"failed to list untracked files: {listed.stderr}")
+    parts: list[str] = []
+    for name in (one for one in listed.stdout.split("\0") if one):
+        added = _run(["git", "diff", "--no-index", "--", "/dev/null", name], cwd=repo)
+        # --no-index exits 1 when the two sides differ, which a new file
+        # against /dev/null always does; anything else is git failing.
+        if added.returncode not in (0, 1):
+            raise RuntimeError(
+                f"failed to diff untracked file {name!r}: {added.stderr}"
+            )
+        parts.append(added.stdout)
+    return "".join(parts)
 
 
 def _preflight_script(repo: Path) -> Path:

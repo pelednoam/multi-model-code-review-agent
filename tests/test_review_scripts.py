@@ -2106,8 +2106,23 @@ class TestReviewedFixtures:
         line = "+-----BEGIN OPENSSH PRIVATE KEY-----  # noqa: S105\n"
         assert scrub_diff.scrub_line(line, False) != line
 
-    def test_a_dotenv_path_is_redacted_whatever_the_comment_says(self) -> None:
-        line = '+path = ".env.production"  # noqa: S105\n'
+    def test_a_reviewed_dotenv_path_reference_passes(self) -> None:
+        """Loading settings from `.env` is ordinary code, not a leak.
+
+        Unmarked, the line still stops the review; a person marking it as
+        looked-at is the same judgement `password = "..."  # noqa: S105` gets.
+        """
+        line = '+env_path = ROOT / ".env"  # noqa: S105 - a path, not a secret\n'
+        assert scrub_diff.scrub_line(line, False) == line
+
+    def test_an_unreviewed_dotenv_path_reference_is_still_redacted(self) -> None:
+        for line in ('+env_path = ROOT / ".env"\n', ' env_path = ROOT / ".env"\n'):
+            assert scrub_diff.scrub_line(line, False) != line
+
+    def test_a_reviewed_dotenv_line_carrying_a_key_is_still_redacted(self) -> None:
+        """The suppression excuses the pointer, never a key shape beside it."""
+        key = "sk-ant-api03-" + "a1B2c3D4e5" * 3
+        line = f"+echo {key} >> .env  # noqa: S105\n"
         assert scrub_diff.scrub_line(line, False) != line
 
     def test_the_two_pattern_lists_are_the_whole_of_the_old_one(self) -> None:

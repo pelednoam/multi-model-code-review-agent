@@ -94,9 +94,9 @@ _PEM_END = re.compile(r"(?i)END\s+[A-Z0-9 ]*PRIVATE\s+KEY")
 # Two kinds, and the difference decides what a human is allowed to wave away.
 #
 # KEYWORD_PATTERNS recognise a credential by the *name* next to it: `token =`,
-# `password:`, `api_key=`. They are the ones that fire on ordinary code in any
-# project where a token is a domain object, so they are the ones a reviewed
-# fixture suppression may excuse.
+# `password:`, `api_key=` -- or by naming the file credentials live in. They
+# are the ones that fire on ordinary code in any project where a token is a
+# domain object, so they are the ones a reviewed fixture suppression may excuse.
 KEYWORD_PATTERNS = [
     re.compile(
         r"(?i)(api[_-]?key|secret[_-]?key|access[_-]?key)\s*[:=]\s*" + _SECRET_VALUE
@@ -104,6 +104,13 @@ KEYWORD_PATTERNS = [
     re.compile(r"(?i)(password|passwd|pwd)\s*[:=]\s*" + _SECRET_VALUE),
     re.compile(r"(?i)\b(token|bearer)\s*[:=]\s*" + _SECRET_VALUE),
     re.compile(r"(?i)client[_-]?secret\s*[:=]\s*" + _SECRET_VALUE),
+    # A `.env` mention is a pointer to secrets, not a secret: `source
+    # .env.production` or `load_dotenv(ROOT / ".env")`. Worth stopping a review
+    # over, because a line that names the file is often next to one that pastes
+    # from it -- but ordinary in any app that loads its settings from one, so a
+    # reviewed suppression may excuse it. Kept as a shape, it aborted every
+    # review of such an app whose diff came within three lines of the loader.
+    re.compile(r"(?i)(^|[\s'\"/])\.env(\.[a-z]+)?([\s'\"/]|$)"),
 ]
 
 # SHAPE_PATTERNS recognise a credential by its own shape, with no help from a
@@ -114,7 +121,6 @@ KEYWORD_PATTERNS = [
 # should be redacted from a review diff anyway.
 SHAPE_PATTERNS = [
     _PEM_BEGIN,
-    re.compile(r"(?i)(^|[\s'\"/])\.env(\.[a-z]+)?([\s'\"/]|$)"),
     re.compile(r"AKIA[0-9A-Z]{16}"),
     # Hyphens included: a current key is `sk-ant-api03-...` or `sk-proj-...`,
     # and a run of plain alphanumerics stops at the first hyphen -- so the

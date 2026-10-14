@@ -107,12 +107,10 @@ def codex_is_confined() -> tuple[bool, str]:
 # denied either, so that is the model declining, not agy refusing. And there is no deny
 # list like claude's --disallowedTools; --sandbox restricts terminal commands only.
 #
-# So the boundary is the operating system's. agy runs under bubblewrap with the whole
-# filesystem read-only except two directories it needs: its own empty workspace and its
-# state directory. Measured under that wrapper with --mode=accept-edits, the worst case:
-# agy's write_to_file failed with "read-only file system". The flags below stay as
-# defence in depth, and agy_is_confined() proves the wrapper -- with no model call --
-# before the slot is used.
+# So the boundary is the operating system's: agy runs under bubblewrap (agy_sandbox).
+# Measured under it with --mode=accept-edits, the worst case, agy's own write_to_file
+# failed with "read-only file system". The flags below stay as defence in depth, and
+# agy_is_confined() proves the wrapper -- with no model call -- before the slot is used.
 AGY_SAFETY_ARGS: tuple[str, ...] = (
     "--mode=plan",
     "--sandbox",
@@ -228,7 +226,7 @@ def best_agy_model(slugs: list[str]) -> str | None:
 def agy_command(model: str, *extra: str) -> list[str]:
     """The agy invocation for a reviewer, before the sandbox wrapper.
 
-    The prompt goes in on stdin as one stream-json line (``agy_message``), not through
+    The prompt goes in on stdin as one stream-json line (``agy_review_message``), not
     ``-p``: a single argument is capped at 128 KB on Linux, which a large diff passes
     before agy even starts. agy exits once stdin closes and the turn completes.
 
@@ -252,41 +250,105 @@ def agy_command(model: str, *extra: str) -> list[str]:
 
 
 def agy_state_dir() -> _Path:
-    """Where agy keeps sign-in state, conversations and plans; it must stay writable."""
+    """Where agy keeps its sign-in, conversations, plans and helper binaries."""
     return _Path.home() / ".gemini" / "antigravity-cli"
 
 
-def agy_sandbox(workspace: _Path) -> list[str]:
-    """The bubblewrap prefix: every path read-only except the workspace and agy's state.
+#: Inside agy's state directory: what a sandboxed run gets read-only (its own helper
+#: binaries -- writable, they are a place to plant a program the next *unsandboxed* agy
+#: runs) and what it gets a per-run copy of (the sign-in token, which agy refreshes).
+_AGY_STATE_SHARED = ("bin", "builtin")
+_AGY_STATE_COPIED = ("antigravity-oauth-token",)
 
-    Kept in step with the bash launcher in docs/ensemble-review.md by a test. The
-    network is left alone -- agy is a client of a hosted model -- and so is /proc, which
-    it needs to run at all.
+#: Sockets that run code outside any sandbox for whoever can connect: docker's runs a
+#: container with the host filesystem mounted, and a read-only mount does not stop a
+#: connect(). Masked where they exist. The user's runtime directory -- the D-Bus session
+#: bus, whose systemd answers `systemd-run --user`, and other tools' sockets and tokens --
+#: is replaced wholesale, and the variables that point at any of them are unset.
+_HOST_SOCKETS = ("/run/docker.sock",)
+_SOCKET_ENV = (
+    "DBUS_SESSION_BUS_ADDRESS",
+    "SSH_AUTH_SOCK",
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "DOCKER_HOST",
+)
+
+
+def agy_seed_state(state: _Path) -> _Path:
+    """Fill a fresh directory to stand in for agy's state during one sandboxed run.
+
+    agy's real state is not mounted writable: a run that could write it could leave a
+    ``settings.json`` granting every command, for the next unsandboxed agy to obey. It
+    gets a copy of the sign-in token and nothing else; the helpers are mounted
+    read-only over it by ``agy_sandbox``. Conversations and plans land here and are
+    thrown away with it.
     """
-    state = str(agy_state_dir())
-    return [
+    real = agy_state_dir()
+    state.mkdir(parents=True, exist_ok=True)
+    for name in _AGY_STATE_COPIED:
+        if (real / name).is_file():
+            shutil.copy2(real / name, state / name)
+    return state
+
+
+def agy_sandbox(workspace: _Path, state: _Path) -> list[str]:
+    """The bubblewrap prefix agy runs under. Everything is read-only except ``workspace``.
+
+    What it closes, each measured or reported by a review of this wrapper:
+
+    - writes anywhere but the workspace (``--ro-bind / /``);
+    - the home directory, read whole -- ``~/.ssh``, cloud credentials, other tools'
+      tokens -- replaced by an empty one holding only agy and its state;
+    - agy's real state, replaced by ``state`` (see ``agy_seed_state``);
+    - host processes, and through ``/proc/<pid>/cwd`` their writable view of the
+      filesystem (``--unshare-pid``); a terminal to inject input into
+      (``--new-session``, CVE-2017-5226);
+    - sockets that run code outside the sandbox (``_HOST_SOCKETS``, the user runtime
+      directory, ``_SOCKET_ENV``).
+
+    The network is left alone: agy is a client of a hosted model. The bash launcher in
+    docs/ensemble-review.md builds its wrapper by calling this, so there is one copy.
+    """
+    home, real = _Path.home(), agy_state_dir()
+    wrap = [
         "bwrap",
-        "--ro-bind",
-        "/",
-        "/",
-        "--dev",
-        "/dev",
-        "--proc",
-        "/proc",
-        "--bind",
-        str(workspace),
-        str(workspace),
-        "--bind",
-        state,
-        state,
+        "--unshare-pid",
+        "--unshare-ipc",
+        "--new-session",
         "--die-with-parent",
-        "--",
-    ]
+        "--ro-bind", "/", "/",
+        "--dev", "/dev",
+        "--proc", "/proc",
+    ]  # fmt: skip
+    runtime = _Path(f"/run/user/{os.getuid()}")
+    if runtime.is_dir():
+        wrap += ["--tmpfs", str(runtime)]
+    for sock in _HOST_SOCKETS:
+        if _Path(sock).exists():
+            wrap += ["--ro-bind", "/dev/null", sock]
+    wrap += ["--tmpfs", str(home)]
+    exe = shutil.which("agy")
+    if exe:
+        for path in dict.fromkeys((exe, str(_Path(exe).resolve()))):
+            wrap += ["--ro-bind", str(_Path(exe).resolve()), path]
+    wrap += ["--bind", str(state), str(real)]
+    for name in _AGY_STATE_SHARED:
+        if (real / name).is_dir():
+            wrap += ["--ro-bind", str(real / name), str(real / name)]
+    wrap += ["--bind", str(workspace), str(workspace)]
+    for var in _SOCKET_ENV:
+        wrap += ["--unsetenv", var]
+    return [*wrap, "--"]
 
 
 def agy_unsandboxed() -> bool:
-    """Whether the host is trusted to confine agy itself (a disposable container)."""
-    return bool(os.environ.get("MMCRA_SKIP_AGY_SANDBOX_CHECK"))
+    """Whether the host is trusted to confine agy itself (a disposable container).
+
+    ``MMCRA_SKIP_AGY_SANDBOX_CHECK=1`` -- and not ``=0``, which reads as "do not skip"
+    and must not turn the sandbox off.
+    """
+    return os.environ.get("MMCRA_SKIP_AGY_SANDBOX_CHECK", "") not in ("", "0")
 
 
 def agy_message(prompt: str) -> str:
@@ -306,7 +368,9 @@ def agy_result(stdout: str) -> dict[str, Any] | None:
     which carries ``status``, ``response``, ``error`` on failure, and
     ``structured_output`` when ``--json-schema`` was given.
     """
-    for line in reversed(stdout.splitlines()):
+    # split("\n"), not splitlines(): NDJSON separates on newlines only, and
+    # splitlines() also breaks on U+0085 and U+2028, which JSON strings may carry raw.
+    for line in reversed(stdout.split("\n")):
         line = line.strip()
         if not line.startswith("{"):
             continue
@@ -325,12 +389,14 @@ def agy_result(stdout: str) -> dict[str, Any] | None:
 
 
 def agy_is_confined() -> tuple[bool, str]:
-    """Verify, with no model call, that agy's sandbox refuses writes outside its workspace.
+    """Verify, with no model call, the wrapper a reviewer runs agy under.
 
-    The codex check's three steps, against the exact wrapper a reviewer runs under, plus
-    a fourth: the workspace must stay writable, or agy fails in a way that looks like a
-    reviewer with nothing to say. A canary that survives because the sandbox never
-    launched is not a pass.
+    The codex check's three steps -- it runs, it reads, it refuses a write outside the
+    workspace -- then one per thing the wrapper claims to close: the workspace stays
+    writable (or agy fails looking like a reviewer with nothing to say), the home
+    directory is hidden, no host process is visible, no session bus or docker socket
+    is reachable. A canary that survives because the sandbox never launched is not a
+    pass.
     """
     if shutil.which("bwrap") is None:
         return False, (
@@ -339,14 +405,21 @@ def agy_is_confined() -> tuple[bool, str]:
             " that is already sandboxed"
         )
     try:
-        agy_state_dir().mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory() as ws, tempfile.TemporaryDirectory() as out:
+        with (
+            tempfile.TemporaryDirectory() as ws,
+            tempfile.TemporaryDirectory() as out,
+            tempfile.TemporaryDirectory() as st,
+        ):
             workspace, canary = _Path(ws), _Path(out) / "canary.txt"
             canary.write_bytes(b"original")
-            wrap = agy_sandbox(workspace)
+            wrap = agy_sandbox(workspace, agy_seed_state(_Path(st)))
 
             def sh(script: str) -> subprocess.CompletedProcess[str]:
                 return _run([*wrap, "sh", "-c", script], cwd=workspace, timeout=30)
+
+            def holds(test: str, path: str) -> bool:
+                said = sh(f"[ {test} {shlex.quote(path)} ] && echo YES").stdout or ""
+                return "YES" in said
 
             # 1. does the sandbox run anything at all?
             ran = sh("echo SANDBOX_OK")
@@ -370,9 +443,26 @@ def agy_is_confined() -> tuple[bool, str]:
             sh(f"echo ok > {shlex.quote(str(workspace / 'probe'))}")
             if not (workspace / "probe").is_file():
                 return False, "bwrap sandbox refused a write inside agy's workspace"
+            # 5. the escapes the wrapper exists to close beyond plain writes. The home
+            # directory holds nothing but what the wrapper put there on purpose.
+            home = _Path.home()
+            allowed = {
+                _Path(arg).relative_to(home).parts[0]
+                for arg in wrap
+                if arg != str(home) and _Path(arg).is_relative_to(home)
+            }
+            listed = sh(f"ls -A {shlex.quote(str(home))}").stdout or ""
+            extra = set(listed.split()) - allowed
+            if extra:
+                return False, f"bwrap sandbox shows the home dir ({sorted(extra)[0]})"
+            if holds("-e", f"/proc/{os.getpid()}"):
+                return False, "bwrap sandbox shows host processes (no --unshare-pid)"
+            for sock in (f"/run/user/{os.getuid()}/bus", *_HOST_SOCKETS):
+                if holds("-S", sock):
+                    return False, f"bwrap sandbox can reach {sock}"
     except (OSError, subprocess.TimeoutExpired) as exc:
         return False, f"agy sandbox check failed: {exc}"
-    return True, "agy sandbox verified read-only outside its workspace (no model call)"
+    return True, "agy sandbox verified (read-only, home hidden, no pids or sockets)"
 
 
 def detect_backends(verify_codex: bool = True) -> dict[str, bool]:
@@ -398,7 +488,8 @@ def detect_backends(verify_codex: bool = True) -> dict[str, bool]:
             print(f"  codex: DISABLED for review -- {reason}")
             found["codex"] = False
     if found["agy"] and not agy_enabled():
-        found["agy"] = False  # installed is not the same as in use; say which
+        print("  agy: switched off (REVIEW_USE_AGY=0)")
+        found["agy"] = False  # installed is not the same as in use
     if found["agy"]:
         if agy_model() is None:
             print("  agy: DISABLED -- there is no model to run")

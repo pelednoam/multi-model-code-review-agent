@@ -130,7 +130,7 @@ Default precedence (no Bedrock opt-in):
 |---|---|---|---|
 | Security (Opus) | Claude CLI opus (free) | Hermes Opus (Bedrock, paid) | -- |
 | Correctness | Codex CLI GPT-5.5 (free) | Claude CLI haiku (free) | Hermes Haiku (Bedrock) |
-| Readability | agy (sandboxed), else Gemini CLI (`REVIEW_USE_GEMINI=1`) | Claude CLI sonnet (free) | Hermes Sonnet (Bedrock) |
+| Readability | agy (sandboxed), else Gemini CLI (in the loop: `REVIEW_USE_GEMINI=1`) | Claude CLI sonnet (free) | Hermes Sonnet (Bedrock) |
 | Spec-contract (Opus) | Claude CLI opus (free) | Hermes Opus (Bedrock, paid) | -- |
 
 ### Bedrock opt-in (when you actually want Hermes)
@@ -155,7 +155,7 @@ When opted in, the precedence flips for Anthropic reviewers:
 |---|---|---|---|
 | Security (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
 | Correctness | Hermes Haiku (Bedrock) | Codex CLI GPT-5.5 (free) | Claude CLI haiku (free) |
-| Readability | Hermes Sonnet (Bedrock) | agy (sandboxed), else Gemini CLI (`REVIEW_USE_GEMINI=1`) | Claude CLI sonnet (free) |
+| Readability | Hermes Sonnet (Bedrock) | agy (sandboxed), else Gemini CLI (in the loop: `REVIEW_USE_GEMINI=1`) | Claude CLI sonnet (free) |
 | Spec-contract (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
 
 **With all CLIs installed** (claude + codex + agy or gemini): the full review

@@ -131,9 +131,9 @@ def _salvage(round_dir: Path, slot: int) -> str:
         # does one cut short by a refused tool call, which otherwise reads as silence.
         said = agy.get("response") or agy.get("error") or ""
         denied = [
-            d.get("display_name") or d.get("action")
+            str(d.get("display_name") or d.get("action"))
             for d in agy.get("denied_actions") or []
-            if isinstance(d, dict)
+            if isinstance(d, dict) and (d.get("display_name") or d.get("action"))
         ]
         if not said and denied:
             said = (

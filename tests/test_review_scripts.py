@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 import re
 import subprocess
 import sys
+import tempfile
 from unittest import mock
 from pathlib import Path
 
@@ -2300,6 +2301,11 @@ class TestAgyReviewer:
             raise AssertionError("a test reached the real `agy models`")
 
         monkeypatch.setattr(backends, "agy_models", unreachable)
+        # Nor the real agy state, which holds a sign-in token.
+        fake_state = Path(tempfile.mkdtemp()) / ".gemini" / "antigravity-cli"
+        (fake_state / "bin").mkdir(parents=True)
+        (fake_state / "antigravity-oauth-token").write_text("not-a-real-token")
+        monkeypatch.setattr(backends, "agy_state_dir", lambda: fake_state)
         backends._picked_agy_model.cache_clear()
         yield
         backends._picked_agy_model.cache_clear()
@@ -2544,7 +2550,7 @@ class TestAgyReviewer:
     def test_launch_is_sandboxed_outside_the_repo(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        from scripts.review_loop.backends import AGY_PREAMBLE, agy_sandbox
+        from scripts.review_loop.backends import AGY_PREAMBLE, agy_sandbox, agy_state_dir
 
         monkeypatch.delenv("MMCRA_SKIP_AGY_SANDBOX_CHECK", raising=False)
         tracked, seen = self._launch(monkeypatch, tmp_path)
@@ -2556,9 +2562,13 @@ class TestAgyReviewer:
         assert REPO_ROOT not in workspace.parents
         cmd = seen["cmd"]
         assert isinstance(cmd, list)
-        wrap = agy_sandbox(workspace)
-        assert cmd[: len(wrap)] == wrap
+        wrap = cmd[: cmd.index("--") + 1]
+        state = Path(wrap[wrap.index(str(agy_state_dir())) - 1])
+        assert wrap == agy_sandbox(workspace, state)
         assert cmd[len(wrap)] == "agy"
+        # A throwaway copy of agy's state, holding the sign-in and nothing else.
+        assert sorted(p.name for p in state.iterdir()) == ["antigravity-oauth-token"]
+        assert REPO_ROOT not in state.parents
 
         stdin = seen["stdin"]
         assert isinstance(stdin, self._Pipe)
@@ -2591,6 +2601,28 @@ class TestAgyReviewer:
         monkeypatch.setattr(reviewers.tempfile, "tempdir", str(repo / "tmp"))
         tracked, seen = self._launch(monkeypatch, tmp_path)
         assert tracked is None and not seen
+
+    def test_the_repo_under_review_is_refused_too(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # --repo can name a project that is neither this checkout nor the cwd.
+        from scripts.review_loop import reviewers
+
+        target = tmp_path / "target"
+        (target / ".tmp").mkdir(parents=True)
+        monkeypatch.setattr(reviewers.tempfile, "tempdir", str(target / ".tmp"))
+        assert reviewers._agy_workspace(target) is None
+        assert reviewers._agy_workspace(tmp_path / "elsewhere") is not None
+
+    @pytest.mark.parametrize("value", ["", "0"])
+    def test_skip_flag_zero_keeps_the_sandbox(
+        self, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        # REVIEW_USE_AGY=0 means off; MMCRA_SKIP_AGY_SANDBOX_CHECK=0 must not mean "skip".
+        from scripts.review_loop.backends import agy_unsandboxed
+
+        monkeypatch.setenv("MMCRA_SKIP_AGY_SANDBOX_CHECK", value)
+        assert agy_unsandboxed() is False
 
     # -- reading its answer ------------------------------------------------------
 
@@ -2634,6 +2666,21 @@ class TestAgyReviewer:
         )
         result = extract_results(tmp_path)[2]
         assert result is not None and result["model"] == self.MODEL
+
+    def test_a_line_separator_inside_a_string_does_not_lose_the_review(
+        self, tmp_path: Path
+    ) -> None:
+        # Valid JSON may carry U+0085 raw; str.splitlines() splits on it, NDJSON does not.
+        from scripts.review_loop.results import extract_results
+
+        review = {**self._review(), "overall_assessment": "one\u0085two"}
+        event = {"event": "result", "result": {"status": "SUCCESS", "structured_output": review}}
+        init = json.dumps({"event": "init"})
+        (tmp_path / "raw-3.txt").write_text(
+            init + "\n" + json.dumps(event, ensure_ascii=False), encoding="utf-8"
+        )
+        result = extract_results(tmp_path)[2]
+        assert result is not None and result["overall_assessment"] == "one\u0085two"
 
     @pytest.mark.parametrize("status", ["ERROR", "CANCELED", "INTERRUPTED", "WAITING"])
     def test_an_unfinished_turn_is_not_a_review(self, tmp_path: Path, status: str) -> None:
@@ -2688,7 +2735,7 @@ class TestAgyReviewer:
         )
         return done.returncode == 0
 
-    def test_the_real_sandbox_refuses_writes_outside_the_workspace(self) -> None:
+    def test_the_real_sandbox_passes(self) -> None:
         """Not a mock: the wrapper agy runs under, against the real filesystem."""
         if not self._bwrap_works():
             pytest.skip("bwrap cannot run here")
@@ -2696,6 +2743,35 @@ class TestAgyReviewer:
 
         ok, reason = agy_is_confined()
         assert ok, reason
+
+    @pytest.mark.parametrize(
+        ("drop", "caught"),
+        [
+            # Each protection, removed from the real wrapper, must fail the real check.
+            (("--unshare-pid",), "host processes"),
+            (("--tmpfs", "HOME"), "home dir"),
+        ],
+    )
+    def test_the_real_check_catches_a_weakened_wrapper(
+        self, monkeypatch: pytest.MonkeyPatch, drop: tuple[str, ...], caught: str
+    ) -> None:
+        if not self._bwrap_works():
+            pytest.skip("bwrap cannot run here")
+        from scripts.review_loop import backends
+
+        real = backends.agy_sandbox
+        target = tuple(str(Path.home()) if a == "HOME" else a for a in drop)
+
+        def weakened(ws: Path, st: Path) -> list[str]:
+            wrap = real(ws, st)
+            for i in range(len(wrap) - len(target) + 1):
+                if tuple(wrap[i : i + len(target)]) == target:
+                    return wrap[:i] + wrap[i + len(target) :]
+            raise AssertionError(f"{target} is not in the wrapper")
+
+        monkeypatch.setattr(backends, "agy_sandbox", weakened)
+        ok, reason = backends.agy_is_confined()
+        assert not ok and caught in reason
 
     @staticmethod
     def _unconfined(cmd: list[str], **kw: object) -> subprocess.CompletedProcess[str]:
@@ -2769,8 +2845,11 @@ class TestAgyReviewer:
         monkeypatch.setattr(backends, "_run", record)
         backends.agy_is_confined()
         (first,) = calls  # it stops at "could not start"
-        workspace = Path(first[first.index("--bind") + 1])
-        assert first[: first.index("--") + 1] == backends.agy_sandbox(workspace)
+        wrap = first[: first.index("--") + 1]
+        state = Path(wrap[wrap.index(str(backends.agy_state_dir())) - 1])
+        last_bind = len(wrap) - 1 - wrap[::-1].index("--bind")
+        workspace = Path(wrap[last_bind + 1])
+        assert wrap == backends.agy_sandbox(workspace, state)
 
     # -- detection ---------------------------------------------------------------
 
@@ -2839,9 +2918,12 @@ class TestAgyReviewer:
         for flag in AGY_SAFETY_ARGS:
             assert flag in runner
         assert "--print-timeout 0" in runner
-        assert "bwrap --ro-bind / / --dev /dev --proc /proc" in runner
-        assert '--bind "$ws" "$ws" --bind "$state" "$state" --die-with-parent --' in runner
-        assert "agy_review_message" in runner  # the same preamble, from the same place
+        # One copy of the sandbox and the preamble: the runner calls the same functions.
+        assert "agy_sandbox(ws, agy_seed_state(st))" in runner
+        assert "mapfile -d '' -t wrap" in runner
+        assert "agy_review_message" in runner
         # A failed mktemp must not fall back to running agy in the repository.
         assert 'ws="$(mktemp -d)" || return 1' in runner
-        assert "rm -rf \"$ws\"" in runner
+        assert 'rm -rf "$ws" "$state"' in runner
+        # =0 must not mean "skip the sandbox".
+        assert '""|0)' in runner

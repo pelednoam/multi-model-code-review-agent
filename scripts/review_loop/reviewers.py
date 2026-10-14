@@ -20,6 +20,7 @@ from .backends import (
     agy_model,
     agy_review_message,
     agy_sandbox,
+    agy_seed_state,
     agy_unsandboxed,
 )
 from .config import (
@@ -196,19 +197,30 @@ def _agy_cmd(model: str) -> list[str]:
     return agy_command(model, *extra)
 
 
-def _agy_workspace() -> Path | None:
+def _agy_workspace(repo: Path | None = None) -> Path | None:
     """An empty directory for agy to run in, outside the repository -- or None.
 
     The workspace is the one place the sandbox leaves writable, so it must not be the
-    repository or inside it. ``mkdtemp`` follows TMPDIR, which a project can point at a
+    repository under review (``repo``, from ``--repo``), this agent's own checkout, or
+    the directory the loop was started from -- nor inside any of them. ``mkdtemp`` follows TMPDIR, which a project can point at a
     directory of its own, so the result is checked rather than assumed. Everything agy
     needs is in the prompt; empty also leaves nothing to wander through.
     """
-    path = Path(tempfile.mkdtemp(prefix="mmcra-agy-")).resolve()
-    atexit.register(shutil.rmtree, path, ignore_errors=True)
-    for root in {REPO_ROOT.resolve(), Path.cwd().resolve()}:
+    try:
+        path = _scratch_dir("mmcra-agy-")
+    except OSError:
+        return None
+    for root in {r.resolve() for r in (repo, REPO_ROOT, Path.cwd()) if r is not None}:
         if path == root or root in path.parents:
+            shutil.rmtree(path, ignore_errors=True)
             return None
+    return path
+
+
+def _scratch_dir(prefix: str) -> Path:
+    """A temporary directory removed when the loop exits."""
+    path = Path(tempfile.mkdtemp(prefix=prefix)).resolve()
+    atexit.register(shutil.rmtree, path, ignore_errors=True)
     return path
 
 
@@ -301,8 +313,8 @@ def _choose_command(
         ], None
     if slot == 3 and agy_enabled() and backends.get("agy"):
         # Ahead of gemini: both are Google, and this one can be held to the schema.
-        # backends["agy"] is only true once its confinement check has passed, on the
-        # same model -- agy_model() picks once per run.
+        # backends["agy"] is only true once its sandbox check has passed, and
+        # agy_model() picks once per run, so every round runs the same model.
         model = agy_model()
         if model:
             return _agy_cmd(model), model
@@ -349,6 +361,7 @@ def _launch_one(
     round_dir: Path,
     backends: dict[str, bool],
     prefer_hermes: bool = False,
+    repo: Path | None = None,
 ) -> ReviewerProc | None:
     """Launch a single reviewer subprocess. Return tracking tuple or None."""
     lens, focus, rv, model_label = lens_args
@@ -370,14 +383,17 @@ def _launch_one(
     backend = cmd[0]
     workspace: Path | None = None
     if backend == "agy":
-        workspace = _agy_workspace()
+        workspace = _agy_workspace(repo)
         if workspace is None:
-            print(
-                f"  R{slot}: SKIPPED (agy's workspace is inside the repo; check TMPDIR)"
-            )
+            print(f"  R{slot}: SKIPPED (no agy workspace outside the repo; see TMPDIR)")
             return None
         if not agy_unsandboxed():
-            cmd = [*agy_sandbox(workspace), *cmd]
+            try:
+                state = agy_seed_state(_scratch_dir("mmcra-agy-state-"))
+            except OSError as exc:
+                print(f"  R{slot}: SKIPPED (could not prepare agy's state: {exc})")
+                return None
+            cmd = [*agy_sandbox(workspace, state), *cmd]
         # What agy is actually sent, so the prompt file stays the record of it.
         prompt_path.write_text(AGY_PREAMBLE + prompt)
 
@@ -403,7 +419,7 @@ def _launch_one(
     if backend in _stdin_backends():
         assert proc.stdin is not None  # PIPE guaranteed above
         try:
-            proc.stdin.write(agy_review_message(prompt) if workspace else prompt)
+            proc.stdin.write(agy_review_message(prompt) if backend == "agy" else prompt)
             proc.stdin.close()
         except OSError as exc:
             # An unauthenticated backend exits before reading, and the write
@@ -422,8 +438,12 @@ def launch_reviewers(
     context: str,
     backends: dict[str, bool],
     prefer_hermes: bool = False,
+    repo: Path | None = None,
 ) -> None:
     """Launch 4 reviewers in parallel, write raw outputs to round_dir.
+
+    ``repo`` is the repository under review, which no reviewer's writable scratch
+    directory may be inside.
 
     Reports progress while it waits. Four models on a large diff is fifteen
     minutes of silence otherwise, during which the only way to tell a working
@@ -434,7 +454,7 @@ def launch_reviewers(
     procs: list[ReviewerProc] = []
     for i, lens_args in enumerate(_LENSES, 1):
         tracked = _launch_one(
-            i, lens_args, diff, audit, context, round_dir, backends, prefer_hermes
+            i, lens_args, diff, audit, context, round_dir, backends, prefer_hermes, repo
         )
         if tracked is not None:
             procs.append(tracked)

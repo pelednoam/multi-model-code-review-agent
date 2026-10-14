@@ -15,6 +15,7 @@ installed in the current project. The required files are:
 - `scripts/scrub_diff.py`
 - `scripts/review_preflight.py`
 - `scripts/validate_review_results.py`
+- `scripts/review_loop/` (the agy reviewer's model pick and sandbox come from it)
 - `docs/ensemble_review_result_schema.json`
 
 If any are missing, **do not try to install them yourself**. Writing
@@ -543,27 +544,35 @@ launch_cli() {
       echo "R$num: Gemini CLI (${GEMINI_MODEL:-gemini-2.5-flash}) [free]"
       ;;
     agy)
-      # Antigravity CLI. Only reached when HAS_AGY=true, i.e. its sandbox check passed. Keep in
-      # step with scripts/review_loop/backends.py (agy_sandbox, agy_command); a test compares them.
+      # Antigravity CLI. Only reached when HAS_AGY=true, i.e. its sandbox check passed.
       #
       # agy itself confines nothing: measured, it wrote outside its workspace by absolute path
-      # with no denial. So it runs under bubblewrap with every path read-only except an empty
-      # workspace OUTSIDE the repo and agy's own state directory. The prompt -- with the
+      # with no denial. So it runs under the bubblewrap wrapper from
+      # scripts/review_loop/backends.py (agy_sandbox) -- built by calling it, so there is one
+      # copy: filesystem read-only except an empty workspace OUTSIDE the repo, home hidden, a
+      # throwaway copy of agy's state, no host processes or sockets. The prompt -- with the
       # preamble telling it to call no tools -- goes in as one stream-json line on stdin.
       local root="$PWD"
       local schema_args=()
       [ -f "$root/docs/ensemble_review_result_schema.json" ] \
         && schema_args=(--json-schema "$root/docs/ensemble_review_result_schema.json")
       # A failed mktemp leaves ws empty, `cd ""` succeeds, and agy would run in the repository.
+      # Resolved, because a relative TMPDIR names a different place once the job has cd'd.
       local ws; ws="$(mktemp -d)" || return 1
-      [ -n "$ws" ] && [ -d "$ws" ] || return 1
-      case "$(cd "$ws" && pwd -P)/" in
+      [ -n "$ws" ] && [ -d "$ws" ] && ws="$(cd "$ws" && pwd -P)" || return 1
+      case "$ws/" in
         "$(pwd -P)"/*) echo "R$num: SKIPPED (agy workspace $ws is inside the repo; check TMPDIR)"
                        rm -rf "$ws"; return 1 ;;
       esac
-      local state="$HOME/.gemini/antigravity-cli"; mkdir -p "$state"
-      local wrap=(bwrap --ro-bind / / --dev /dev --proc /proc --bind "$ws" "$ws" --bind "$state" "$state" --die-with-parent --)
-      [ -n "${MMCRA_SKIP_AGY_SANDBOX_CHECK:-}" ] && wrap=()
+      local state; state="$(mktemp -d)" || { rm -rf "$ws"; return 1; }
+      local wrap=()
+      case "${MMCRA_SKIP_AGY_SANDBOX_CHECK:-}" in
+        ""|0)
+          mapfile -d '' -t wrap < <(PYTHONPATH="$root" python3 -c 'import sys; from pathlib import Path; from scripts.review_loop.backends import agy_sandbox, agy_seed_state; ws, st = (Path(a) for a in sys.argv[1:3]); sys.stdout.write("\0".join(agy_sandbox(ws, agy_seed_state(st))) + "\0")' "$ws" "$state")
+          if [ "${#wrap[@]}" -eq 0 ]; then
+            echo "R$num: SKIPPED (could not build agy's sandbox)"; rm -rf "$ws" "$state"; return 1
+          fi ;;
+      esac
       { cd "$ws" && timeout -k 10 "$REVIEWER_TIMEOUT" "${wrap[@]}" agy \
           --mode=plan --sandbox --disable-slash-commands \
           --model "$AGY_MODEL" \
@@ -572,7 +581,7 @@ launch_cli() {
           < <(PYTHONPATH="$root" python3 -c 'import sys; from scripts.review_loop.backends import agy_review_message; sys.stdout.write(agy_review_message(open(sys.argv[1]).read()))' "$prompt_file") \
           1>"$REVIEW_TMP/stdout-$num.txt" \
           2>"$REVIEW_TMP/stderr-$num.txt"
-        echo $? > "$REVIEW_TMP/done-$num"; rm -rf "$ws"; } &
+        echo $? > "$REVIEW_TMP/done-$num"; rm -rf "$ws" "$state"; } &
       echo $! > "$REVIEW_TMP/pid-$num"
       echo "R$num: Antigravity CLI ($AGY_MODEL) [subscription]"
       ;;
@@ -595,7 +604,7 @@ $HAS_CODEX && N_PROVIDERS=$((N_PROVIDERS + 1))
 { $HAS_GEMINI || ${HAS_AGY:-false}; } && N_PROVIDERS=$((N_PROVIDERS + 1))
 if [ $N_PROVIDERS -eq 1 ]; then
   echo "WARNING: single-provider mode (Anthropic only)."
-  echo "Install codex and/or gemini for cross-provider diversity."
+  echo "Install codex and/or agy (or gemini) for cross-provider diversity."
 fi
 echo "Provider diversity: $N_PROVIDERS provider(s)"
 
@@ -687,7 +696,8 @@ extract_json() {
 import json, sys
 text = open(sys.argv[1]).read()
 # agy stream-json: one event per line, the answer in the last result event.
-for line in reversed(text.splitlines()):
+# split, not splitlines(): NDJSON is newline-separated, and JSON strings may carry U+0085 raw.
+for line in reversed(text.split('\n')):
     try:
         ev = json.loads(line)
     except ValueError:

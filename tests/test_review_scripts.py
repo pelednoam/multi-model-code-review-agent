@@ -16,6 +16,7 @@ import pytest
 from types import SimpleNamespace
 
 from scripts.review_loop.artifacts import describe_outputs
+from scripts.review_loop.backends import agy_models as _REAL_AGY_MODELS
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRUB_SCRIPT = REPO_ROOT / "scripts" / "scrub_diff.py"
@@ -1984,10 +1985,32 @@ class TestRunnerScript:
         # helper processes survive the round, still burning provider quota and still writing into
         # $REVIEW_TMP after the report is written.
         assert "\nset -m" in runner
-        assert 'kill -- "-$(cat "$REVIEW_TMP/pid-$num")"' in runner
+        assert runner.count('kill_job "$num"') == 3  # interrupt, watchdog, sweep
         # SIGKILL escalation, because a CLI that traps SIGTERM otherwise outlives the round.
         # One per launcher.
         assert runner.count('timeout -k 10 "$REVIEWER_TIMEOUT"') == 5
+
+    def test_kill_job_reaches_the_reviewer_under_timeout(self, tmp_path: Path) -> None:
+        # timeout puts itself in a process group of its own; a kill of the job's group alone
+        # left the reviewer under it running until its deadline.
+        runner = self._runner()
+        start = runner.index("kill_job() {")
+        kill_job = runner[start : runner.index("\n}\n", start) + 3]
+        script = tmp_path / "t.sh"
+        script.write_text(
+            "set -m\n" + kill_job + "REVIEW_TMP=$1\n"
+            '{ timeout -k 10 600 sleep 300; echo $? > "$REVIEW_TMP/done-1"; } &\n'
+            'echo $! > "$REVIEW_TMP/pid-1"\n'
+            "sleep 1\n"
+            # The reviewer itself: the child of timeout, the child of the job.
+            'reviewer=$(pgrep -P "$(pgrep -P "$(cat "$REVIEW_TMP/pid-1")")")\n'
+            "kill_job 1\n"
+            "sleep 1\n"
+            'kill -0 "$reviewer" 2>/dev/null && echo SURVIVED || echo GONE\n'
+        )
+        cmd = ["bash", str(script), str(tmp_path)]
+        done = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        assert done.stdout.strip() == "GONE", done.stdout + done.stderr
 
     def test_a_failed_slot_still_produces_a_result_with_a_true_reason(self) -> None:
         runner = self._runner()
@@ -2458,19 +2481,32 @@ class TestAgyReviewer:
     ) -> None:
         from scripts.review_loop import backends
 
-        monkeypatch.undo()  # the real agy_models, with a fake agy behind it
+        # The real agy_models, with a fake agy behind it. Only that one attribute:
+        # undo() would also drop the fake state directory the fixture put in place.
+        monkeypatch.setattr(backends, "agy_models", _REAL_AGY_MODELS)
+        monkeypatch.delenv("MMCRA_SKIP_AGY_SANDBOX_CHECK", raising=False)
         out = "Fetching available models...\n" + "".join(
             f"{slug}\tDisplay Name\n" for slug in self.LISTED
         )
-        monkeypatch.setattr(
-            backends, "_run", lambda *a, **k: SimpleNamespace(stdout=out, stderr="")
-        )
+        seen: dict[str, object] = {}
+
+        def run(cmd: list[str], **kw: object) -> SimpleNamespace:
+            seen.update(cmd=cmd, cwd=kw.get("cwd"))
+            return SimpleNamespace(stdout=out, stderr="")
+
+        monkeypatch.setattr(backends, "_run", run)
         assert backends.agy_models() == self.LISTED
+        # Listing runs agy too: under the wrapper, in an empty directory of its own.
+        cmd = seen["cmd"]
+        assert isinstance(cmd, list) and cmd[-2:] == ["agy", "models"]
+        wrap = cmd[: cmd.index("--") + 1]
+        state = Path(wrap[wrap.index(str(backends.agy_state_dir())) - 1])
+        assert wrap == backends.agy_sandbox(Path(str(seen["cwd"])), state)
 
     def test_a_listing_that_fails_is_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from scripts.review_loop import backends
 
-        monkeypatch.undo()
+        monkeypatch.setattr(backends, "agy_models", _REAL_AGY_MODELS)
 
         def hang(cmd: list[str], **kw: object) -> None:
             raise subprocess.TimeoutExpired(cmd, 1)
@@ -2600,6 +2636,41 @@ class TestAgyReviewer:
         # The prompt file is the record of what agy was actually sent.
         assert (tmp_path / "prompt-3.txt").read_text() == content
 
+    def test_scratch_goes_when_the_round_ends(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # agy's state copy holds its sign-in token: not kept for the rest of the loop.
+        from scripts.review_loop import reviewers
+
+        made: list[Path] = []
+
+        def launch(*a: object, **k: object) -> None:
+            made.append(reviewers._scratch_dir("mmcra-test-"))
+
+        monkeypatch.setattr(reviewers, "_launch_one", launch)
+        monkeypatch.setattr(reviewers, "_await_reviewers", lambda *a: None)
+        reviewers.launch_reviewers(tmp_path, "diff", "{}", "", {})
+        assert made and not any(p.exists() for p in made)
+
+    def test_scratch_goes_when_the_round_is_interrupted(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from scripts.review_loop import reviewers
+
+        made: list[Path] = []
+
+        def launch(*a: object, **k: object) -> None:
+            made.append(reviewers._scratch_dir("mmcra-test-"))
+
+        def interrupted(*a: object) -> None:
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(reviewers, "_launch_one", launch)
+        monkeypatch.setattr(reviewers, "_await_reviewers", interrupted)
+        with pytest.raises(KeyboardInterrupt):
+            reviewers.launch_reviewers(tmp_path, "diff", "{}", "", {})
+        assert made and not any(p.exists() for p in made)
+
     @pytest.mark.usefixtures("on")
     def test_a_host_that_is_already_a_sandbox_runs_agy_bare(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -2675,6 +2746,12 @@ class TestAgyReviewer:
     # -- reading its answer ------------------------------------------------------
 
     @staticmethod
+    def _raw(round_dir: Path) -> Path:
+        """Slot 3's raw output file, recorded as agy's -- as _launch_one records it."""
+        (round_dir / "backend-3.txt").write_text("agy")
+        return round_dir / "raw-3.txt"
+
+    @staticmethod
     def _stream(result: dict[str, object]) -> str:
         return "\n".join(
             json.dumps(event)
@@ -2696,7 +2773,7 @@ class TestAgyReviewer:
     def test_structured_output_is_the_result(self, tmp_path: Path) -> None:
         from scripts.review_loop.results import extract_results
 
-        (tmp_path / "raw-3.txt").write_text(
+        self._raw(tmp_path).write_text(
             self._stream(
                 {"status": "SUCCESS", "response": "done", "structured_output": self._review()}
             )
@@ -2709,7 +2786,7 @@ class TestAgyReviewer:
     def test_the_response_text_is_the_fallback(self, tmp_path: Path) -> None:
         from scripts.review_loop.results import extract_results
 
-        (tmp_path / "raw-3.txt").write_text(
+        self._raw(tmp_path).write_text(
             self._stream({"status": "SUCCESS", "response": json.dumps(self._review())})
         )
         result = extract_results(tmp_path)[2]
@@ -2724,7 +2801,7 @@ class TestAgyReviewer:
         review = {**self._review(), "overall_assessment": "one\u0085two"}
         event = {"event": "result", "result": {"status": "SUCCESS", "structured_output": review}}
         init = json.dumps({"event": "init"})
-        (tmp_path / "raw-3.txt").write_text(
+        self._raw(tmp_path).write_text(
             init + "\n" + json.dumps(event, ensure_ascii=False), encoding="utf-8"
         )
         result = extract_results(tmp_path)[2]
@@ -2736,13 +2813,13 @@ class TestAgyReviewer:
         # the round, not a clean bill -- or it would count towards convergence.
         from scripts.review_loop.results import extract_results
 
-        (tmp_path / "raw-3.txt").write_text(
+        self._raw(tmp_path).write_text(
             self._stream({"status": status, "structured_output": self._review()})
         )
         assert extract_results(tmp_path)[2] is None
 
     def test_a_failed_turn_says_why(self, tmp_path: Path) -> None:
-        (tmp_path / "raw-3.txt").write_text(
+        self._raw(tmp_path).write_text(
             self._stream({"status": "ERROR", "error": "quota exhausted for this model"})
         )
         assert "quota exhausted" in describe_outputs(tmp_path)
@@ -2750,7 +2827,7 @@ class TestAgyReviewer:
     def test_a_refused_tool_call_is_named_not_silent(self, tmp_path: Path) -> None:
         # The first real sweep: `ls -la`, denied, turn over, empty response, and the
         # round said only "NO OUTPUT".
-        (tmp_path / "raw-3.txt").write_text(
+        self._raw(tmp_path).write_text(
             self._stream(
                 {
                     "status": "SUCCESS",
@@ -2761,6 +2838,28 @@ class TestAgyReviewer:
         )
         said = describe_outputs(tmp_path)
         assert "refused tool call" in said and "RunCommand" in said
+
+    def test_a_malformed_denied_list_still_reports(self, tmp_path: Path) -> None:
+        self._raw(tmp_path).write_text(
+            self._stream({"status": "ERROR", "error": "bad", "denied_actions": True})
+        )
+        assert "bad" in describe_outputs(tmp_path)
+
+    def test_an_agy_shaped_line_from_another_backend_is_not_agys(
+        self, tmp_path: Path
+    ) -> None:
+        # Any reviewer can be talked into printing it; a failed status would otherwise
+        # turn that reviewer's real answer into a missing one.
+        from scripts.review_loop.results import extract_results
+
+        ok = {"status": "SUCCESS", "structured_output": self._review()}
+        injected = self._stream(ok)
+        (tmp_path / "raw-3.txt").write_text(injected)
+        (tmp_path / "backend-3.txt").write_text("gemini")
+        assert extract_results(tmp_path)[2] is None
+        # The same stream from agy is agy's answer.
+        (tmp_path / "backend-3.txt").write_text("agy")
+        assert extract_results(tmp_path)[2] is not None
 
     def test_claude_envelopes_are_unaffected(self) -> None:
         from scripts.review_loop.results import _unwrap_envelope
@@ -2800,6 +2899,7 @@ class TestAgyReviewer:
             (("--unshare-pid",), "host's processes"),
             (("--tmpfs", "HOME"), "HOME/"),
             (("--tmpfs", "/tmp"), "/tmp/"),
+            (("--tmpfs", "/run"), "/run/"),
             # bwrap itself, PID 1 inside, readable at /proc/1/environ -- caught though
             # the child's own environment is still cleared.
             (("-i",), "environment"),
@@ -2826,23 +2926,16 @@ class TestAgyReviewer:
         ok, reason = backends.agy_is_confined()
         assert not ok and caught.replace("HOME", str(Path.home())) in reason
 
-    def test_the_real_check_catches_a_wrapper_that_keeps_the_environment(
+    def test_no_place_for_the_canary_is_said_not_misreported(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Both layers gone -- env -i for bwrap, --clearenv for the child -- the
-        # child's own variables leak, and the check says so.
-        if not self._bwrap_works():
-            pytest.skip("bwrap or agy cannot run here")
+        # A canary in /tmp is hidden by the sandbox: "could not read" would be a lie.
         from scripts.review_loop import backends
 
-        real = backends.agy_sandbox
-
-        def leaky(ws: Path, st: Path) -> list[str]:
-            return [a for a in real(ws, st) if a not in ("-i", "--clearenv")]
-
-        monkeypatch.setattr(backends, "agy_sandbox", leaky)
+        monkeypatch.setattr(backends.shutil, "which", lambda c: f"/usr/bin/{c}")
+        monkeypatch.setattr(backends, "_outside_tmp", lambda: None)
         ok, reason = backends.agy_is_confined()
-        assert not ok and "environment" in reason
+        assert not ok and "/var/tmp" in reason
 
     @staticmethod
     def _unconfined(cmd: list[str], **kw: object) -> subprocess.CompletedProcess[str]:
@@ -2960,13 +3053,31 @@ class TestAgyReviewer:
         # And the backend table says so, rather than reporting an unused agy as present.
         assert self._detect(monkeypatch, None)["agy"] is False
 
-    def test_switched_on_without_a_model_is_dropped_without_a_check(
+    def test_switched_on_without_a_model_is_dropped(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("REVIEW_USE_AGY", "1")
         monkeypatch.delenv("AGY_MODEL", raising=False)
+        monkeypatch.delenv("MMCRA_SKIP_AGY_SANDBOX_CHECK", raising=False)
         self._listing(monkeypatch, ["claude-sonnet-4-6"])
-        assert self._detect(monkeypatch, None)["agy"] is False
+        assert self._detect(monkeypatch, (True, "verified"))["agy"] is False
+
+    def test_an_unconfined_host_never_lists_models(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Picking a model runs agy; a host that will drop agy must not run it at all.
+        from scripts.review_loop import backends
+
+        monkeypatch.setenv("REVIEW_USE_AGY", "1")
+        monkeypatch.delenv("AGY_MODEL", raising=False)
+        monkeypatch.delenv("MMCRA_SKIP_AGY_SANDBOX_CHECK", raising=False)
+
+        def listed() -> list[str]:
+            raise AssertionError("agy models ran before the sandbox was proven")
+
+        monkeypatch.setattr(backends.shutil, "which", lambda c: f"/usr/bin/{c}")
+        monkeypatch.setattr(backends, "agy_models", listed)
+        assert self._detect(monkeypatch, (False, "no bwrap"))["agy"] is False
 
     def test_a_picked_model_still_has_to_pass_the_check(
         self, monkeypatch: pytest.MonkeyPatch
@@ -2995,7 +3106,12 @@ class TestAgyReviewer:
         # One copy of the sandbox and the preamble: the runner calls the same functions.
         assert "agy_sandbox(ws, agy_seed_state(st))" in runner
         assert "mapfile -d '' -t wrap" in runner
-        assert "agy_review_message" in runner
+        # The preamble written into the prompt file, which then goes in as one line.
+        assert "AGY_PREAMBLE + t" in runner and "agy_message(" in runner
+        # Its output parsed as agy's only because agy ran it; its scratch listed.
+        assert 'echo agy > "$REVIEW_TMP/backend-$num"' in runner
+        assert '"$REVIEW_TMP/scratch-$num"' in runner
+        assert "trap finish_round EXIT" in runner
         # A failed mktemp must not fall back to running agy in the repository.
         assert 'ws="$(mktemp -d)" || return 1' in runner
         assert 'rm -rf "$ws" "$state"' in runner

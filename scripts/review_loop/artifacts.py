@@ -19,7 +19,7 @@ import json
 
 from typing import TYPE_CHECKING
 
-from .backends import agy_result
+from .backends import agy_result, ran_agy
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -125,20 +125,21 @@ def _salvage(round_dir: Path, slot: int) -> str:
     text = raw.read_text(encoding="utf-8", errors="replace").strip()
     if not text:
         return ""
-    agy = agy_result(text)
+    agy = agy_result(text) if ran_agy(round_dir, slot) else None
     if agy is not None:
         # A failed turn has no response but says why, which is the useful part. So
         # does one cut short by a refused tool call, which otherwise reads as silence.
         said = agy.get("response") or agy.get("error") or ""
+        actions = agy.get("denied_actions")
         denied = [
             str(d.get("display_name") or d.get("action"))
-            for d in agy.get("denied_actions") or []
+            for d in (actions if isinstance(actions, list) else [])
             if isinstance(d, dict) and (d.get("display_name") or d.get("action"))
         ]
         if not said and denied:
             said = (
                 f"agy ended its turn with no answer after a refused tool call"
-                f" ({', '.join(map(str, denied))})"
+                f" ({', '.join(denied)})"
             )
         return str(said).strip()[:_SALVAGE_CHARS]
     try:

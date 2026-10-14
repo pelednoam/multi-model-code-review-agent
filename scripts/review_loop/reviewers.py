@@ -9,6 +9,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -222,11 +223,23 @@ def _agy_workspace(repo: Path | None = None) -> Path | None:
     return path
 
 
+#: Scratch directories of the round in progress. agy's state copy holds its sign-in
+#: token, so they go when the round's reviewers are done, not when the loop is.
+_ROUND_SCRATCH: list[Path] = []
+
+
 def _scratch_dir(prefix: str) -> Path:
-    """A temporary directory removed when the loop exits."""
+    """A temporary directory removed when this round ends, or failing that, the loop."""
     path = Path(tempfile.mkdtemp(prefix=prefix)).resolve()
+    _ROUND_SCRATCH.append(path)
     atexit.register(shutil.rmtree, path, ignore_errors=True)
     return path
+
+
+def _release_scratch() -> None:
+    """Remove the round's scratch directories."""
+    while _ROUND_SCRATCH:
+        shutil.rmtree(_ROUND_SCRATCH.pop(), ignore_errors=True)
 
 
 def _codex_extra_args() -> list[str]:
@@ -295,9 +308,8 @@ def _choose_command(
 
     Returns ``(cmd, rebuild_label)``, where ``rebuild_label`` is set when
     the chosen backend needs the prompt to be rebuilt with a different
-    model label (slot 2's hermes-haiku path; agy and gemini, which name the
-    model they run). Returns ``None`` if no
-    backend is available.
+    model label (slot 2's hermes-haiku path, and agy, which names the model
+    it runs). Returns ``None`` if no backend is available.
     """
     if prefer_hermes and backends["hermes"]:
         if slot in (1, 4):
@@ -413,6 +425,9 @@ def _launch_one(
         # What agy is actually sent, so the prompt file stays the record of it.
         prompt_path.write_text(AGY_PREAMBLE + prompt)
 
+    # Which backend answered, so its output is parsed as that backend's: a stream
+    # that merely looks like agy's, from another reviewer, is not agy's verdict.
+    (round_dir / f"backend-{slot}.txt").write_text(backend)
     # The Popen handles intentionally outlive these open() calls; they are
     # closed in launch_reviewers' wait loop after the subprocess finishes.
     out_f = open(round_dir / f"raw-{slot}.txt", "w", encoding="utf-8", errors="replace")  # noqa: SIM115
@@ -468,13 +483,33 @@ def launch_reviewers(
     wrong as often as it is right.
     """
     procs: list[ReviewerProc] = []
-    for i, lens_args in enumerate(_LENSES, 1):
-        tracked = _launch_one(
-            i, lens_args, diff, audit, context, round_dir, backends, prefer_hermes, repo
-        )
-        if tracked is not None:
-            procs.append(tracked)
-    _await_reviewers(procs, round_dir, diff.count("\n") + 1)
+    # A plain SIGTERM ends Python without running finally blocks or atexit, which
+    # would leave the reviewers running and agy's token copy on disk.
+    in_main = threading.current_thread() is threading.main_thread()
+    previous = signal.signal(signal.SIGTERM, _terminate) if in_main else None
+    try:
+        for i, lens_args in enumerate(_LENSES, 1):
+            tracked = _launch_one(
+                i, lens_args, diff, audit, context, round_dir, backends,
+                prefer_hermes, repo,
+            )  # fmt: skip
+            if tracked is not None:
+                procs.append(tracked)
+        _await_reviewers(procs, round_dir, diff.count("\n") + 1)
+    finally:
+        for _, proc, _, out_f, err_f in procs:
+            if proc.poll() is None:
+                _kill_group(proc)
+            out_f.close()
+            err_f.close()
+        _release_scratch()
+        if in_main:
+            signal.signal(signal.SIGTERM, previous)
+
+
+def _terminate(signum: int, _frame: object) -> None:
+    """SIGTERM as an exit, so cleanup runs on the way out."""
+    raise SystemExit(128 + signum)
 
 
 def _await_reviewers(procs: list[ReviewerProc], round_dir: Path, n_lines: int) -> None:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
-from .backends import agy_result
+from .backends import agy_result, ran_agy
 from .findings import validate_result
 
 if TYPE_CHECKING:
@@ -30,15 +30,15 @@ def _try_load_existing_result(result_path: Path, slot: int) -> dict[str, Any] | 
     return validate_result(d, slot, EXPECTED_REVIEWERS)
 
 
-def _unwrap_envelope(text: str) -> str:
+def _unwrap_envelope(text: str, agy_ran: bool = False) -> str:
     """Take the review out of the envelope its CLI wrapped it in.
 
     ``claude -p --output-format json`` wraps it in ``{"result": "<text>"}``. agy's
-    stream-json ends in a ``result`` event whose ``structured_output`` is the
-    schema-checked object, with ``response`` -- free text -- as the fallback.
-    Anything else is returned as-is.
+    stream-json -- read as such only when ``agy_ran`` -- ends in a ``result`` event
+    whose ``structured_output`` is the schema-checked object, with ``response`` --
+    free text -- as the fallback. Anything else is returned as-is.
     """
-    agy = agy_result(text)
+    agy = agy_result(text) if agy_ran else None
     if agy is not None:
         # ERROR, CANCELED, INTERRUPTED and WAITING can all carry review-shaped output.
         # A turn that did not finish is not a review, however finished it looks.
@@ -62,7 +62,7 @@ def _extract_from_raw(round_dir: Path, slot: int) -> dict[str, Any] | None:
     raw_path = round_dir / f"raw-{slot}.txt"
     if not raw_path.exists():
         return None
-    text = _unwrap_envelope(raw_path.read_text())
+    text = _unwrap_envelope(raw_path.read_text(), ran_agy(round_dir, slot))
     start = text.find("{")
     end = text.rfind("}")
     if start < 0 or end <= start:

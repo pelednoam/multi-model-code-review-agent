@@ -37,7 +37,7 @@ ensemble-review agent (docs/ensemble-review.md)
   |
   |-- hermes opus (Bedrock) OR claude -p opus           --> result-1.json (security)
   |-- codex exec (GPT-5.5) OR hermes haiku              --> result-2.json (correctness)
-  |-- agy (Gemini, sandboxed) OR gemini OR hermes sonnet OR claude -p --> result-3.json (readability)
+  |-- agy (Gemini, sandboxed) OR gemini OR claude -p sonnet OR hermes sonnet --> result-3.json (readability)
   |-- hermes opus (Bedrock) OR claude -p opus           --> result-4.json (spec-contract)
   |   (all four run IN PARALLEL, 10min timeout each)
   |

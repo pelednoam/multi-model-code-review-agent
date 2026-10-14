@@ -58,7 +58,7 @@ mode" below.
 # Choosing the mode
 
 - **Quick mode** (default): spawns 2 Claude Code subagents (Opus spec-contract + Sonnet correctness) with clean context. Free, ~30 seconds. Use for every commit, routine changes, rapid iteration. NOTE: quick mode uses the parent Claude Code session's API allocation for the subagents (via the `Agent()` tool) -- not the local `claude` / `codex` / `gemini` CLIs. For local-CLI reviewers, the user must say "full review".
-- **Full mode**: spawns 4 parallel reviewer subprocesses across providers. Free when local CLIs (`claude`, `codex`, `gemini`) are installed and used. ~3-5 minutes. Use for pre-merge gates, high-stakes changes.
+- **Full mode**: spawns 4 parallel reviewer subprocesses across providers. Free beyond existing subscriptions when local CLIs (`claude`, `codex`, `agy` or `gemini`) are installed and used. ~3-5 minutes. Use for pre-merge gates, high-stakes changes.
 
 If the user says "quick review", "review this", or just "ensemble review" -- use quick mode. Before spawning the quick-mode subagents, print one line: *"Quick mode (parent Claude Code's API allocation). Say 'full review' to use local CLIs instead."*
 
@@ -84,11 +84,12 @@ HAS_GEMINI=false; command -v gemini &>/dev/null && HAS_GEMINI=true
 # stderr; the model it settled on is the only thing on stdout.
 HAS_AGY=false
 if [ "${REVIEW_USE_AGY:-1}" != "0" ] && command -v agy &>/dev/null; then
-  AGY_MODEL="$(python3 -c 'import contextlib, sys
+  AGY_MODEL="$(python3 -I -c 'import contextlib, sys
+sys.path.insert(0, sys.argv[1])
 from scripts.review_loop.backends import agy_model, detect_backends
 with contextlib.redirect_stdout(sys.stderr):
     ok = detect_backends(verify_codex=False)["agy"]
-print(agy_model() if ok else "")')"
+print(agy_model() if ok else "")' "$PWD")"
   [ -n "$AGY_MODEL" ] && HAS_AGY=true
 fi
 
@@ -134,7 +135,7 @@ Bedrock opt-in precedence (PREFER_HERMES=true), used for regulated codebases tha
 
 | CLI | Non-interactive | Read-only | Input | Output |
 |---|---|---|---|---|
-| `claude` | `-p` | (convergence loop; this runner passes `--allowedTools` only -- see "Tool restriction") `--allowedTools "Read Grep Glob"` **plus** `--disallowedTools "Edit Write MultiEdit NotebookEdit Bash"` -- `--allowedTools` alone only skips the permission prompt, it does *not* confine the agent | stdin (`< prompt.txt`) | `--output-format json` wraps in `{"result":"..."}` |
+| `claude` | `-p` | `--allowedTools "Read Grep Glob"` **plus** `--disallowedTools "Edit Write MultiEdit NotebookEdit Bash"` -- `--allowedTools` alone only skips the permission prompt, it does *not* confine the agent | stdin (`< prompt.txt`) | `--output-format json` wraps in `{"result":"..."}` |
 | `codex` | `codex exec` **plus `-s read-only` and `-c approvals_reviewer="user"`** (convergence loop; this runner uses codex's configured sandbox) -- both are pinned by the tool and neither is optional: no sandbox flag was passed at all before, and `-s read-only` on its own is silently overridden by a global `approvals_reviewer = "auto_review"` (see docs/codex-sandbox.md). Codex is also canary-tested at launch and its slot is DROPPED if the sandbox does not actually refuse a write (optional `-m <model> -c model_reasoning_effort=<level>` -- override via `CODEX_MODEL`, `CODEX_REASONING_EFFORT`; `=high` is the "GPT-5.5 Pro" equivalent) | verified read-only, not assumed | stdin (pipe) | `-o <file>` writes last message |
 | `gemini` | `-p` | `--model <m> --approval-mode plan --skip-trust` (default `<m>` is `gemini-2.5-flash` for free-tier compatibility; override via `GEMINI_MODEL`) | stdin (pipe) | stdout (text, may have fences) |
 | `agy` | `--input-format stream-json --output-format stream-json` (no `-p`: the prompt is one JSON line on stdin, because a single argument is capped at 128 KB) **plus `--sandbox --disable-slash-commands`**, pinned. On by default where installed; `REVIEW_USE_AGY=0` switches it off. Model: `AGY_MODEL` if set, else the best Gemini model `agy models` lists, picked each run. agy has no deny list and was measured writing outside its workspace, so it runs under **bubblewrap with the filesystem read-only** except an empty temp workspace outside the repo and its state dir; the sandbox is verified at launch without a model call and the slot is DROPPED if it lets a write through. The prompt opens with a no-tools preamble: a refused tool call ends agy's turn with no answer | bubblewrap read-only filesystem, verified; `--sandbox --disable-slash-commands` (no `--mode=plan`: it is a slash command, so a no-op once expansion is off) | stdin (one stream-json line) | stream-json; the last `result` event carries `structured_output` (enforced by `--json-schema`) |
@@ -340,8 +341,8 @@ For each finding, state whether it is:
 - "inferred": deduced from context but not directly observed
 Do NOT present inference as fact.
 
-Write your findings as a JSON file with this exact schema. Every field
-marked required MUST be present:
+Reply with your findings as one JSON object with this exact schema -- in
+your answer, not in a file. Every field marked required MUST be present:
 {
   "reviewer": "<lens>",
   "model": "<model id>",
@@ -445,6 +446,36 @@ set -uo pipefail
 # whose child ignores SIGTERM survives the round entirely without this.
 set -m
 
+# agy's scratch -- its workspace and a copy of its sign-in token -- is listed in scratch-N by its
+# launcher. The job removes it when agy exits; a job killed by the watchdog or the sweep never gets
+# there, and neither does one whose runner is interrupted, so the runner removes it too: after the
+# sweep, and on any exit. An interrupted runner also takes down the reviewers it started, each in
+# its own process group, rather than leaving them running.
+#
+# kill_job: a job's process group is not the whole job. GNU `timeout` puts itself in a group of its
+# own, so a kill of the job's group leaves timeout -- and the reviewer under it -- running until
+# its own deadline. Measured: agy kept running after its job was killed. So: the group of each of
+# the job's children (timeout's, which takes its command's tree with it), then the job's own.
+kill_job() {
+  local pid child
+  pid="$(cat "$REVIEW_TMP/pid-$1" 2>/dev/null)" || return 0
+  [ -n "$pid" ] || return 0
+  for child in $(pgrep -P "$pid"); do kill -- "-$child" 2>/dev/null; done
+  kill -- "-$pid" 2>/dev/null
+}
+finish_round() {
+  local f num
+  for num in 1 2 3 4; do
+    [ -f "$REVIEW_TMP/pid-$num" ] && [ ! -f "$REVIEW_TMP/done-$num" ] && kill_job "$num"
+  done
+  for f in "$REVIEW_TMP"/scratch-*; do
+    [ -f "$f" ] && xargs -0 rm -rf -- < "$f"
+  done
+}
+trap finish_round EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 # Per-reviewer deadline. The watchdog below allows a little more than this so that a reviewer
 # killed by its own `timeout` is still collected as a failure rather than hanging the round.
 REVIEWER_TIMEOUT=${REVIEWER_TIMEOUT:-600}
@@ -496,8 +527,12 @@ launch_cli() {
       # isolated git worktree so its edits cannot reach the working tree.
       local tools_var="REVIEWER_TOOLS_$num"
       local tools="${!tools_var:-Read Grep Glob}"
+      # --allowedTools only skips the permission prompt; it does not confine. Unless the slot was
+      # given writing tools on purpose (above), deny them, as the convergence loop does.
+      local deny=(--disallowedTools "Edit Write MultiEdit NotebookEdit Bash")
+      [ -n "${!tools_var:-}" ] && deny=()
       { timeout -k 10 "$REVIEWER_TIMEOUT" claude -p --model "$model" \
-          --allowedTools "$tools" \
+          --allowedTools "$tools" "${deny[@]}" \
           --output-format json < "$prompt_file" \
           1>"$REVIEW_TMP/claude-raw-$num.json" \
           2>"$REVIEW_TMP/stderr-$num.txt"
@@ -552,6 +587,11 @@ launch_cli() {
       # copy: filesystem read-only except an empty workspace OUTSIDE the repo, home hidden, a
       # throwaway copy of agy's state, no host processes or sockets. The prompt -- with the
       # preamble telling it to call no tools -- goes in as one stream-json line on stdin.
+      #
+      # The wrapper comes from the project checkout, like every helper this runner uses: reviewing
+      # an untrusted branch in full mode runs that branch's code. For that, run the convergence
+      # loop from a trusted checkout of this agent with --repo pointing at the branch. `python3 -I`
+      # at least keeps a stray module in the working directory from standing in for the stdlib.
       local root="$PWD"
       # The schema inline, not as a path: the sandbox hides home and /tmp, where the file lives.
       local schema_args=()
@@ -567,20 +607,27 @@ launch_cli() {
       esac
       local state; state="$(mktemp -d)" && state="$(cd "$state" && pwd -P)" \
         || { rm -rf "$ws"; return 1; }
+      # Listed for the runner, which removes them if this job is killed before it can.
+      printf '%s\0%s\0' "$ws" "$state" > "$REVIEW_TMP/scratch-$num"
       local wrap=()
       case "${MMCRA_SKIP_AGY_SANDBOX_CHECK:-}" in
         ""|0)
-          mapfile -d '' -t wrap < <(PYTHONPATH="$root" python3 -c 'import sys; from pathlib import Path; from scripts.review_loop.backends import agy_sandbox, agy_seed_state; ws, st = (Path(a) for a in sys.argv[1:3]); sys.stdout.write("\0".join(agy_sandbox(ws, agy_seed_state(st))) + "\0")' "$ws" "$state")
+          mapfile -d '' -t wrap < <(python3 -I -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); from pathlib import Path; from scripts.review_loop.backends import agy_sandbox, agy_seed_state; ws, st = (Path(a) for a in sys.argv[1:3]); sys.stdout.write("\0".join(agy_sandbox(ws, agy_seed_state(st))) + "\0")' "$root" "$ws" "$state")
           if [ "${#wrap[@]}" -eq 0 ]; then
             echo "R$num: SKIPPED (could not build agy's sandbox)"; rm -rf "$ws" "$state"; return 1
           fi ;;
       esac
+      # The preamble goes into the prompt file itself, so the file is the record of what agy was
+      # sent. Last, after every way this launch can still fall through to another backend.
+      python3 -I -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); from scripts.review_loop.backends import AGY_PREAMBLE; p = sys.argv[1]; t = open(p).read(); open(p, "w").write(AGY_PREAMBLE + t)' "$root" "$prompt_file" \
+        || { echo "R$num: SKIPPED (could not prepare agy's prompt)"; rm -rf "$ws" "$state"; return 1; }
+      echo agy > "$REVIEW_TMP/backend-$num"
       { cd "$ws" && timeout -k 10 "$REVIEWER_TIMEOUT" "${wrap[@]}" agy \
           --sandbox --disable-slash-commands \
           --model "$AGY_MODEL" \
           --input-format stream-json --output-format stream-json \
           --print-timeout 0 "${schema_args[@]}" \
-          < <(PYTHONPATH="$root" python3 -c 'import sys; from scripts.review_loop.backends import agy_review_message; sys.stdout.write(agy_review_message(open(sys.argv[1]).read()))' "$prompt_file") \
+          < <(python3 -I -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); from scripts.review_loop.backends import agy_message; sys.stdout.write(agy_message(open(sys.argv[1]).read()))' "$root" "$prompt_file") \
           1>"$REVIEW_TMP/stdout-$num.txt" \
           2>"$REVIEW_TMP/stderr-$num.txt"
         rc=$?; rm -rf "$ws" "$state"; echo "$rc" > "$REVIEW_TMP/done-$num"; } &
@@ -675,8 +722,8 @@ while :; do
     for num in 1 2 3 4; do
       [ -f "$REVIEW_TMP/pid-$num" ] || continue
       [ -f "$REVIEW_TMP/done-$num" ] && continue
-      # Negative pid = the whole process group, which `set -m` gave this job.
-      kill -- "-$(cat "$REVIEW_TMP/pid-$num")" 2>/dev/null
+      # The job's process group, which `set -m` gave it, and timeout's (see kill_job).
+      kill_job "$num"
       echo "timeout" > "$REVIEW_TMP/done-$num"
     done
     break
@@ -690,7 +737,11 @@ echo "All reviewer slots resolved after $((SECONDS - round_start))s"
 # group kill per slot collects them. Harmless when the group is already gone.
 for num in 1 2 3 4; do
   [ -f "$REVIEW_TMP/pid-$num" ] || continue
-  kill -- "-$(cat "$REVIEW_TMP/pid-$num")" 2>/dev/null
+  kill_job "$num"
+done
+# Now, not at exit: a killed agy job never reached its own cleanup of the token copy.
+for f in "$REVIEW_TMP"/scratch-*; do
+  [ -f "$f" ] && xargs -0 rm -rf -- < "$f"
 done
 
 # Extract review JSON from raw output. Handles Claude CLI wrappers,
@@ -699,9 +750,10 @@ extract_json() {
   python3 -c "
 import json, sys
 text = open(sys.argv[1]).read()
-# agy stream-json: one event per line, the answer in the last result event.
+# agy stream-json: one event per line, the answer in the last result event -- read only when agy
+# ran the slot: any reviewer can be talked into printing a line shaped like agy's result event.
 # split, not splitlines(): NDJSON is newline-separated, and JSON strings may carry U+0085 raw.
-for line in reversed(text.split('\n')):
+for line in (reversed(text.split('\n')) if sys.argv[3] == 'agy' else []):
     try:
         ev = json.loads(line)
     except ValueError:
@@ -732,7 +784,7 @@ if not required.issubset(d.keys()):
     sys.exit(1)
 with open(sys.argv[2], 'w') as out:
     json.dump(d, out, indent=2)
-" "$1" "$2" 2>"$REVIEW_TMP/extract-$(basename "$2" .json).err"
+" "$1" "$2" "${3:-}" 2>"$REVIEW_TMP/extract-$(basename "$2" .json).err"
 }
 
 # Post-process: normalize all output to result-N.json.
@@ -742,7 +794,7 @@ for num in 1 2 3 4; do
 
   # Try each possible output file (Claude raw wrapper, then stdout)
   for src in "$REVIEW_TMP/claude-raw-$num.json" "$REVIEW_TMP/stdout-$num.txt"; do
-    [ -f "$src" ] && extract_json "$src" "$result" && break
+    [ -f "$src" ] && extract_json "$src" "$result" "$(cat "$REVIEW_TMP/backend-$num" 2>/dev/null)" && break
   done
 
   # If no result produced, write a synthetic error. The done-marker distinguishes the two very
@@ -780,7 +832,8 @@ Run with `run_in_background: true`. Export the detection variables first: the sc
 shell and inherits nothing from the call that wrote it.
 
 ```bash
-export REVIEW_TMP HAS_CLAUDE HAS_HERMES HAS_CODEX HAS_GEMINI HAS_AGY AGY_MODEL PREFER_HERMES
+export REVIEW_TMP HAS_CLAUDE HAS_HERMES HAS_CODEX HAS_GEMINI HAS_AGY AGY_MODEL PREFER_HERMES \
+  MMCRA_SKIP_AGY_SANDBOX_CHECK
 "$REVIEW_TMP/run-reviewers.sh" 2>&1 | tee "$REVIEW_TMP/round.log"
 ```
 
@@ -832,7 +885,7 @@ Report what the status lines say rather than guessing. "Three of four are still 
 thing to tell a waiting human; silence is not.
 
 
-**Tool restriction**: Hermes uses `-t file` (best isolation). Claude CLI: this runner passes `--allowedTools "Read Grep Glob"` only; the convergence loop adds `--disallowedTools` for every writing tool, since `--allowedTools` alone does not confine. Codex: this runner uses its configured sandbox; the convergence loop pins `-s read-only` and `approvals_reviewer="user"` and canary-tests them. Gemini uses `--approval-mode plan` (read-only). agy runs under bubblewrap -- filesystem read-only outside an empty workspace, home and /tmp hidden, environment cleared, verified before use -- plus `--sandbox --disable-slash-commands`. Extraction errors logged to `$REVIEW_TMP/extract-N.err`.
+**Tool restriction**: Hermes uses `-t file` (best isolation). Claude CLI: `--allowedTools "Read Grep Glob"` plus `--disallowedTools` for every writing tool, since `--allowedTools` alone does not confine (this runner drops the deny list only for a slot given writing tools on purpose with `REVIEWER_TOOLS_N`). Codex: this runner uses its configured sandbox; the convergence loop pins `-s read-only` and `approvals_reviewer="user"` and canary-tests them. Gemini uses `--approval-mode plan` (read-only). agy runs under bubblewrap -- filesystem read-only outside an empty workspace, home, /tmp and /run hidden, environment cleared, verified before use -- plus `--sandbox --disable-slash-commands`. Extraction errors logged to `$REVIEW_TMP/extract-N.err`.
 
 ## 7. Collect and validate results
 
@@ -1041,7 +1094,7 @@ concluding anything from a probe, and never suppress its output.
 | Backend | Data path | Isolation | Cost |
 |---|---|---|---|
 | Hermes+Bedrock | Your AWS account | Best (`-t file`) | Bedrock API pricing |
-| Claude CLI | Anthropic infrastructure | Good (`--allowedTools`) | Claude subscription |
+| Claude CLI | Anthropic infrastructure | Good (`--allowedTools` + `--disallowedTools`) | Claude subscription |
 | Codex CLI | OpenAI infrastructure | Good (sandbox) | ChatGPT subscription |
 | Gemini CLI | Google infrastructure | Good (`--approval-mode plan`) | Google AI Studio (free tier) |
 

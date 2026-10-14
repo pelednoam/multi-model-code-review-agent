@@ -12,7 +12,8 @@ preflight audit. Three modes:
   the local `claude`/`codex`/`gemini` CLIs.
 - **Full mode** (free or paid): 4 parallel reviewer subprocesses
   across providers using the locally installed CLIs by default. Free
-  when `claude` + `codex` + `gemini` are installed. Hermes/Bedrock
+  beyond your existing subscriptions when `claude` + `codex` + `agy` (or
+  `gemini`) are installed. Hermes/Bedrock
   available as an opt-in for codebases that need data-at-rest.
   ~3-5 minutes. Use for pre-merge gates.
 - **Convergence loop** (free or paid): runs full mode repeatedly,
@@ -67,10 +68,10 @@ review missed.
 | Artifact/manifest audit | no | yes | yes | yes |
 | Coverage-gap detection | no | yes | yes | yes |
 | Per-reviewer attribution | no | 2 lenses | 4 lenses | 4 lenses |
-| Write isolation | no | no | `--allowedTools` | `-t file` |
+| Write isolation | no | no | `--disallowedTools`; codex and agy sandboxed | `-t file` |
 | Structured JSON schema | no | no | yes | yes |
 | Review packet persistence | no | no | yes | yes |
-| Cross-provider models | no | no | with Codex+Gemini | any provider |
+| Cross-provider models | no | no | with Codex + agy/Gemini | any provider |
 | Mandatory CI gate before commit | no | no | yes | yes |
 | Cost | free | free | free | ~$5-40 |
 | Latency | instant | ~30s | ~3 min | ~5 min |
@@ -103,7 +104,7 @@ ensemble-review agent (docs/ensemble-review.md)
   |  QUICK MODE:                         FULL MODE:                    |
   |  Agent(opus, spec-contract)          R1: hermes opus  OR  claude -p |
   |  Agent(sonnet, correctness)          R2: codex exec   (GPT-5.5)    |
-  |  (2 subagents, free)                 R3: gemini       OR  claude -p |
+  |  (2 subagents, free)                 R3: agy / gemini OR  claude -p |
   |                                      R4: hermes opus  OR  claude -p |
   |                                      (4 sessions, free or paid)    |
   |                                                                    |
@@ -159,7 +160,9 @@ When opted in, the precedence flips for Anthropic reviewers:
 | Spec-contract (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
 
 **With all CLIs installed** (claude + codex + agy or gemini): the full review
-is free, 3 provider families (Anthropic + OpenAI + Google).
+costs nothing beyond the subscriptions the CLIs sign in with (Claude, ChatGPT,
+and for agy a Google account's plan; the gemini CLI runs on AI Studio's free
+tier), across 3 provider families (Anthropic + OpenAI + Google).
 
 ## Coverage-gap detection
 
@@ -297,7 +300,8 @@ Results: 3/4 reviewers returned output; R3 found nothing on 5234 lines -- treat 
 why: the gemini CLI treats the prompt as a task and goes exploring the
 repository with its own tools, finishing a 200 KB diff in sixty seconds where
 the Claude reviewers take six minutes on the same input. It is opt-in now --
-`REVIEW_USE_GEMINI=1` -- and slot 3 falls through to the backend that works.
+`REVIEW_USE_GEMINI=1`. Slot 3 goes to agy where it is installed and its
+sandbox verified, and otherwise falls through to Claude.
 
 **A killed reviewer's work is not always dead.** `proc.kill()` kills the process
 the loop started, which is not always the one doing the work: a CLI that shells
@@ -485,26 +489,32 @@ Anthropic reviewers. For cross-provider diversity, also install:
   workspace by absolute path with nothing denied. Its plan mode never wrote
   in testing, but that is the model choosing not to, not agy refusing. So
   agy runs under `bwrap`: the filesystem read-only except an empty temp
-  workspace outside the repo; the home directory and `/tmp` replaced by
-  empty ones (no `~/.ssh`, no cloud credentials, no file sockets there --
-  tmux's among them); the environment cleared to a short allowlist -- bwrap's
-  own as well, since it is PID 1 inside and `/proc/1/environ` would
-  otherwise hold every API key the loop was started with; host
-  processes, the session bus at `/run/user/$UID/bus` and `docker.sock` out
-  of reach; and a throwaway copy of agy's state holding only its sign-in,
-  so nothing a run writes outlives it. Under that wrapper agy's own write
-  tool got `read-only file system`. The wrapper is verified at startup
-  without a model call, codex-style, and the slot is dropped if any of
-  that fails.
+  workspace outside the repo; the home directory, `/tmp` and `/run`
+  replaced by empty ones (no `~/.ssh`, no cloud credentials; none of the
+  sockets there -- tmux's, the session and system D-Bus, `docker.sock`,
+  snapd's -- with only the DNS resolver's directory put back); the
+  environment cleared to a short allowlist before `bwrap` starts, since
+  `bwrap` is PID 1 inside and `/proc/1/environ` would otherwise hold every
+  API key the loop was started with; host processes out of reach; and a
+  throwaway copy of agy's state holding only its sign-in, removed when the
+  round ends (or the runner is interrupted -- only a `SIGKILL` leaves it).
+  Under that wrapper agy's own write tool got `read-only file system`. The
+  wrapper is verified at startup without a model call, codex-style, and the
+  slot is dropped if any of that fails; until it passes agy is not run at
+  all, not even to list its models.
 
   Not closed, and worth knowing:
   - **The network**, which agy needs, and with it *abstract* sockets that
     live in the network namespace, not on disk: X11's `@/tmp/.X11-unix`,
-    and a session bus started by `dbus-launch`. Other system sockets under
-    `/run` stay reachable too.
+    and a session bus started by `dbus-launch`. File sockets outside `/run`
+    and `/tmp` stay reachable unless masked by name (docker's and LXD's are).
   - **Reads outside `$HOME` and `/tmp`.** A repository kept elsewhere
     (`/srv`, `/workspace`, a CI checkout) is readable unscrubbed, and so
     is `/var/tmp`.
+  - **Full mode runs the project's own copy of these scripts**, the
+    sandbox builder among them. Reviewing an untrusted branch that way
+    runs that branch's code; use the convergence loop from a trusted
+    checkout of this agent, with `--repo` pointing at the branch.
   - Headless agy refused the one shell command it tried, but agy also has
     browser and MCP tools, and whether those reach the network unprompted
     has not been tested.
@@ -514,8 +524,8 @@ Anthropic reviewers. For cross-provider diversity, also install:
   lives outside `$HOME`.
 
   **Default-on means data egress.** Wherever agy is installed and signed
-  in, the scrubbed diff and audit now also go to Google. Set
-  `REVIEW_USE_AGY=0` where that is not acceptable. Without `bwrap`,
+  in, the scrubbed diff and audit now also go to Google, and every run
+  says so. Set `REVIEW_USE_AGY=0` where that is not acceptable. Without `bwrap`,
   agy is skipped (`MMCRA_SKIP_AGY_SANDBOX_CHECK=1` runs it unwrapped, for
   a host that is already a sandbox). Its answer is held to the result
   schema with `--json-schema`, and its prompt tells it to call no tools:
@@ -761,10 +771,10 @@ have detected it via fingerprint matching and exited with code 2
 | Backend | Data path | Isolation | Cost |
 |---|---|---|---|
 | Hermes+Bedrock | Your AWS account | Best (`-t file`) | Bedrock pricing |
-| Claude CLI | Anthropic infrastructure | Good (`--allowedTools`) | Claude subscription |
+| Claude CLI | Anthropic infrastructure | Good (`--allowedTools` + `--disallowedTools`) | Claude subscription |
 | Codex CLI | OpenAI infrastructure | Good (sandbox) | ChatGPT subscription |
 | Gemini CLI | Google infrastructure | Good (`--approval-mode plan`) | AI Studio free tier |
-| Antigravity CLI | Google infrastructure | Good (`bwrap` read-only filesystem, home and env hidden, verified) | Google AI plan |
+| Antigravity CLI | Google infrastructure | Good (`bwrap` read-only filesystem; home, `/tmp`, `/run` and env hidden; verified) | Google AI plan |
 
 For sensitive/FDA-path code where data-at-rest guarantees matter, use
 Hermes+Bedrock for all reviewers.

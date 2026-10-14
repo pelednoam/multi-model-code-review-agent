@@ -486,18 +486,30 @@ Anthropic reviewers. For cross-provider diversity, also install:
   in testing, but that is the model choosing not to, not agy refusing. So
   agy runs under `bwrap`: the filesystem read-only except an empty temp
   workspace outside the repo; the home directory and `/tmp` replaced by
-  empty ones (no `~/.ssh`, no cloud credentials, no tmux or X11 sockets);
-  the environment cleared to a short allowlist; host processes, the D-Bus
-  session bus and `docker.sock` out of reach; and a throwaway copy of agy's
-  state holding only its sign-in, so nothing a run writes outlives it.
-  Under that wrapper agy's own write tool got `read-only file system`. The
-  wrapper is verified at startup without a model call, codex-style, and
-  the slot is dropped if any of that fails. Not closed: the network, which
-  agy needs, and with it abstract sockets and system sockets under `/run`.
-  Headless agy refused the one shell command it tried, but agy also has
-  browser and MCP tools, and whether those reach the network unprompted
-  has not been tested -- treat the sandbox as stopping writes and
-  credential reads, not as network isolation.
+  empty ones (no `~/.ssh`, no cloud credentials, no file sockets there --
+  tmux's among them); the environment cleared to a short allowlist; host
+  processes, the session bus at `/run/user/$UID/bus` and `docker.sock` out
+  of reach; and a throwaway copy of agy's state holding only its sign-in,
+  so nothing a run writes outlives it. Under that wrapper agy's own write
+  tool got `read-only file system`. The wrapper is verified at startup
+  without a model call, codex-style, and the slot is dropped if any of
+  that fails.
+
+  Not closed, and worth knowing:
+  - **The network**, which agy needs, and with it *abstract* sockets that
+    live in the network namespace, not on disk: X11's `@/tmp/.X11-unix`,
+    and a session bus started by `dbus-launch`. Other system sockets under
+    `/run` stay reachable too.
+  - **Reads outside `$HOME` and `/tmp`.** A repository kept elsewhere
+    (`/srv`, `/workspace`, a CI checkout) is readable unscrubbed, and so
+    is `/var/tmp`.
+  - Headless agy refused the one shell command it tried, but agy also has
+    browser and MCP tools, and whether those reach the network unprompted
+    has not been tested.
+
+  Treat the sandbox as stopping writes and reads of your home directory's
+  credentials -- not as network isolation, and not as hiding a repo that
+  lives outside `$HOME`.
 
   **Default-on means data egress.** Wherever agy is installed and signed
   in, the scrubbed diff and audit now also go to Google. Set

@@ -109,10 +109,13 @@ def codex_is_confined() -> tuple[bool, str]:
 #
 # So the boundary is the operating system's: agy runs under bubblewrap (agy_sandbox).
 # Measured under it with --mode=accept-edits, the worst case, agy's own write_to_file
-# failed with "read-only file system". The flags below stay as defence in depth, and
-# agy_is_confined() proves the wrapper -- with no model call -- before the slot is used.
+# failed with "read-only file system". agy_is_confined() proves the wrapper -- with no
+# model call -- before the slot is used. The flags below are the remaining defence:
+# --sandbox restricts terminal commands, and --disable-slash-commands keeps the
+# contributor's diff from expanding as a command or skill. There is no --mode=plan: agy
+# implements it as a slash command, so with expansion disabled it is a no-op -- agy says
+# so on stderr -- and a flag that does nothing must not be listed as a protection.
 AGY_SAFETY_ARGS: tuple[str, ...] = (
-    "--mode=plan",
     "--sandbox",
     "--disable-slash-commands",
 )
@@ -262,17 +265,20 @@ _AGY_STATE_COPIED = ("antigravity-oauth-token",)
 
 #: Sockets that run code outside any sandbox for whoever can connect: docker's runs a
 #: container with the host filesystem mounted, and a read-only mount does not stop a
-#: connect(). Masked where they exist. The user's runtime directory -- the D-Bus session
-#: bus, whose systemd answers `systemd-run --user`, and other tools' sockets and tokens --
-#: is replaced wholesale, and the variables that point at any of them are unset.
+#: connect(). Masked where they exist. /tmp (tmux's server socket, X11's, credential
+#: files other tools drop there) and the user's runtime directory (the D-Bus session bus,
+#: whose systemd answers `systemd-run --user`; other tools' sockets and tokens) are
+#: replaced wholesale.
 _HOST_SOCKETS = ("/run/docker.sock",)
-_SOCKET_ENV = (
-    "DBUS_SESSION_BUS_ADDRESS",
-    "SSH_AUTH_SOCK",
-    "DISPLAY",
-    "WAYLAND_DISPLAY",
-    "DOCKER_HOST",
-)
+
+#: The only environment agy gets. The rest -- API keys, cloud tokens, socket addresses --
+#: is one read of /proc/self/environ away from a file tool, with the network open.
+_AGY_ENV = (
+    "PATH", "HOME", "USER", "LOGNAME", "TERM", "TZ",
+    "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+    "SSL_CERT_FILE", "SSL_CERT_DIR",
+)  # fmt: skip
 
 
 def agy_seed_state(state: _Path) -> _Path:
@@ -299,16 +305,21 @@ def agy_sandbox(workspace: _Path, state: _Path) -> list[str]:
 
     - writes anywhere but the workspace (``--ro-bind / /``);
     - the home directory, read whole -- ``~/.ssh``, cloud credentials, other tools'
-      tokens -- replaced by an empty one holding only agy and its state;
+      tokens -- and /tmp, both replaced by empty ones holding only what agy needs;
     - agy's real state, replaced by ``state`` (see ``agy_seed_state``);
+    - the environment, cleared to ``_AGY_ENV``;
     - host processes, and through ``/proc/<pid>/cwd`` their writable view of the
       filesystem (``--unshare-pid``); a terminal to inject input into
       (``--new-session``, CVE-2017-5226);
-    - sockets that run code outside the sandbox (``_HOST_SOCKETS``, the user runtime
-      directory, ``_SOCKET_ENV``).
+    - sockets that run code outside the sandbox (``_HOST_SOCKETS``, /tmp, the user
+      runtime directory).
 
-    The network is left alone: agy is a client of a hosted model. The bash launcher in
-    docs/ensemble-review.md builds its wrapper by calling this, so there is one copy.
+    Not closed, and said so in the README: the network, which agy needs to reach its
+    model -- and with it abstract-namespace sockets -- and system sockets under /run.
+    What reaches those is a program, and headless agy refuses to run commands.
+
+    The bash launcher in docs/ensemble-review.md builds its wrapper by calling this, so
+    there is one copy.
     """
     home, real = _Path.home(), agy_state_dir()
     wrap = [
@@ -320,6 +331,7 @@ def agy_sandbox(workspace: _Path, state: _Path) -> list[str]:
         "--ro-bind", "/", "/",
         "--dev", "/dev",
         "--proc", "/proc",
+        "--tmpfs", "/tmp",
     ]  # fmt: skip
     runtime = _Path(f"/run/user/{os.getuid()}")
     if runtime.is_dir():
@@ -330,15 +342,17 @@ def agy_sandbox(workspace: _Path, state: _Path) -> list[str]:
     wrap += ["--tmpfs", str(home)]
     exe = shutil.which("agy")
     if exe:
-        for path in dict.fromkeys((exe, str(_Path(exe).resolve()))):
-            wrap += ["--ro-bind", str(_Path(exe).resolve()), path]
+        target = str(_Path(exe).resolve())
+        for path in dict.fromkeys((exe, target)):
+            wrap += ["--ro-bind", target, path]
     wrap += ["--bind", str(state), str(real)]
     for name in _AGY_STATE_SHARED:
         if (real / name).is_dir():
             wrap += ["--ro-bind", str(real / name), str(real / name)]
-    wrap += ["--bind", str(workspace), str(workspace)]
-    for var in _SOCKET_ENV:
-        wrap += ["--unsetenv", var]
+    wrap += ["--bind", str(workspace), str(workspace), "--clearenv"]
+    for var in _AGY_ENV:
+        if var in os.environ:
+            wrap += ["--setenv", var, os.environ[var]]
     return [*wrap, "--"]
 
 
@@ -388,15 +402,20 @@ def agy_result(stdout: str) -> dict[str, Any] | None:
     return None
 
 
+def _outside_tmp() -> str | None:
+    """A temp parent the sandbox leaves visible, for a canary agy must be able to read."""
+    return "/var/tmp" if os.access("/var/tmp", os.W_OK) else None
+
+
 def agy_is_confined() -> tuple[bool, str]:
     """Verify, with no model call, the wrapper a reviewer runs agy under.
 
     The codex check's three steps -- it runs, it reads, it refuses a write outside the
-    workspace -- then one per thing the wrapper claims to close: the workspace stays
-    writable (or agy fails looking like a reviewer with nothing to say), the home
-    directory is hidden, no host process is visible, no session bus or docker socket
-    is reachable. A canary that survives because the sandbox never launched is not a
-    pass.
+    workspace -- then one per thing the wrapper claims: agy itself starts in it, the
+    workspace stays writable (or agy fails looking like a reviewer with nothing to
+    say), home and /tmp hold only what was put there, the process namespace is not the
+    host's, the environment is cleared, no session bus or docker socket is reachable.
+    A canary that survives because the sandbox never launched is not a pass.
     """
     if shutil.which("bwrap") is None:
         return False, (
@@ -407,19 +426,30 @@ def agy_is_confined() -> tuple[bool, str]:
     try:
         with (
             tempfile.TemporaryDirectory() as ws,
-            tempfile.TemporaryDirectory() as out,
+            tempfile.TemporaryDirectory(dir=_outside_tmp()) as out,
             tempfile.TemporaryDirectory() as st,
         ):
-            workspace, canary = _Path(ws), _Path(out) / "canary.txt"
+            workspace, canary = _Path(ws).resolve(), _Path(out) / "canary.txt"
             canary.write_bytes(b"original")
-            wrap = agy_sandbox(workspace, agy_seed_state(_Path(st)))
+            wrap = agy_sandbox(workspace, agy_seed_state(_Path(st).resolve()))
 
-            def sh(script: str) -> subprocess.CompletedProcess[str]:
-                return _run([*wrap, "sh", "-c", script], cwd=workspace, timeout=30)
+            def sh(script: str, **kw: Any) -> subprocess.CompletedProcess[str]:
+                cmd = [*wrap, "sh", "-c", script]
+                return _run(cmd, cwd=workspace, timeout=30, **kw)
 
             def holds(test: str, path: str) -> bool:
                 said = sh(f"[ {test} {shlex.quote(path)} ] && echo YES").stdout or ""
                 return "YES" in said
+
+            def strays(root: _Path) -> set[str]:
+                """What ``root`` shows inside beyond what the wrapper mounted there."""
+                mounted = {
+                    _Path(arg).relative_to(root).parts[0]
+                    for arg in wrap
+                    if arg != str(root) and _Path(arg).is_relative_to(root)
+                }
+                listed = sh(f"ls -A {shlex.quote(str(root))}").stdout or ""
+                return set(listed.split()) - mounted
 
             # 1. does the sandbox run anything at all?
             ran = sh("echo SANDBOX_OK")
@@ -432,37 +462,42 @@ def agy_is_confined() -> tuple[bool, str]:
                         " namespaces; see docs/codex-sandbox.md"
                     )
                 return False, f"bwrap could not start: {detail}{hint}"
-            # 2. can it read outside? a reviewer that cannot read the system cannot run.
+            # 2. does agy itself start in it? A wrapper that hides agy's runtime
+            # passes every check below and leaves a slot that never answers.
+            started = sh("agy --version >/dev/null 2>&1 && echo AGY_OK").stdout or ""
+            if "AGY_OK" not in started:
+                return False, "agy does not start inside its sandbox"
+            # 3. can it read outside? a reviewer that cannot read the system cannot run.
             if "original" not in (sh(f"cat {shlex.quote(str(canary))}").stdout or ""):
                 return False, "bwrap sandbox could not read outside the workspace"
-            # 3. the one that matters: is a write outside the workspace REFUSED?
+            # 4. the one that matters: is a write outside the workspace REFUSED?
             sh(f"echo changed > {shlex.quote(str(canary))}")
             if not canary.is_file() or canary.read_bytes() != b"original":
                 return False, "bwrap sandbox ALLOWED a write outside the workspace"
-            # 4. and inside it, allowed? agy keeps its working files there.
+            # 5. and inside it, allowed? agy keeps its working files there.
             sh(f"echo ok > {shlex.quote(str(workspace / 'probe'))}")
             if not (workspace / "probe").is_file():
                 return False, "bwrap sandbox refused a write inside agy's workspace"
-            # 5. the escapes the wrapper exists to close beyond plain writes. The home
-            # directory holds nothing but what the wrapper put there on purpose.
-            home = _Path.home()
-            allowed = {
-                _Path(arg).relative_to(home).parts[0]
-                for arg in wrap
-                if arg != str(home) and _Path(arg).is_relative_to(home)
-            }
-            listed = sh(f"ls -A {shlex.quote(str(home))}").stdout or ""
-            extra = set(listed.split()) - allowed
-            if extra:
-                return False, f"bwrap sandbox shows the home dir ({sorted(extra)[0]})"
-            if holds("-e", f"/proc/{os.getpid()}"):
-                return False, "bwrap sandbox shows host processes (no --unshare-pid)"
+            # 6. the escapes the wrapper exists to close beyond plain writes.
+            for root in (_Path.home(), _Path("/tmp")):
+                extra = strays(root)
+                if extra:
+                    return False, f"bwrap sandbox shows {root}/{sorted(extra)[0]}"
+            # A namespace, compared as one: a host PID can exist inside too (the loop
+            # as PID 1 in a container), so looking one up proves nothing.
+            inner = (sh("readlink /proc/self/ns/pid").stdout or "").strip()
+            if not inner or inner == os.readlink("/proc/self/ns/pid"):
+                return False, "bwrap sandbox shares the host's processes"
+            probe = {**os.environ, "MMCRA_ENV_PROBE": "x"}
+            leak = sh('printf %s "$MMCRA_ENV_PROBE"', env=probe)
+            if (leak.stdout or "").strip():
+                return False, "bwrap sandbox passes the host environment through"
             for sock in (f"/run/user/{os.getuid()}/bus", *_HOST_SOCKETS):
                 if holds("-S", sock):
                     return False, f"bwrap sandbox can reach {sock}"
     except (OSError, subprocess.TimeoutExpired) as exc:
         return False, f"agy sandbox check failed: {exc}"
-    return True, "agy sandbox verified (read-only, home hidden, no pids or sockets)"
+    return True, "agy sandbox verified (read-only, home and /tmp hidden, env cleared)"
 
 
 def detect_backends(verify_codex: bool = True) -> dict[str, bool]:

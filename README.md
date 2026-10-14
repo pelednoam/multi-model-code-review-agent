@@ -484,11 +484,21 @@ Anthropic reviewers. For cross-provider diversity, also install:
   deny list, and measured on agy 1.3.4 it wrote to a file *outside* its
   workspace by absolute path with nothing denied. Its plan mode never wrote
   in testing, but that is the model choosing not to, not agy refusing. So
-  agy runs under `bwrap` with the whole filesystem read-only except an
-  empty temp workspace outside the repo and its own state directory; under
-  that wrapper agy's own write tool got `read-only file system`. The
+  agy runs under `bwrap`: the filesystem read-only except an empty temp
+  workspace outside the repo; the home directory and `/tmp` replaced by
+  empty ones (no `~/.ssh`, no cloud credentials, no tmux or X11 sockets);
+  the environment cleared to a short allowlist; host processes, the D-Bus
+  session bus and `docker.sock` out of reach; and a throwaway copy of agy's
+  state holding only its sign-in, so nothing a run writes outlives it.
+  Under that wrapper agy's own write tool got `read-only file system`. The
   wrapper is verified at startup without a model call, codex-style, and
-  the slot is dropped if it would let a write through. Without `bwrap`,
+  the slot is dropped if any of that fails. Not closed: the network, which
+  agy needs, and with it abstract sockets and system sockets under `/run`;
+  reaching those takes running a program, which headless agy refuses.
+
+  **Default-on means data egress.** Wherever agy is installed and signed
+  in, the scrubbed diff and audit now also go to Google. Set
+  `REVIEW_USE_AGY=0` where that is not acceptable. Without `bwrap`,
   agy is skipped (`MMCRA_SKIP_AGY_SANDBOX_CHECK=1` runs it unwrapped, for
   a host that is already a sandbox). Its answer is held to the result
   schema with `--json-schema`, and its prompt tells it to call no tools:
@@ -737,7 +747,7 @@ have detected it via fingerprint matching and exited with code 2
 | Claude CLI | Anthropic infrastructure | Good (`--allowedTools`) | Claude subscription |
 | Codex CLI | OpenAI infrastructure | Good (sandbox) | ChatGPT subscription |
 | Gemini CLI | Google infrastructure | Good (`--approval-mode plan`) | AI Studio free tier |
-| Antigravity CLI | Google infrastructure | Good (`bwrap` read-only filesystem, verified; `--mode=plan`) | Google AI plan |
+| Antigravity CLI | Google infrastructure | Good (`bwrap` read-only filesystem, home and env hidden, verified) | Google AI plan |
 
 For sensitive/FDA-path code where data-at-rest guarantees matter, use
 Hermes+Bedrock for all reviewers.

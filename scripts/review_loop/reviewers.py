@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+import json
 import os
 import shutil
 import signal
@@ -193,8 +194,12 @@ def _agy_cmd(model: str) -> list[str]:
     was answers the parser could not use; with ``--json-schema`` the shape is enforced
     by the CLI and arrives as ``structured_output``, not just requested in the prompt.
     """
-    extra = ["--json-schema", str(RESULT_SCHEMA)] if RESULT_SCHEMA.is_file() else []
-    return agy_command(model, *extra)
+    if not RESULT_SCHEMA.is_file():
+        return agy_command(model)
+    # Inline, not a path: the sandbox hides the home directory and /tmp, where a
+    # checkout usually lives, so the file would not exist for agy.
+    schema = json.dumps(json.loads(RESULT_SCHEMA.read_text(encoding="utf-8")))
+    return agy_command(model, "--json-schema", schema)
 
 
 def _agy_workspace(repo: Path | None = None) -> Path | None:

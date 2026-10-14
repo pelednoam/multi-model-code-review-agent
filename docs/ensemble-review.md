@@ -137,7 +137,7 @@ Bedrock opt-in precedence (PREFER_HERMES=true), used for regulated codebases tha
 | `claude` | `-p` | `--allowedTools "Read Grep Glob"` **plus** `--disallowedTools "Edit Write MultiEdit NotebookEdit Bash"` -- `--allowedTools` alone only skips the permission prompt, it does *not* confine the agent | stdin (`< prompt.txt`) | `--output-format json` wraps in `{"result":"..."}` |
 | `codex` | `codex exec` **plus `-s read-only` and `-c approvals_reviewer="user"`** -- both are pinned by the tool and neither is optional: no sandbox flag was passed at all before, and `-s read-only` on its own is silently overridden by a global `approvals_reviewer = "auto_review"` (see docs/codex-sandbox.md). Codex is also canary-tested at launch and its slot is DROPPED if the sandbox does not actually refuse a write (optional `-m <model> -c model_reasoning_effort=<level>` -- override via `CODEX_MODEL`, `CODEX_REASONING_EFFORT`; `=high` is the "GPT-5.5 Pro" equivalent) | verified read-only, not assumed | stdin (pipe) | `-o <file>` writes last message |
 | `gemini` | `-p` | `--model <m> --approval-mode plan --skip-trust` (default `<m>` is `gemini-2.5-flash` for free-tier compatibility; override via `GEMINI_MODEL`) | stdin (pipe) | stdout (text, may have fences) |
-| `agy` | `--input-format stream-json --output-format stream-json` (no `-p`: the prompt is one JSON line on stdin, because a single argument is capped at 128 KB) **plus `--mode=plan --sandbox`**, pinned. On by default where installed; `REVIEW_USE_AGY=0` switches it off. Model: `AGY_MODEL` if set, else the best Gemini model `agy models` lists, picked each run. agy has no deny list and was measured writing outside its workspace, so it runs under **bubblewrap with the filesystem read-only** except an empty temp workspace outside the repo and its state dir; the sandbox is verified at launch without a model call and the slot is DROPPED if it lets a write through. The prompt opens with a no-tools preamble: a refused tool call ends agy's turn with no answer | bubblewrap read-only filesystem, verified; `--mode=plan --sandbox --disable-slash-commands` | stdin (one stream-json line) | stream-json; the last `result` event carries `structured_output` (enforced by `--json-schema`) |
+| `agy` | `--input-format stream-json --output-format stream-json` (no `-p`: the prompt is one JSON line on stdin, because a single argument is capped at 128 KB) **plus `--sandbox --disable-slash-commands`**, pinned. On by default where installed; `REVIEW_USE_AGY=0` switches it off. Model: `AGY_MODEL` if set, else the best Gemini model `agy models` lists, picked each run. agy has no deny list and was measured writing outside its workspace, so it runs under **bubblewrap with the filesystem read-only** except an empty temp workspace outside the repo and its state dir; the sandbox is verified at launch without a model call and the slot is DROPPED if it lets a write through. The prompt opens with a no-tools preamble: a refused tool call ends agy's turn with no answer | bubblewrap read-only filesystem, verified; `--sandbox --disable-slash-commands` (no `--mode=plan`: it is a slash command, so a no-op once expansion is off) | stdin (one stream-json line) | stream-json; the last `result` event carries `structured_output` (enforced by `--json-schema`) |
 | `hermes` | `-z --yolo` | `-t file` | `-z` flag (has ARG_MAX risk for large prompts) | reviewer writes file directly |
 
 ### Retrieving the reviewers' output
@@ -553,9 +553,10 @@ launch_cli() {
       # throwaway copy of agy's state, no host processes or sockets. The prompt -- with the
       # preamble telling it to call no tools -- goes in as one stream-json line on stdin.
       local root="$PWD"
+      # The schema inline, not as a path: the sandbox hides home and /tmp, where the file lives.
       local schema_args=()
       [ -f "$root/docs/ensemble_review_result_schema.json" ] \
-        && schema_args=(--json-schema "$root/docs/ensemble_review_result_schema.json")
+        && schema_args=(--json-schema "$(cat "$root/docs/ensemble_review_result_schema.json")")
       # A failed mktemp leaves ws empty, `cd ""` succeeds, and agy would run in the repository.
       # Resolved, because a relative TMPDIR names a different place once the job has cd'd.
       local ws; ws="$(mktemp -d)" || return 1
@@ -564,7 +565,8 @@ launch_cli() {
         "$(pwd -P)"/*) echo "R$num: SKIPPED (agy workspace $ws is inside the repo; check TMPDIR)"
                        rm -rf "$ws"; return 1 ;;
       esac
-      local state; state="$(mktemp -d)" || { rm -rf "$ws"; return 1; }
+      local state; state="$(mktemp -d)" && state="$(cd "$state" && pwd -P)" \
+        || { rm -rf "$ws"; return 1; }
       local wrap=()
       case "${MMCRA_SKIP_AGY_SANDBOX_CHECK:-}" in
         ""|0)
@@ -574,7 +576,7 @@ launch_cli() {
           fi ;;
       esac
       { cd "$ws" && timeout -k 10 "$REVIEWER_TIMEOUT" "${wrap[@]}" agy \
-          --mode=plan --sandbox --disable-slash-commands \
+          --sandbox --disable-slash-commands \
           --model "$AGY_MODEL" \
           --input-format stream-json --output-format stream-json \
           --print-timeout 0 "${schema_args[@]}" \
@@ -828,7 +830,7 @@ Report what the status lines say rather than guessing. "Three of four are still 
 thing to tell a waiting human; silence is not.
 
 
-**Tool restriction**: Hermes uses `-t file` (best isolation). Claude CLI uses `--allowedTools "Read Grep Glob"` plus `--disallowedTools` for every writing tool. Codex is pinned to `-s read-only` and canary-verified. Gemini uses `--approval-mode plan` (read-only). agy runs under bubblewrap with the filesystem read-only outside an empty workspace, verified before use, plus `--mode=plan --sandbox`. Extraction errors logged to `$REVIEW_TMP/extract-N.err`.
+**Tool restriction**: Hermes uses `-t file` (best isolation). Claude CLI uses `--allowedTools "Read Grep Glob"` plus `--disallowedTools` for every writing tool. Codex is pinned to `-s read-only` (and canary-verified by the convergence loop; this runner does not run that check). Gemini uses `--approval-mode plan` (read-only). agy runs under bubblewrap -- filesystem read-only outside an empty workspace, home and /tmp hidden, environment cleared, verified before use -- plus `--sandbox --disable-slash-commands`. Extraction errors logged to `$REVIEW_TMP/extract-N.err`.
 
 ## 7. Collect and validate results
 

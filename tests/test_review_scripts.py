@@ -2266,10 +2266,10 @@ class TestAMissingReviewerIsNotConvergence:
 class TestAgyReviewer:
     """agy, the Antigravity CLI, in slot 3.
 
-    Its read-only-ness rests on three things and each is tested here: flags pinned in
-    code, an empty workspace outside the repository, and a canary that has to survive
-    before the slot is used at all. Its docs promise none of them on their own -- reads
-    and writes inside the workspace are auto-allowed in headless mode.
+    agy cannot make itself read-only -- measured, it wrote outside its workspace with
+    nothing denied -- so it runs under a bubblewrap wrapper, and that wrapper is proven
+    at startup without a model call. Where bwrap can run, the tests below run the real
+    wrapper and the real check, including with each protection removed.
     """
 
     MODEL = "gemini-4-argon"
@@ -2486,16 +2486,21 @@ class TestAgyReviewer:
     @pytest.mark.usefixtures("on")
     def test_the_safety_flags_are_pinned(self, tmp_path: Path) -> None:
         cmd = self._cmd(tmp_path)
-        assert "--mode=plan" in cmd
         assert "--sandbox" in cmd
+        # agy implements plan mode as a slash command: with expansion off it does
+        # nothing, and agy says so. A no-op flag must not pose as a protection.
+        assert not any(arg == "--mode" or arg.startswith("--mode=") for arg in cmd)
         # The prompt carries a contributor's diff; it must not expand as a slash command.
         assert "--disable-slash-commands" in cmd
         assert "--dangerously-skip-permissions" not in cmd
 
     @pytest.mark.usefixtures("on")
     def test_the_schema_is_enforced_by_the_cli(self, tmp_path: Path) -> None:
+        # Inline: the sandbox hides home and /tmp, so a path to the file would not resolve.
         cmd = self._cmd(tmp_path)
-        assert Path(cmd[cmd.index("--json-schema") + 1]) == SCHEMA_PATH
+        assert json.loads(cmd[cmd.index("--json-schema") + 1]) == json.loads(
+            SCHEMA_PATH.read_text()
+        )
 
     @pytest.mark.usefixtures("on")
     def test_the_prompt_is_not_an_argument(self, tmp_path: Path) -> None:
@@ -2748,8 +2753,10 @@ class TestAgyReviewer:
         ("drop", "caught"),
         [
             # Each protection, removed from the real wrapper, must fail the real check.
-            (("--unshare-pid",), "host processes"),
-            (("--tmpfs", "HOME"), "home dir"),
+            (("--unshare-pid",), "host's processes"),
+            (("--tmpfs", "HOME"), "HOME/"),
+            (("--tmpfs", "/tmp"), "/tmp/"),
+            (("--clearenv",), "environment"),
         ],
     )
     def test_the_real_check_catches_a_weakened_wrapper(
@@ -2771,7 +2778,7 @@ class TestAgyReviewer:
 
         monkeypatch.setattr(backends, "agy_sandbox", weakened)
         ok, reason = backends.agy_is_confined()
-        assert not ok and caught in reason
+        assert not ok and caught.replace("HOME", str(Path.home())) in reason
 
     @staticmethod
     def _unconfined(cmd: list[str], **kw: object) -> subprocess.CompletedProcess[str]:

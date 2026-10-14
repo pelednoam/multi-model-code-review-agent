@@ -307,7 +307,9 @@ def agy_sandbox(workspace: _Path, state: _Path) -> list[str]:
     - the home directory, read whole -- ``~/.ssh``, cloud credentials, other tools'
       tokens -- and /tmp, both replaced by empty ones holding only what agy needs;
     - agy's real state, replaced by ``state`` (see ``agy_seed_state``);
-    - the environment, cleared to ``_AGY_ENV``;
+    - the environment, cleared to ``_AGY_ENV`` -- bwrap's own too (``env -i``): it runs
+      as PID 1 inside, and ``/proc/1/environ`` would otherwise hand every API key in
+      the caller's environment to a file read, ``--clearenv`` notwithstanding;
     - host processes, and through ``/proc/<pid>/cwd`` their writable view of the
       filesystem (``--unshare-pid``); a terminal to inject input into
       (``--new-session``, CVE-2017-5226);
@@ -354,7 +356,10 @@ def agy_sandbox(workspace: _Path, state: _Path) -> list[str]:
     for var in _AGY_ENV:
         if var in os.environ:
             wrap += ["--setenv", var, os.environ[var]]
-    return [*wrap, "--"]
+    # env -i: bwrap starts with nothing, and --setenv above restores the allowlist; so
+    # bwrap needs an absolute path, PATH being gone by the time it is looked up.
+    wrap[0] = shutil.which("bwrap") or "bwrap"
+    return [shutil.which("env") or "env", "-i", *wrap, "--"]
 
 
 def agy_unsandboxed() -> bool:
@@ -491,8 +496,14 @@ def agy_is_confined() -> tuple[bool, str]:
             inner = (sh("readlink /proc/self/ns/pid").stdout or "").strip()
             if not inner or inner == os.readlink("/proc/self/ns/pid"):
                 return False, "bwrap sandbox shares the host's processes"
+            # Every process's environment, not only the child's: bwrap is PID 1 inside,
+            # and its /proc/1/environ is as readable as the child's own variables.
             probe = {**os.environ, "MMCRA_ENV_PROBE": "x"}
-            leak = sh('printf %s "$MMCRA_ENV_PROBE"', env=probe)
+            leak = sh(
+                'printf %s "$MMCRA_ENV_PROBE"; cat /proc/[0-9]*/environ 2>/dev/null'
+                " | tr '\\0' '\\n' | grep -q '^MMCRA_ENV_PROBE=' && echo LEAK",
+                env=probe,
+            )
             if (leak.stdout or "").strip():
                 return False, "bwrap sandbox passes the host environment through"
             for sock in (f"/run/user/{os.getuid()}/bus", *_HOST_SOCKETS):

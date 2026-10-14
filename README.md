@@ -487,7 +487,9 @@ Anthropic reviewers. For cross-provider diversity, also install:
   agy runs under `bwrap`: the filesystem read-only except an empty temp
   workspace outside the repo; the home directory and `/tmp` replaced by
   empty ones (no `~/.ssh`, no cloud credentials, no file sockets there --
-  tmux's among them); the environment cleared to a short allowlist; host
+  tmux's among them); the environment cleared to a short allowlist -- bwrap's
+  own as well, since it is PID 1 inside and `/proc/1/environ` would
+  otherwise hold every API key the loop was started with; host
   processes, the session bus at `/run/user/$UID/bus` and `docker.sock` out
   of reach; and a throwaway copy of agy's state holding only its sign-in,
   so nothing a run writes outlives it. Under that wrapper agy's own write

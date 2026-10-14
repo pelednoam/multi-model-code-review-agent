@@ -2381,6 +2381,18 @@ class TestAgyReviewer:
         self._listing(monkeypatch, ["claude-sonnet-4-6", "gpt-oss-120b-medium"])
         assert self._cmd(tmp_path)[0] == "claude"
 
+    @pytest.mark.usefixtures("on")
+    def test_a_broken_schema_falls_through_instead_of_aborting(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # The schema comes from this checkout, which may be the tree under review.
+        from scripts.review_loop import reviewers
+
+        broken = tmp_path / "schema.json"
+        broken.write_text("{not json", encoding="utf-8")
+        monkeypatch.setattr(reviewers, "RESULT_SCHEMA", broken)
+        assert self._cmd(tmp_path)[0] == "claude"
+
     def test_unset_model_is_picked_from_what_this_machine_lists(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -2788,7 +2800,9 @@ class TestAgyReviewer:
             (("--unshare-pid",), "host's processes"),
             (("--tmpfs", "HOME"), "HOME/"),
             (("--tmpfs", "/tmp"), "/tmp/"),
-            (("--clearenv",), "environment"),
+            # bwrap itself, PID 1 inside, readable at /proc/1/environ -- caught though
+            # the child's own environment is still cleared.
+            (("-i",), "environment"),
         ],
     )
     def test_the_real_check_catches_a_weakened_wrapper(
@@ -2811,6 +2825,24 @@ class TestAgyReviewer:
         monkeypatch.setattr(backends, "agy_sandbox", weakened)
         ok, reason = backends.agy_is_confined()
         assert not ok and caught.replace("HOME", str(Path.home())) in reason
+
+    def test_the_real_check_catches_a_wrapper_that_keeps_the_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Both layers gone -- env -i for bwrap, --clearenv for the child -- the
+        # child's own variables leak, and the check says so.
+        if not self._bwrap_works():
+            pytest.skip("bwrap or agy cannot run here")
+        from scripts.review_loop import backends
+
+        real = backends.agy_sandbox
+
+        def leaky(ws: Path, st: Path) -> list[str]:
+            return [a for a in real(ws, st) if a not in ("-i", "--clearenv")]
+
+        monkeypatch.setattr(backends, "agy_sandbox", leaky)
+        ok, reason = backends.agy_is_confined()
+        assert not ok and "environment" in reason
 
     @staticmethod
     def _unconfined(cmd: list[str], **kw: object) -> subprocess.CompletedProcess[str]:

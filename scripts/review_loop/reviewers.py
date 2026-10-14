@@ -323,7 +323,12 @@ def _choose_command(
         # agy_model() picks once per run, so every round runs the same model.
         model = agy_model()
         if model:
-            return _agy_cmd(model), model
+            # The schema is read from this checkout, which may be the tree under
+            # review; a broken one costs slot 3 its backend, not the round.
+            try:
+                return _agy_cmd(model), model
+            except (OSError, ValueError) as exc:
+                print(f"  agy: result schema unreadable ({exc}); trying next backend")
     if slot == 3 and _gemini_enabled() and backends["gemini"]:
         # Opt-in, because in practice it does not review. Across eight rounds
         # on a real project this slot returned zero findings every single time,

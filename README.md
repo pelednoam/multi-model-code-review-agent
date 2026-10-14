@@ -130,7 +130,7 @@ Default precedence (no Bedrock opt-in):
 |---|---|---|---|
 | Security (Opus) | Claude CLI opus (free) | Hermes Opus (Bedrock, paid) | -- |
 | Correctness | Codex CLI GPT-5.5 (free) | Claude CLI haiku (free) | Hermes Haiku (Bedrock) |
-| Readability | agy (opt-in, verified) or Gemini CLI | Claude CLI sonnet (free) | Hermes Sonnet (Bedrock) |
+| Readability | agy (verified) or Gemini CLI | Claude CLI sonnet (free) | Hermes Sonnet (Bedrock) |
 | Spec-contract (Opus) | Claude CLI opus (free) | Hermes Opus (Bedrock, paid) | -- |
 
 ### Bedrock opt-in (when you actually want Hermes)
@@ -155,7 +155,7 @@ When opted in, the precedence flips for Anthropic reviewers:
 |---|---|---|---|
 | Security (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
 | Correctness | Hermes Haiku (Bedrock) | Codex CLI GPT-5.5 (free) | Claude CLI haiku (free) |
-| Readability | Hermes Sonnet (Bedrock) | agy (opt-in, verified) or Gemini CLI | Claude CLI sonnet (free) |
+| Readability | Hermes Sonnet (Bedrock) | agy (verified) or Gemini CLI | Claude CLI sonnet (free) |
 | Spec-contract (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
 
 **With all CLIs installed** (claude + codex + gemini): the full review
@@ -465,11 +465,11 @@ Anthropic reviewers. For cross-provider diversity, also install:
   in your shell before running the agent.
 - [Antigravity CLI](https://antigravity.google/docs/cli/headless/) (`agy`)
   for Google's frontier models, e.g. Gemini 4 Argon, in the readability
-  slot. Opt-in, and it takes slot 3 ahead of the gemini CLI:
+  slot. On by default wherever it is installed, ahead of the gemini CLI;
+  `REVIEW_USE_AGY=0` switches it off. Setup is install and sign in:
   ```bash
   curl -fsSL https://antigravity.google/cli/install.sh | bash
   agy                                   # once, interactively: Google sign-in
-  export REVIEW_USE_AGY=1
   ```
   The model is picked for you each run: the best Gemini model `agy models`
   lists for your sign-in -- newest version, then Pro/Argon over Flash over

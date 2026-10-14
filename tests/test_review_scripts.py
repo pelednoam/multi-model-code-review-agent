@@ -29,6 +29,14 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 import scrub_diff  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _agy_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """agy is on by default wherever it is installed, and switching it on costs a model
+    call. Tests that fake ``shutil.which`` would otherwise reach a real agy on any machine
+    that has one; TestAgyReviewer switches it back on where that is the point."""
+    monkeypatch.setenv("REVIEW_USE_AGY", "0")
+
+
 class TestScrubDiff:
     """Tests for scripts/scrub_diff.py."""
 
@@ -2331,11 +2339,28 @@ class TestAgyReviewer:
         # The prompt names the model that actually answered, not the lens default.
         assert label == self.MODEL
 
-    def test_off_by_default(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def test_on_by_default(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.delenv("REVIEW_USE_AGY", raising=False)
         monkeypatch.setenv("AGY_MODEL", self.MODEL)
         monkeypatch.delenv("REVIEW_USE_GEMINI", raising=False)
+        assert self._cmd(tmp_path)[0] == "agy"
+
+    def test_zero_switches_it_off(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("REVIEW_USE_AGY", "0")
+        monkeypatch.setenv("AGY_MODEL", self.MODEL)
+        monkeypatch.delenv("REVIEW_USE_GEMINI", raising=False)
         assert self._cmd(tmp_path)[0] == "claude"
+
+    def test_on_by_default_still_means_verified(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Default-on changes who runs the check, not whether: unset still runs it.
+        monkeypatch.delenv("REVIEW_USE_AGY", raising=False)
+        monkeypatch.delenv("MMCRA_SKIP_AGY_SANDBOX_CHECK", raising=False)
+        monkeypatch.setenv("AGY_MODEL", self.MODEL)
+        assert self._detect(monkeypatch, (False, "write landed"))["agy"] is False
 
     def test_no_gemini_listed_means_no_agy(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -2692,10 +2717,10 @@ class TestAgyReviewer:
         monkeypatch.delenv("MMCRA_SKIP_AGY_SANDBOX_CHECK", raising=False)
         assert self._detect(monkeypatch, (True, "verified"))["agy"] is True
 
-    def test_no_model_call_unless_switched_on(
+    def test_no_model_call_when_switched_off(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.delenv("REVIEW_USE_AGY", raising=False)
+        monkeypatch.setenv("REVIEW_USE_AGY", "0")
         self._detect(monkeypatch, None)
 
     def test_switched_on_without_a_model_is_dropped_without_a_call(

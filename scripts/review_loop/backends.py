@@ -116,8 +116,13 @@ AGY_SAFETY_ARGS: tuple[str, ...] = ("--mode=plan", "--sandbox")
 
 
 def agy_enabled() -> bool:
-    """Whether the agy slot is switched on. Opt-in: it costs a model call to verify."""
-    return os.environ.get("REVIEW_USE_AGY", "") == "1"
+    """Whether the agy slot is switched on: by default, wherever agy is installed.
+
+    ``REVIEW_USE_AGY=0`` switches it off. On means one extra model call per run, for
+    the confinement check, before the slot is trusted; a machine without agy, or with
+    an agy that fails the check, falls through to the next backend for slot 3.
+    """
+    return os.environ.get("REVIEW_USE_AGY", "1") != "0"
 
 
 def agy_model() -> str | None:
@@ -324,8 +329,9 @@ def detect_backends(verify_codex: bool = True) -> dict[str, bool]:
     Set ``MMCRA_SKIP_CODEX_SANDBOX_CHECK=1`` to bypass (for hosts that are already
     externally sandboxed, e.g. a disposable container).
 
-    agy is held to the same standard, but only checked when ``REVIEW_USE_AGY=1``,
-    because its check is a model call. ``MMCRA_SKIP_AGY_SANDBOX_CHECK=1`` bypasses it.
+    agy is held to the same standard whenever it is installed and not switched off
+    (``REVIEW_USE_AGY=0``); its check is a model call. ``MMCRA_SKIP_AGY_SANDBOX_CHECK=1``
+    bypasses it.
     """
     found = {
         cli: shutil.which(cli) is not None
@@ -339,7 +345,7 @@ def detect_backends(verify_codex: bool = True) -> dict[str, bool]:
     if found["agy"] and agy_enabled():
         model = agy_model()
         if model is None:
-            print("  agy: DISABLED -- REVIEW_USE_AGY=1 but there is no model to run")
+            print("  agy: DISABLED -- there is no model to run")
             found["agy"] = False
         elif not os.environ.get("MMCRA_SKIP_AGY_SANDBOX_CHECK"):
             print(f"  agy: checking confinement ({model}, one model call)...")

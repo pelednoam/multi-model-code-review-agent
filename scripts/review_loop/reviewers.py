@@ -9,13 +9,13 @@ import shutil
 import signal
 import subprocess
 import tempfile
-import threading
 import time
 import uuid
 from pathlib import Path
 from typing import IO
 
 from .backends import (
+    AGY_EGRESS,
     AGY_PREAMBLE,
     agy_command,
     agy_enabled,
@@ -24,6 +24,7 @@ from .backends import (
     agy_sandbox,
     agy_seed_state,
     agy_unsandboxed,
+    sigterm_unwinds,
 )
 from .config import (
     LATE_RESULT_GRACE,
@@ -424,41 +425,55 @@ def _launch_one(
             cmd = [*agy_sandbox(workspace, state), *cmd]
         # What agy is actually sent, so the prompt file stays the record of it.
         prompt_path.write_text(AGY_PREAMBLE + prompt)
+        # On by default, so said whenever it runs: this is where the diff leaves.
+        print(f"  R{slot}: {AGY_EGRESS}")
 
     # Which backend answered, so its output is parsed as that backend's: a stream
     # that merely looks like agy's, from another reviewer, is not agy's verdict.
     (round_dir / f"backend-{slot}.txt").write_text(backend)
+    # The input as a file, not a pipe: a pipe holds 64 KB, so a large prompt
+    # blocked the launch loop until the reviewer read it -- forever, if it never
+    # did, with the deadline not yet started -- and one that exited unread raised
+    # BrokenPipeError. Unlinked already; the reviewer holds the only reference.
+    feed = None
+    if backend in _stdin_backends():
+        feed = tempfile.TemporaryFile("w+", encoding="utf-8")  # noqa: SIM115
+        feed.write(agy_review_message(prompt) if backend == "agy" else prompt)
+        feed.seek(0)
     # The Popen handles intentionally outlive these open() calls; they are
     # closed in launch_reviewers' wait loop after the subprocess finishes.
     out_f = open(round_dir / f"raw-{slot}.txt", "w", encoding="utf-8", errors="replace")  # noqa: SIM115
     err_f = open(
         round_dir / f"stderr-{slot}.txt", "w", encoding="utf-8", errors="replace"
     )  # noqa: SIM115
-    proc = subprocess.Popen(
-        cmd,
-        cwd=workspace,
-        stdin=subprocess.PIPE if backend in _stdin_backends() else None,
-        stdout=out_f,
-        stderr=err_f,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        # Its own process group, so a timeout can take down the helpers a CLI
-        # started rather than orphaning them to finish unread.
-        start_new_session=True,
-    )
-    if backend in _stdin_backends():
-        assert proc.stdin is not None  # PIPE guaranteed above
-        try:
-            proc.stdin.write(agy_review_message(prompt) if backend == "agy" else prompt)
-            proc.stdin.close()
-        except OSError as exc:
-            # An unauthenticated backend exits before reading, and the write
-            # raises BrokenPipeError. Unhandled it escaped the launch loop, so
-            # the reviewers already started were never waited on and their
-            # output files never closed. This slot simply produces no result.
-            print(f"  R{slot}: {backend} closed its input ({exc})")
-    print(f"  R{slot}: launched via {backend}")
+    proc: subprocess.Popen[str] | None = None
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=workspace,
+            stdin=feed,
+            stdout=out_f,
+            stderr=err_f,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            # Its own process group, so a timeout can take down the helpers a CLI
+            # started rather than orphaning them to finish unread.
+            start_new_session=True,
+        )
+        print(f"  R{slot}: launched via {backend}")
+    except BaseException:
+        # Until the tuple below is returned, the caller cannot clean this reviewer
+        # up, so an interrupt in here -- SIGTERM is one -- has to.
+        if proc is not None:
+            _kill_group(proc)
+            proc.wait()
+        out_f.close()
+        err_f.close()
+        raise
+    finally:
+        if feed is not None:
+            feed.close()
     return slot, proc, backend, out_f, err_f
 
 
@@ -483,33 +498,25 @@ def launch_reviewers(
     wrong as often as it is right.
     """
     procs: list[ReviewerProc] = []
-    # A plain SIGTERM ends Python without running finally blocks or atexit, which
-    # would leave the reviewers running and agy's token copy on disk.
-    in_main = threading.current_thread() is threading.main_thread()
-    previous = signal.signal(signal.SIGTERM, _terminate) if in_main else None
-    try:
-        for i, lens_args in enumerate(_LENSES, 1):
-            tracked = _launch_one(
-                i, lens_args, diff, audit, context, round_dir, backends,
-                prefer_hermes, repo,
-            )  # fmt: skip
-            if tracked is not None:
-                procs.append(tracked)
-        _await_reviewers(procs, round_dir, diff.count("\n") + 1)
-    finally:
-        for _, proc, _, out_f, err_f in procs:
-            if proc.poll() is None:
-                _kill_group(proc)
-            out_f.close()
-            err_f.close()
-        _release_scratch()
-        if in_main:
-            signal.signal(signal.SIGTERM, previous)
-
-
-def _terminate(signum: int, _frame: object) -> None:
-    """SIGTERM as an exit, so cleanup runs on the way out."""
-    raise SystemExit(128 + signum)
+    # A plain SIGTERM would skip the finally below, leaving the reviewers running
+    # and agy's token copy on disk.
+    with sigterm_unwinds():
+        try:
+            for i, lens_args in enumerate(_LENSES, 1):
+                tracked = _launch_one(
+                    i, lens_args, diff, audit, context, round_dir, backends,
+                    prefer_hermes, repo,
+                )  # fmt: skip
+                if tracked is not None:
+                    procs.append(tracked)
+            _await_reviewers(procs, round_dir, diff.count("\n") + 1)
+        finally:
+            for _, proc, _, out_f, err_f in procs:
+                if proc.poll() is None:
+                    _kill_group(proc)
+                out_f.close()
+                err_f.close()
+            _release_scratch()
 
 
 def _await_reviewers(procs: list[ReviewerProc], round_dir: Path, n_lines: int) -> None:

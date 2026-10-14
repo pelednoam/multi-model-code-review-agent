@@ -106,6 +106,14 @@ def _explain_missing(round_dir: Path, slot: int) -> list[str]:
     was silently binned while carrying a correct finding about duplicated tests.
     Whatever it wrote goes in front of the operator either way.
     """
+    failed = _agy_failure(round_dir, slot)
+    if failed:
+        # Whatever it drafted first is not a review it gave: the turn did not finish.
+        return [
+            f"  FAILED     -> R{slot} (agy) did not finish its turn:",
+            *[f"                {line}" for line in textwrap.wrap(failed, 74)],
+            f"                (in full: {round_dir / f'raw-{slot}.txt'})",
+        ]
     said = _salvage(round_dir, slot)
     if not said:
         return [f"  NO OUTPUT  -> R{slot} produced nothing; see stderr-{slot}.txt"]
@@ -115,6 +123,22 @@ def _explain_missing(round_dir: Path, slot: int) -> list[str]:
         *[f"                {line}" for line in textwrap.wrap(said, 74)],
         f"                (in full: {round_dir / f'raw-{slot}.txt'})",
     ]
+
+
+def _agy_failure(round_dir: Path, slot: int) -> str:
+    """Why agy's turn failed -- its status and error -- or "" if it did not fail.
+
+    A turn can fail after the model has written a whole review, as when the plan's
+    quota runs out mid-turn; shown as a reply in prose, the draft hid the reason.
+    """
+    raw = round_dir / f"raw-{slot}.txt"
+    if not ran_agy(round_dir, slot) or not raw.exists():
+        return ""
+    agy = agy_result(raw.read_text(encoding="utf-8", errors="replace"))
+    if agy is None or agy.get("status") == "SUCCESS":
+        return ""
+    error = str(agy.get("error") or "no error given").strip()[:_SALVAGE_CHARS]
+    return f"status {agy.get('status')}: {error}"
 
 
 def _salvage(round_dir: Path, slot: int) -> str:

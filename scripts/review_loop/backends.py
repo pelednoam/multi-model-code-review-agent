@@ -2,20 +2,24 @@
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import json
 import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import tempfile
+import threading
 from pathlib import Path as _Path
 from typing import TYPE_CHECKING, Any
 
 from .config import AGY_MODELS_TIMEOUT, REPO_ROOT
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
 
@@ -35,6 +39,31 @@ def _run(
         check=False,
         **kwargs,
     )
+
+
+@contextlib.contextmanager
+def sigterm_unwinds() -> Iterator[None]:
+    """Inside the block, SIGTERM exits Python with cleanup instead of skipping it.
+
+    A plain SIGTERM ends Python without running ``finally`` blocks, context-manager
+    exits or atexit. That would leave reviewers running, and copies of agy's sign-in
+    token on disk. So SIGTERM is raised as ``SystemExit(128 + signum)``, and the stack
+    unwinds. The previous handler is restored on the way out. Only the main thread can
+    install a handler; anywhere else this does nothing.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = signal.signal(signal.SIGTERM, _exit_on_signal)
+    try:
+        yield
+    finally:
+        # None: a handler installed outside Python, which cannot be put back.
+        signal.signal(signal.SIGTERM, signal.SIG_DFL if previous is None else previous)
+
+
+def _exit_on_signal(signum: int, _frame: object) -> None:
+    raise SystemExit(128 + signum)
 
 
 # Codex is the only reviewer whose read-only-ness depends on the HOST, not just on a
@@ -133,6 +162,11 @@ AGY_PREAMBLE = (
 )
 
 
+#: Said whenever agy takes slot 3, by both launchers: it is on by default, and this is
+#: where the scrubbed diff and audit leave for Google.
+AGY_EGRESS = "agy sends the diff and audit to Google (REVIEW_USE_AGY=0 to stop)"
+
+
 def agy_enabled() -> bool:
     """Whether the agy slot is switched on: by default, wherever agy is installed.
 
@@ -184,7 +218,11 @@ def agy_models() -> list[str]:
     agy runs in it treats as its workspace: not the repository, nor a shared /tmp.
     """
     try:
-        with tempfile.TemporaryDirectory() as ws, tempfile.TemporaryDirectory() as st:
+        with (
+            sigterm_unwinds(),
+            tempfile.TemporaryDirectory() as ws,
+            tempfile.TemporaryDirectory() as st,
+        ):
             workspace = _Path(ws).resolve()
             cmd = ["agy", "models"]
             if not agy_unsandboxed():
@@ -206,6 +244,9 @@ def agy_models() -> list[str]:
 
 
 _GEMINI_VERSION = re.compile(r"gemini-(\d+(?:\.\d+)*)")
+#: Gemini models that do not answer in text: they cannot write a review, so newer is
+#: not better. ``gemini-3.9-flash-image`` must not outrank ``gemini-3.8-flash-high``.
+_NOT_A_REVIEWER = re.compile(r"-(image|tts|audio|live|embedding|embed|computer-use)\b")
 _EFFORT = {"low": 0, "medium": 1, "high": 2}
 
 
@@ -213,13 +254,14 @@ def _agy_rank(slug: str) -> tuple[tuple[int, ...], int, int] | None:
     """How good a reviewer ``slug`` should be, or None if it is not a Gemini model.
 
     Gemini only: this slot exists to add a third provider family, and the Claude and
-    GPT models agy also offers duplicate what slots 1, 2 and 4 already run. Among
+    GPT models agy also offers duplicate what slots 1, 2 and 4 already run. Nor a
+    Gemini model that makes images, speech or embeddings rather than text. Among
     Gemini models: newest version first; then tier, with Lite below Flash below
     everything else (Pro, Argon, and whatever comes next); then reasoning effort, a
     slug without one counting as medium.
     """
     match = _GEMINI_VERSION.match(slug)
-    if match is None:
+    if match is None or _NOT_A_REVIEWER.search(slug):
         return None
     version = tuple(int(part) for part in match.group(1).split("."))
     rest = slug[match.end() :]
@@ -289,7 +331,7 @@ _HOST_SOCKETS = (
 #: is one read of /proc/self/environ away from a file tool, with the network open.
 #: Given to bwrap by ``env -i``, not as ``--setenv`` arguments: bwrap's command line is
 #: world-readable in /proc for the whole run, and a proxy URL can carry a password.
-#: env's own command line holds the values only until it execs bwrap.
+#: env's own command line holds the values only until it execs the next program.
 _AGY_ENV = (
     "PATH", "HOME", "USER", "LOGNAME", "TERM", "TZ",
     "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE",
@@ -316,7 +358,17 @@ def agy_seed_state(state: _Path) -> _Path:
 
 
 def agy_sandbox(workspace: _Path, state: _Path) -> list[str]:
-    """The bubblewrap prefix agy runs under. Everything is read-only except ``workspace``.
+    """The bubblewrap prefix agy runs under: ``agy_sandbox_parts``, joined."""
+    env, bwrap = agy_sandbox_parts(workspace, state)
+    return [*env, *bwrap]
+
+
+def agy_sandbox_parts(workspace: _Path, state: _Path) -> tuple[list[str], list[str]]:
+    """The bubblewrap prefix agy runs under, as ``env -i VAR=val...`` and bwrap's part.
+
+    Everything is read-only except ``workspace``. The parts are separate so that a
+    launcher can put a command between them: the bash runner's ``timeout`` goes after
+    env, so its command line, readable by any local user in /proc, holds no values.
 
     What it closes, each measured or reported by a review of this wrapper:
 
@@ -375,7 +427,7 @@ def agy_sandbox(workspace: _Path, state: _Path) -> list[str]:
     # bwrap by absolute path: env -i has emptied PATH by the time it is looked up.
     wrap[0] = shutil.which("bwrap") or "bwrap"
     keep = [f"{var}={os.environ[var]}" for var in _AGY_ENV if var in os.environ]
-    return [shutil.which("env") or "env", "-i", *keep, *wrap, "--"]
+    return [shutil.which("env") or "env", "-i", *keep], [*wrap, "--"]
 
 
 def agy_unsandboxed() -> bool:
@@ -451,9 +503,10 @@ def agy_is_confined() -> tuple[bool, str]:
     workspace stays writable (or agy fails looking like a reviewer with nothing to
     say), home and /tmp hold only what was put there, the process namespace is not the
     host's, the environment is cleared, /run holds only what was put there, and no
-    session bus or named host socket is reachable.
+    session bus or named host socket is reachable, by path or abstract name.
     A canary that survives because the sandbox never launched is not a pass.
     """
+    note = ""
     if shutil.which("bwrap") is None:
         return False, (
             "bwrap (bubblewrap) is not installed, and nothing else can make agy"
@@ -471,13 +524,16 @@ def agy_is_confined() -> tuple[bool, str]:
         )
     try:
         with (
+            sigterm_unwinds(),
             tempfile.TemporaryDirectory() as ws,
             tempfile.TemporaryDirectory(dir=outside) as out,
             tempfile.TemporaryDirectory() as st,
         ):
             workspace, canary = _Path(ws).resolve(), _Path(out) / "canary.txt"
             canary.write_bytes(b"original")
-            wrap = agy_sandbox(workspace, agy_seed_state(_Path(st).resolve()))
+            # An empty state: this checks the mounts, which need no sign-in, so there
+            # is no reason for a copy of the token to exist while it runs.
+            wrap = agy_sandbox(workspace, _Path(st).resolve())
 
             def sh(script: str, **kw: Any) -> subprocess.CompletedProcess[str]:
                 cmd = [*wrap, "sh", "-c", script]
@@ -553,9 +609,20 @@ def agy_is_confined() -> tuple[bool, str]:
             for sock in (f"/run/user/{os.getuid()}/bus", *_HOST_SOCKETS):
                 if holds("-S", sock):
                     return False, f"bwrap sandbox can reach {sock}"
+            # Abstract sockets belong to the network namespace, which agy keeps to reach
+            # its model, so no mount hides them. A dbus-launch session bus starts any
+            # program it is asked to: refused. An X server is reachable only if its
+            # access control lets this user in without the cookie, which the hidden home
+            # holds: named, not refused, or no desktop could run agy.
+            abstract = sh("cat /proc/net/unix").stdout or ""
+            if " @/tmp/dbus-" in abstract:
+                return False, "bwrap sandbox can reach a session bus (@/tmp/dbus-*)"
+            if " @/tmp/.X11-unix/" in abstract:
+                note = "; an X server is reachable (@/tmp/.X11-unix), see the README"
     except (OSError, subprocess.TimeoutExpired) as exc:
         return False, f"agy sandbox check failed: {exc}"
-    return True, "agy sandbox verified (read-only; home, /tmp, /run hidden; no env)"
+    verified = "agy sandbox verified (read-only; home, /tmp, /run hidden; no env)"
+    return True, verified + note
 
 
 def detect_backends(verify_codex: bool = True) -> dict[str, bool]:
@@ -592,11 +659,7 @@ def detect_backends(verify_codex: bool = True) -> dict[str, bool]:
             ok, reason = agy_is_confined()
             print(f"  agy: {'' if ok else 'DISABLED for review -- '}{reason}")
             found["agy"] = ok
-    if found["agy"]:
-        if agy_model() is None:
-            print("  agy: DISABLED -- there is no model to run")
-            found["agy"] = False
-        else:
-            # On by default, so said every run: this is where the diff leaves for Google.
-            print("  agy: slot 3 sends the diff and audit to Google (REVIEW_USE_AGY=0)")
+    if found["agy"] and agy_model() is None:
+        print("  agy: DISABLED -- there is no model to run")
+        found["agy"] = False
     return found

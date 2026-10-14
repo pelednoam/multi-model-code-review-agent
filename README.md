@@ -500,14 +500,22 @@ Anthropic reviewers. For cross-provider diversity, also install:
   round ends (or the runner is interrupted -- only a `SIGKILL` leaves it).
   Under that wrapper agy's own write tool got `read-only file system`. The
   wrapper is verified at startup without a model call, codex-style, and the
-  slot is dropped if any of that fails; until it passes agy is not run at
-  all, not even to list its models.
+  slot is dropped if any of that fails. Until it passes, agy runs only as
+  `agy --version` inside the wrapper being checked: no model call, not even
+  a listing of its models.
 
   Not closed, and worth knowing:
   - **The network**, which agy needs, and with it *abstract* sockets that
-    live in the network namespace, not on disk: X11's `@/tmp/.X11-unix`,
-    and a session bus started by `dbus-launch`. File sockets outside `/run`
-    and `/tmp` stay reachable unless masked by name (docker's and LXD's are).
+    live in the network namespace, not on disk. The startup check refuses
+    a session bus started by `dbus-launch` (`@/tmp/dbus-*`), and names an
+    X server listening on `@/tmp/.X11-unix` without refusing it: one that
+    lets your user in without the cookie (`xhost +si:localuser:...`) takes
+    keystrokes from inside. File sockets outside `/run` and `/tmp` stay
+    reachable unless masked by name (docker's and LXD's are).
+  - **agy's own credentials.** Its sign-in token (the copy) and any proxy
+    URL in the allowlisted environment are readable inside, and the network
+    is open, so a diff that talks agy into a network-capable tool could send
+    them out.
   - **Reads outside `$HOME` and `/tmp`.** A repository kept elsewhere
     (`/srv`, `/workspace`, a CI checkout) is readable unscrubbed, and so
     is `/var/tmp`.
@@ -519,13 +527,14 @@ Anthropic reviewers. For cross-provider diversity, also install:
     browser and MCP tools, and whether those reach the network unprompted
     has not been tested.
 
-  Treat the sandbox as stopping writes and reads of your home directory's
-  credentials -- not as network isolation, and not as hiding a repo that
-  lives outside `$HOME`.
+  Treat the sandbox as stopping file writes and reads of your home
+  directory's credentials -- not as network isolation, not as hiding a repo
+  that lives outside `$HOME`, and not as a boundary against an X server
+  that admits your user without its cookie.
 
   **Default-on means data egress.** Wherever agy is installed and signed
-  in, the scrubbed diff and audit now also go to Google, and every run
-  says so. Set `REVIEW_USE_AGY=0` where that is not acceptable. Without `bwrap`,
+  in, the scrubbed diff and audit now also go to Google, and every round
+  that sends them says so. Set `REVIEW_USE_AGY=0` where that is not acceptable. Without `bwrap`,
   agy is skipped (`MMCRA_SKIP_AGY_SANDBOX_CHECK=1` runs it unwrapped, for
   a host that is already a sandbox). Its answer is held to the result
   schema with `--json-schema`, and its prompt tells it to call no tools:

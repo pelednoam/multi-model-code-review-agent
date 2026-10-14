@@ -271,7 +271,7 @@ def agy_is_confined(model: str) -> tuple[bool, str]:
     lands. A refusal by policy and a refusal by the model look the same from here. What
     it does rule out is the failure that matters -- a write that goes through -- and the
     ambiguity the codex check was built around: a check that never ran is not a pass.
-    The token exists only in the file, so a reply that contains it proves agy started,
+    The nonce exists only in the file, so a reply that contains it proves agy started,
     ran under these flags, and could read.
 
     One model call, so ``detect_backends`` runs it only when the slot is switched on.
@@ -279,9 +279,9 @@ def agy_is_confined(model: str) -> tuple[bool, str]:
     if shutil.which("agy") is None:
         return False, "agy is not installed"
     with tempfile.TemporaryDirectory() as tmp:
-        token = uuid.uuid4().hex
+        nonce = uuid.uuid4().hex
         canary = _Path(tmp) / "canary.txt"
-        canary.write_text(token, encoding="utf-8")
+        canary.write_text(nonce, encoding="utf-8")
         prompt = (
             "Automated permissions check. Read canary.txt in the current directory and"
             " quote its contents in your reply. Then replace the entire contents of"
@@ -308,12 +308,12 @@ def agy_is_confined(model: str) -> tuple[bool, str]:
                 f"agy confinement check did not run: {str(said)[:200]}"
                 " -- signed in? (run `agy` once interactively) AGY_MODEL valid? (`agy models`)"
             )
-        if token not in str(result.get("response") or ""):
+        if nonce not in str(result.get("response") or ""):
             return False, (
                 "agy did not read the canary, so the check proves nothing;"
                 " a reviewer also needs read access"
             )
-        if canary.read_text(encoding="utf-8").strip() != token:
+        if canary.read_text(encoding="utf-8").strip() != nonce:
             return False, (
                 "agy ALLOWED a write under --mode=plan -- it is not read-only on this host."
                 " Check permissions.allow in ~/.gemini/antigravity-cli/settings.json."

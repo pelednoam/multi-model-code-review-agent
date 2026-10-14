@@ -2482,6 +2482,8 @@ class TestAgyReviewer:
         cmd = self._cmd(tmp_path)
         assert "--mode=plan" in cmd
         assert "--sandbox" in cmd
+        # The prompt carries a contributor's diff; it must not expand as a slash command.
+        assert "--disable-slash-commands" in cmd
         assert "--dangerously-skip-permissions" not in cmd
 
     @pytest.mark.usefixtures("on")
@@ -2498,57 +2500,97 @@ class TestAgyReviewer:
         assert cmd[cmd.index("--output-format") + 1] == "stream-json"
 
     @pytest.mark.usefixtures("on")
-    def test_agy_does_not_cut_off_a_review_the_loop_would_wait_for(
-        self, tmp_path: Path
-    ) -> None:
-        from scripts.review_loop.config import REVIEWER_TIMEOUT_MAX
-
+    def test_the_loop_owns_the_deadline(self, tmp_path: Path) -> None:
+        # REVIEWER_TIMEOUT can raise the loop's deadline past any ceiling fixed here.
         cmd = self._cmd(tmp_path)
-        assert cmd[cmd.index("--print-timeout") + 1] == f"{REVIEWER_TIMEOUT_MAX // 60}m"
+        assert cmd[cmd.index("--print-timeout") + 1] == "0"
 
-    @pytest.mark.usefixtures("on")
-    def test_launch_is_outside_the_repo_with_one_stream_json_line(
+    # -- the launch --------------------------------------------------------------
+
+    class _Pipe:
+        text = ""
+
+        def write(self, s: str) -> None:
+            self.text += s
+
+        def close(self) -> None:
+            pass
+
+    def _launch(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    ) -> tuple[object, dict[str, object]]:
         from scripts.review_loop import reviewers
 
-        class _Pipe:
-            text = ""
-
-            def write(self, s: str) -> None:
-                self.text += s
-
-            def close(self) -> None:
-                pass
-
         seen: dict[str, object] = {}
+        pipe = self._Pipe()
 
         class _Proc:
             pid = 1
 
             def __init__(self, cmd: list[str], **kw: object) -> None:
-                seen.update(kw, cmd=cmd)
-                self.stdin = _Pipe()
-                seen["stdin"] = self.stdin
+                seen.update(kw, cmd=cmd, stdin=pipe)
+                self.stdin = pipe
 
         monkeypatch.setattr(reviewers.subprocess, "Popen", _Proc)
         tracked = reviewers._launch_one(
             3, reviewers._LENSES[2], "+DIFF-MARKER", "{}", "ctx", tmp_path, self.BACKENDS
         )
+        if tracked is not None:
+            tracked[3].close()
+            tracked[4].close()
+        return tracked, seen
+
+    @pytest.mark.usefixtures("on")
+    def test_launch_is_sandboxed_outside_the_repo(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from scripts.review_loop.backends import AGY_PREAMBLE, agy_sandbox
+
+        monkeypatch.delenv("MMCRA_SKIP_AGY_SANDBOX_CHECK", raising=False)
+        tracked, seen = self._launch(monkeypatch, tmp_path)
         assert tracked is not None
-        tracked[3].close()
-        tracked[4].close()
+        assert tracked[2] == "agy"  # reported as agy, not as its wrapper
 
         workspace = Path(str(seen["cwd"]))
         assert workspace.is_dir() and not any(workspace.iterdir())
         assert REPO_ROOT not in workspace.parents
+        cmd = seen["cmd"]
+        assert isinstance(cmd, list)
+        wrap = agy_sandbox(workspace)
+        assert cmd[: len(wrap)] == wrap
+        assert cmd[len(wrap)] == "agy"
+
         stdin = seen["stdin"]
-        assert isinstance(stdin, _Pipe)
-        lines = stdin.text.splitlines()
-        assert len(lines) == 1
-        message = json.loads(lines[0])
-        assert message["event"] == "user"
-        assert "+DIFF-MARKER" in message["message"]["content"]
+        assert isinstance(stdin, self._Pipe)
+        (line,) = stdin.text.splitlines()
+        content = json.loads(line)["message"]["content"]
+        assert content.startswith(AGY_PREAMBLE)
+        assert "+DIFF-MARKER" in content
+        # The prompt file is the record of what agy was actually sent.
+        assert (tmp_path / "prompt-3.txt").read_text() == content
+
+    @pytest.mark.usefixtures("on")
+    def test_a_host_that_is_already_a_sandbox_runs_agy_bare(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("MMCRA_SKIP_AGY_SANDBOX_CHECK", "1")
+        _, seen = self._launch(monkeypatch, tmp_path)
+        cmd = seen["cmd"]
+        assert isinstance(cmd, list) and cmd[0] == "agy"
+
+    @pytest.mark.usefixtures("on")
+    def test_a_workspace_inside_the_repo_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # TMPDIR pointed into the project puts the one writable directory there.
+        from scripts.review_loop import reviewers
+
+        repo = tmp_path / "repo"
+        (repo / "tmp").mkdir(parents=True)
+        monkeypatch.setattr(reviewers, "REPO_ROOT", repo)
+        monkeypatch.setattr(reviewers.tempfile, "tempdir", str(repo / "tmp"))
+        tracked, seen = self._launch(monkeypatch, tmp_path)
+        assert tracked is None and not seen
 
     # -- reading its answer ------------------------------------------------------
 
@@ -2593,99 +2635,142 @@ class TestAgyReviewer:
         result = extract_results(tmp_path)[2]
         assert result is not None and result["model"] == self.MODEL
 
+    @pytest.mark.parametrize("status", ["ERROR", "CANCELED", "INTERRUPTED", "WAITING"])
+    def test_an_unfinished_turn_is_not_a_review(self, tmp_path: Path, status: str) -> None:
+        # However review-shaped its output, a turn that did not finish is a hole in
+        # the round, not a clean bill -- or it would count towards convergence.
+        from scripts.review_loop.results import extract_results
+
+        (tmp_path / "raw-3.txt").write_text(
+            self._stream({"status": status, "structured_output": self._review()})
+        )
+        assert extract_results(tmp_path)[2] is None
+
     def test_a_failed_turn_says_why(self, tmp_path: Path) -> None:
         (tmp_path / "raw-3.txt").write_text(
             self._stream({"status": "ERROR", "error": "quota exhausted for this model"})
         )
         assert "quota exhausted" in describe_outputs(tmp_path)
 
+    def test_a_refused_tool_call_is_named_not_silent(self, tmp_path: Path) -> None:
+        # The first real sweep: `ls -la`, denied, turn over, empty response, and the
+        # round said only "NO OUTPUT".
+        (tmp_path / "raw-3.txt").write_text(
+            self._stream(
+                {
+                    "status": "SUCCESS",
+                    "response": "",
+                    "denied_actions": [{"action": "command", "display_name": "RunCommand"}],
+                }
+            )
+        )
+        said = describe_outputs(tmp_path)
+        assert "refused tool call" in said and "RunCommand" in said
+
     def test_claude_envelopes_are_unaffected(self) -> None:
-        from scripts.review_loop.results import _unwrap_claude_result
+        from scripts.review_loop.results import _unwrap_envelope
 
         claude = json.dumps({"type": "result", "result": '{"a": 1}'})
-        assert _unwrap_claude_result(claude) == '{"a": 1}'
+        assert _unwrap_envelope(claude) == '{"a": 1}'
 
-    # -- the confinement check ---------------------------------------------------
+    # -- the sandbox check -------------------------------------------------------
 
     @staticmethod
-    def _agy(
-        reply: str | None = None,
-        writes: bool = False,
-        status: str = "SUCCESS",
-        stdout: str | None = None,
-        calls: list[dict[str, object]] | None = None,
-    ):  # type: ignore[no-untyped-def]
-        def run(cmd: list[str], cwd: Path, **kw: object) -> SimpleNamespace:
-            if calls is not None:
-                calls.append({"cmd": cmd, "cwd": cwd, **kw})
-            canary = Path(cwd) / "canary.txt"
-            token = canary.read_text()
-            if writes:
-                canary.write_text("changed")
-            if stdout is not None:
-                return SimpleNamespace(stdout=stdout, stderr="Error: authentication required")
-            said = reply if reply is not None else f"The file says {token}."
-            event = {"event": "result", "result": {"status": status, "response": said}}
-            return SimpleNamespace(stdout=json.dumps(event), stderr="")
+    def _bwrap_works() -> bool:
+        import shutil as _shutil
 
-        return run
+        if _shutil.which("bwrap") is None:
+            return False
+        done = subprocess.run(
+            ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "true"],
+            capture_output=True,
+            check=False,
+        )
+        return done.returncode == 0
 
-    def _confined(
-        self, monkeypatch: pytest.MonkeyPatch, run: object
-    ) -> tuple[bool, str]:
+    def test_the_real_sandbox_refuses_writes_outside_the_workspace(self) -> None:
+        """Not a mock: the wrapper agy runs under, against the real filesystem."""
+        if not self._bwrap_works():
+            pytest.skip("bwrap cannot run here")
+        from scripts.review_loop.backends import agy_is_confined
+
+        ok, reason = agy_is_confined()
+        assert ok, reason
+
+    @staticmethod
+    def _unconfined(cmd: list[str], **kw: object) -> subprocess.CompletedProcess[str]:
+        # A "sandbox" that runs the command with the wrapper stripped: no confinement.
+        bare = cmd[cmd.index("--") + 1 :]
+        return subprocess.run(bare, capture_output=True, text=True, check=False)
+
+    def test_a_sandbox_that_lets_writes_through_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         from scripts.review_loop import backends
 
         monkeypatch.setattr(backends.shutil, "which", lambda c: f"/usr/bin/{c}")
-        monkeypatch.setattr(backends, "_run", run)
-        return backends.agy_is_confined(self.MODEL)
+        monkeypatch.setattr(backends, "_run", self._unconfined)
+        ok, reason = backends.agy_is_confined()
+        assert not ok and "ALLOWED a write" in reason
 
-    def test_a_refused_write_passes(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        ok, reason = self._confined(monkeypatch, self._agy())
-        assert ok, reason
-
-    def test_a_write_that_lands_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        ok, reason = self._confined(monkeypatch, self._agy(writes=True))
-        assert not ok
-        assert "ALLOWED a write" in reason
-
-    def test_a_check_that_never_ran_is_not_a_pass(
+    def test_a_sandbox_that_cannot_start_is_not_a_pass(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The codex ambiguity again: an untouched canary is also what nothing looks like."""
-        ok, reason = self._confined(monkeypatch, self._agy(stdout=""))
-        assert not ok
-        assert "did not run" in reason
-        assert "authentication required" in reason
+        from scripts.review_loop import backends
 
-    def test_a_failed_turn_is_not_a_pass(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        ok, reason = self._confined(monkeypatch, self._agy(status="ERROR"))
-        assert not ok and "did not run" in reason
+        monkeypatch.setattr(backends.shutil, "which", lambda c: f"/usr/bin/{c}")
+        monkeypatch.setattr(
+            backends,
+            "_run",
+            lambda *a, **k: SimpleNamespace(
+                stdout="", stderr="bwrap: setting up uid map: Permission denied"
+            ),
+        )
+        ok, reason = backends.agy_is_confined()
+        assert not ok and "could not start" in reason and "namespaces" in reason
 
-    def test_a_reply_without_the_token_is_not_a_pass(
+    def test_no_bwrap_is_not_a_pass(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from scripts.review_loop import backends
+
+        monkeypatch.setattr(backends.shutil, "which", lambda c: None)
+        ok, reason = backends.agy_is_confined()
+        assert not ok and "bwrap" in reason
+
+    @pytest.mark.parametrize(
+        "failure", [OSError("exec failed"), subprocess.TimeoutExpired(["bwrap"], 30)]
+    )
+    def test_a_check_that_crashes_disables_rather_than_aborts(
+        self, monkeypatch: pytest.MonkeyPatch, failure: Exception
+    ) -> None:
+        # Raised out of detect_backends, this stopped every other reviewer too.
+        from scripts.review_loop import backends
+
+        def boom(*a: object, **k: object) -> None:
+            raise failure
+
+        monkeypatch.setattr(backends.shutil, "which", lambda c: f"/usr/bin/{c}")
+        monkeypatch.setattr(backends, "_run", boom)
+        ok, reason = backends.agy_is_confined()
+        assert not ok and "check failed" in reason
+
+    def test_the_check_proves_the_wrapper_a_reviewer_runs_under(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # It answered, but nothing shows it read the file -- so nothing shows it tried.
-        ok, reason = self._confined(monkeypatch, self._agy(reply="I will not do that."))
-        assert not ok and "did not read" in reason
+        from scripts.review_loop import backends
 
-    def test_a_hung_check_is_not_a_pass(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        def hang(cmd: list[str], **kw: object) -> None:
-            raise subprocess.TimeoutExpired(cmd, 1)
+        calls: list[list[str]] = []
 
-        ok, reason = self._confined(monkeypatch, hang)
-        assert not ok and "did not finish" in reason
+        def record(cmd: list[str], **kw: object) -> SimpleNamespace:
+            calls.append(cmd)
+            return SimpleNamespace(stdout="", stderr="")
 
-    def test_the_check_runs_agy_exactly_as_a_reviewer_does(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from scripts.review_loop.backends import AGY_SAFETY_ARGS, agy_command
-
-        calls: list[dict[str, object]] = []
-        self._confined(monkeypatch, self._agy(calls=calls))
-        (call,) = calls
-        assert call["cmd"] == agy_command(self.MODEL)
-        assert set(AGY_SAFETY_ARGS) <= set(agy_command(self.MODEL))
-        assert json.loads(str(call["input"]))["event"] == "user"
+        monkeypatch.setattr(backends.shutil, "which", lambda c: f"/usr/bin/{c}")
+        monkeypatch.setattr(backends, "_run", record)
+        backends.agy_is_confined()
+        (first,) = calls  # it stops at "could not start"
+        workspace = Path(first[first.index("--bind") + 1])
+        assert first[: first.index("--") + 1] == backends.agy_sandbox(workspace)
 
     # -- detection ---------------------------------------------------------------
 
@@ -2697,7 +2782,7 @@ class TestAgyReviewer:
         monkeypatch.setenv("MMCRA_SKIP_CODEX_SANDBOX_CHECK", "1")
         monkeypatch.setattr(backends.shutil, "which", lambda c: f"/usr/bin/{c}")
 
-        def check(model: str) -> tuple[bool, str]:
+        def check() -> tuple[bool, str]:
             if verdict is None:
                 raise AssertionError("the agy check ran when it should not have")
             return verdict
@@ -2717,13 +2802,12 @@ class TestAgyReviewer:
         monkeypatch.delenv("MMCRA_SKIP_AGY_SANDBOX_CHECK", raising=False)
         assert self._detect(monkeypatch, (True, "verified"))["agy"] is True
 
-    def test_no_model_call_when_switched_off(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_nothing_runs_when_switched_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("REVIEW_USE_AGY", "0")
-        self._detect(monkeypatch, None)
+        # And the backend table says so, rather than reporting an unused agy as present.
+        assert self._detect(monkeypatch, None)["agy"] is False
 
-    def test_switched_on_without_a_model_is_dropped_without_a_call(
+    def test_switched_on_without_a_model_is_dropped_without_a_check(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("REVIEW_USE_AGY", "1")
@@ -2731,24 +2815,33 @@ class TestAgyReviewer:
         self._listing(monkeypatch, ["claude-sonnet-4-6"])
         assert self._detect(monkeypatch, None)["agy"] is False
 
-    def test_the_check_runs_on_the_picked_model(
+    def test_a_picked_model_still_has_to_pass_the_check(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from scripts.review_loop import backends
-
         monkeypatch.setenv("REVIEW_USE_AGY", "1")
         monkeypatch.delenv("AGY_MODEL", raising=False)
         monkeypatch.delenv("MMCRA_SKIP_AGY_SANDBOX_CHECK", raising=False)
-        monkeypatch.setenv("MMCRA_SKIP_CODEX_SANDBOX_CHECK", "1")
         self._listing(monkeypatch, self.LISTED)
-        checked: list[str] = []
-        monkeypatch.setattr(
-            backends, "agy_is_confined", lambda m: (checked.append(m) or True, "ok")
-        )
-        assert backends.detect_backends()["agy"] is True
-        assert checked == ["gemini-3.8-flash-high"]
+        assert self._detect(monkeypatch, (False, "no bwrap"))["agy"] is False
 
     @pytest.mark.usefixtures("on")
     def test_the_check_can_be_skipped(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("MMCRA_SKIP_AGY_SANDBOX_CHECK", "1")
         assert self._detect(monkeypatch, None)["agy"] is True
+
+    # -- the full-mode runner ----------------------------------------------------
+
+    def test_the_bash_launcher_matches_the_python_one(self) -> None:
+        """The doc is the program for full mode; it must not be the weaker path."""
+        from scripts.review_loop.backends import AGY_SAFETY_ARGS
+
+        runner = TestRunnerScript()._runner()
+        for flag in AGY_SAFETY_ARGS:
+            assert flag in runner
+        assert "--print-timeout 0" in runner
+        assert "bwrap --ro-bind / / --dev /dev --proc /proc" in runner
+        assert '--bind "$ws" "$ws" --bind "$state" "$state" --die-with-parent --' in runner
+        assert "agy_review_message" in runner  # the same preamble, from the same place
+        # A failed mktemp must not fall back to running agy in the repository.
+        assert 'ws="$(mktemp -d)" || return 1' in runner
+        assert "rm -rf \"$ws\"" in runner

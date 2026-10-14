@@ -13,11 +13,20 @@ import uuid
 from pathlib import Path
 from typing import IO
 
-from .backends import agy_command, agy_enabled, agy_message, agy_model
+from .backends import (
+    AGY_PREAMBLE,
+    agy_command,
+    agy_enabled,
+    agy_model,
+    agy_review_message,
+    agy_sandbox,
+    agy_unsandboxed,
+)
 from .config import (
     LATE_RESULT_GRACE,
     POLL_INTERVAL,
     PROGRESS_INTERVAL,
+    REPO_ROOT,
     RESULT_SCHEMA,
     reviewer_timeout,
 )
@@ -187,16 +196,19 @@ def _agy_cmd(model: str) -> list[str]:
     return agy_command(model, *extra)
 
 
-def _agy_workspace() -> str:
-    """An empty directory for agy to run in, outside the repository under review.
+def _agy_workspace() -> Path | None:
+    """An empty directory for agy to run in, outside the repository -- or None.
 
-    agy auto-allows reads *and writes* inside its workspace, so the repository must not
-    be its workspace. Everything it needs -- the diff and the audit -- is in the prompt.
-    Empty also leaves nothing to wander through: the gemini CLI's failure in this slot
-    was exploring the repository instead of reviewing the diff in front of it.
+    The workspace is the one place the sandbox leaves writable, so it must not be the
+    repository or inside it. ``mkdtemp`` follows TMPDIR, which a project can point at a
+    directory of its own, so the result is checked rather than assumed. Everything agy
+    needs is in the prompt; empty also leaves nothing to wander through.
     """
-    path = tempfile.mkdtemp(prefix="mmcra-agy-")
+    path = Path(tempfile.mkdtemp(prefix="mmcra-agy-")).resolve()
     atexit.register(shutil.rmtree, path, ignore_errors=True)
+    for root in {REPO_ROOT.resolve(), Path.cwd().resolve()}:
+        if path == root or root in path.parents:
+            return None
     return path
 
 
@@ -355,17 +367,30 @@ def _launch_one(
         )
         prompt_path.write_text(prompt)
 
+    backend = cmd[0]
+    workspace: Path | None = None
+    if backend == "agy":
+        workspace = _agy_workspace()
+        if workspace is None:
+            print(
+                f"  R{slot}: SKIPPED (agy's workspace is inside the repo; check TMPDIR)"
+            )
+            return None
+        if not agy_unsandboxed():
+            cmd = [*agy_sandbox(workspace), *cmd]
+        # What agy is actually sent, so the prompt file stays the record of it.
+        prompt_path.write_text(AGY_PREAMBLE + prompt)
+
     # The Popen handles intentionally outlive these open() calls; they are
     # closed in launch_reviewers' wait loop after the subprocess finishes.
     out_f = open(round_dir / f"raw-{slot}.txt", "w", encoding="utf-8", errors="replace")  # noqa: SIM115
     err_f = open(
         round_dir / f"stderr-{slot}.txt", "w", encoding="utf-8", errors="replace"
     )  # noqa: SIM115
-    is_agy = cmd[0] == "agy"
     proc = subprocess.Popen(
         cmd,
-        cwd=_agy_workspace() if is_agy else None,
-        stdin=subprocess.PIPE if cmd[0] in _stdin_backends() else None,
+        cwd=workspace,
+        stdin=subprocess.PIPE if backend in _stdin_backends() else None,
         stdout=out_f,
         stderr=err_f,
         text=True,
@@ -375,19 +400,19 @@ def _launch_one(
         # started rather than orphaning them to finish unread.
         start_new_session=True,
     )
-    if cmd[0] in _stdin_backends():
+    if backend in _stdin_backends():
         assert proc.stdin is not None  # PIPE guaranteed above
         try:
-            proc.stdin.write(agy_message(prompt) if is_agy else prompt)
+            proc.stdin.write(agy_review_message(prompt) if workspace else prompt)
             proc.stdin.close()
         except OSError as exc:
             # An unauthenticated backend exits before reading, and the write
             # raises BrokenPipeError. Unhandled it escaped the launch loop, so
             # the reviewers already started were never waited on and their
             # output files never closed. This slot simply produces no result.
-            print(f"  R{slot}: {cmd[0]} closed its input ({exc})")
-    print(f"  R{slot}: launched via {cmd[0]}")
-    return slot, proc, cmd[0], out_f, err_f
+            print(f"  R{slot}: {backend} closed its input ({exc})")
+    print(f"  R{slot}: launched via {backend}")
+    return slot, proc, backend, out_f, err_f
 
 
 def launch_reviewers(

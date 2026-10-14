@@ -130,7 +130,7 @@ Default precedence (no Bedrock opt-in):
 |---|---|---|---|
 | Security (Opus) | Claude CLI opus (free) | Hermes Opus (Bedrock, paid) | -- |
 | Correctness | Codex CLI GPT-5.5 (free) | Claude CLI haiku (free) | Hermes Haiku (Bedrock) |
-| Readability | agy (verified) or Gemini CLI | Claude CLI sonnet (free) | Hermes Sonnet (Bedrock) |
+| Readability | agy (sandboxed), else Gemini CLI (`REVIEW_USE_GEMINI=1`) | Claude CLI sonnet (free) | Hermes Sonnet (Bedrock) |
 | Spec-contract (Opus) | Claude CLI opus (free) | Hermes Opus (Bedrock, paid) | -- |
 
 ### Bedrock opt-in (when you actually want Hermes)
@@ -155,10 +155,10 @@ When opted in, the precedence flips for Anthropic reviewers:
 |---|---|---|---|
 | Security (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
 | Correctness | Hermes Haiku (Bedrock) | Codex CLI GPT-5.5 (free) | Claude CLI haiku (free) |
-| Readability | Hermes Sonnet (Bedrock) | agy (verified) or Gemini CLI | Claude CLI sonnet (free) |
+| Readability | Hermes Sonnet (Bedrock) | agy (sandboxed), else Gemini CLI (`REVIEW_USE_GEMINI=1`) | Claude CLI sonnet (free) |
 | Spec-contract (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
 
-**With all CLIs installed** (claude + codex + gemini): the full review
+**With all CLIs installed** (claude + codex + agy or gemini): the full review
 is free, 3 provider families (Anthropic + OpenAI + Google).
 
 ## Coverage-gap detection
@@ -477,13 +477,23 @@ Anthropic reviewers. For cross-provider diversity, also install:
   models are passed over, because slots 1, 2 and 4 already cover those
   providers. Which models you get depends on your plan (Argon needs Google
   AI Ultra or an eligible Gemini Enterprise plan); when it gets Argon, the
-  next run uses it. `AGY_MODEL=<slug>` overrides the pick. agy auto-allows writes inside its
-  workspace and has no deny list, so the slot is pinned three ways:
-  `--mode=plan --sandbox`, an empty temp workspace outside the repo (the
-  diff and audit are in the prompt), and a canary check at startup -- one
-  model call -- that drops the slot if a write gets through
-  (`MMCRA_SKIP_AGY_SANDBOX_CHECK=1` skips it on an already-sandboxed host).
-  Its answer is held to the result schema with `--json-schema`.
+  next run uses it. `AGY_MODEL=<slug>` overrides the pick.
+
+  **agy needs [bubblewrap](https://github.com/containers/bubblewrap)
+  (`bwrap`), so Linux only.** agy cannot make itself read-only: it has no
+  deny list, and measured on agy 1.3.4 it wrote to a file *outside* its
+  workspace by absolute path with nothing denied. Its plan mode never wrote
+  in testing, but that is the model choosing not to, not agy refusing. So
+  agy runs under `bwrap` with the whole filesystem read-only except an
+  empty temp workspace outside the repo and its own state directory; under
+  that wrapper agy's own write tool got `read-only file system`. The
+  wrapper is verified at startup without a model call, codex-style, and
+  the slot is dropped if it would let a write through. Without `bwrap`,
+  agy is skipped (`MMCRA_SKIP_AGY_SANDBOX_CHECK=1` runs it unwrapped, for
+  a host that is already a sandbox). Its answer is held to the result
+  schema with `--json-schema`, and its prompt tells it to call no tools:
+  headless agy refuses them, and a refused call ends its turn with no
+  answer.
 - [Hermes Agent](https://github.com/NousResearch/hermes-agent) +
   AWS Bedrock for best isolation (data stays in your AWS account)
 
@@ -727,7 +737,7 @@ have detected it via fingerprint matching and exited with code 2
 | Claude CLI | Anthropic infrastructure | Good (`--allowedTools`) | Claude subscription |
 | Codex CLI | OpenAI infrastructure | Good (sandbox) | ChatGPT subscription |
 | Gemini CLI | Google infrastructure | Good (`--approval-mode plan`) | AI Studio free tier |
-| Antigravity CLI | Google infrastructure | Good (`--mode=plan --sandbox`, empty workspace, canary-verified) | Google AI plan |
+| Antigravity CLI | Google infrastructure | Good (`bwrap` read-only filesystem, verified; `--mode=plan`) | Google AI plan |
 
 For sensitive/FDA-path code where data-at-rest guarantees matter, use
 Hermes+Bedrock for all reviewers.

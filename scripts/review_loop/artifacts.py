@@ -127,8 +127,19 @@ def _salvage(round_dir: Path, slot: int) -> str:
         return ""
     agy = agy_result(text)
     if agy is not None:
-        # A failed turn has no response but says why, which is the useful part.
+        # A failed turn has no response but says why, which is the useful part. So
+        # does one cut short by a refused tool call, which otherwise reads as silence.
         said = agy.get("response") or agy.get("error") or ""
+        denied = [
+            d.get("display_name") or d.get("action")
+            for d in agy.get("denied_actions") or []
+            if isinstance(d, dict)
+        ]
+        if not said and denied:
+            said = (
+                f"agy ended its turn with no answer after a refused tool call"
+                f" ({', '.join(map(str, denied))})"
+            )
         return str(said).strip()[:_SALVAGE_CHARS]
     try:
         wrapper = json.loads(text)

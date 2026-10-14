@@ -6,19 +6,14 @@ import functools
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
-import uuid
 from pathlib import Path as _Path
 from typing import TYPE_CHECKING, Any
 
-from .config import (
-    AGY_CHECK_TIMEOUT,
-    AGY_MODELS_TIMEOUT,
-    REPO_ROOT,
-    REVIEWER_TIMEOUT_MAX,
-)
+from .config import AGY_MODELS_TIMEOUT, REPO_ROOT
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -105,22 +100,43 @@ def codex_is_confined() -> tuple[bool, str]:
 
 
 # agy, the Antigravity CLI, is the second reviewer whose read-only-ness has to be shown
-# rather than assumed, and it is the weaker case. Its headless docs say reads AND writes
-# inside the active workspace are auto-allowed; there is no deny list like claude's
-# --disallowedTools; --sandbox restricts terminal commands, not file edits; and --mode=plan
-# is described as investigating "before writing code", not as forbidding it. So the slot
-# is pinned three ways: plan mode and the terminal sandbox (AGY_SAFETY_ARGS), an empty
-# workspace outside the repository (reviewers._agy_workspace), and a canary that has to
-# survive before the slot is used at all (agy_is_confined).
-AGY_SAFETY_ARGS: tuple[str, ...] = ("--mode=plan", "--sandbox")
+# rather than assumed, and nothing agy offers can show it. Measured on agy 1.3.4: under
+# --mode=accept-edits it wrote a file OUTSIDE its workspace, by absolute path, with no
+# denial recorded -- so the workspace is not a boundary. Under --mode=plan it never
+# wrote, in five tries, even when told the write was pre-approved; but nothing was ever
+# denied either, so that is the model declining, not agy refusing. And there is no deny
+# list like claude's --disallowedTools; --sandbox restricts terminal commands only.
+#
+# So the boundary is the operating system's. agy runs under bubblewrap with the whole
+# filesystem read-only except two directories it needs: its own empty workspace and its
+# state directory. Measured under that wrapper with --mode=accept-edits, the worst case:
+# agy's write_to_file failed with "read-only file system". The flags below stay as
+# defence in depth, and agy_is_confined() proves the wrapper -- with no model call --
+# before the slot is used.
+AGY_SAFETY_ARGS: tuple[str, ...] = (
+    "--mode=plan",
+    "--sandbox",
+    "--disable-slash-commands",
+)
+
+#: Prepended to the reviewer prompt for agy only. Measured: given the shared prompt, the
+#: model's first act was `ls -la`; headless mode denied it, and a denied tool call ends
+#: the turn with no answer -- status SUCCESS, empty response. The claude reviewers have
+#: Read/Grep/Glob and use them; agy has nothing worth reading, so it is told so.
+AGY_PREAMBLE = (
+    "You need no tools for this review and must not call any. The diff and the audit"
+    " below are the whole input, and your working directory is deliberately empty."
+    " Do not run commands, list or read files, or write a plan: a tool call is refused"
+    " here, and a refused tool call ends your turn with no answer, which discards your"
+    " review. Read the material below and reply with the JSON object it asks for.\n\n"
+)
 
 
 def agy_enabled() -> bool:
     """Whether the agy slot is switched on: by default, wherever agy is installed.
 
-    ``REVIEW_USE_AGY=0`` switches it off. On means one extra model call per run, for
-    the confinement check, before the slot is trusted; a machine without agy, or with
-    an agy that fails the check, falls through to the next backend for slot 3.
+    ``REVIEW_USE_AGY=0`` switches it off. A machine without agy, or where its sandbox
+    cannot be proven, falls through to the next backend for slot 3.
     """
     return os.environ.get("REVIEW_USE_AGY", "1") != "0"
 
@@ -163,9 +179,13 @@ def agy_models() -> list[str]:
 
     Its output is a progress line, then one ``<slug>\\t<display name>`` per model.
     """
+    # Not from the repository: whatever agy runs in, it treats as its workspace.
     try:
         done = _run(
-            ["agy", "models"], stdin=subprocess.DEVNULL, timeout=AGY_MODELS_TIMEOUT
+            ["agy", "models"],
+            cwd=_Path(tempfile.gettempdir()),
+            stdin=subprocess.DEVNULL,
+            timeout=AGY_MODELS_TIMEOUT,
         )
     except (subprocess.TimeoutExpired, OSError):
         return []
@@ -206,17 +226,15 @@ def best_agy_model(slugs: list[str]) -> str | None:
 
 
 def agy_command(model: str, *extra: str) -> list[str]:
-    """The agy invocation shared by the reviewer and its confinement check.
+    """The agy invocation for a reviewer, before the sandbox wrapper.
 
     The prompt goes in on stdin as one stream-json line (``agy_message``), not through
     ``-p``: a single argument is capped at 128 KB on Linux, which a large diff passes
     before agy even starts. agy exits once stdin closes and the turn completes.
 
-    ``--print-timeout`` is pinned to the loop's own ceiling. Builds before 1.3 defaulted
-    to five minutes, shorter than the deadline the loop gives a reviewer on a large diff;
-    1.3.4 defaults to no limit. It is here rather than on the reviewer alone so the
-    confinement check exercises it: a flag some build rejects then disables the slot
-    with a reason, once, instead of failing every round.
+    ``--print-timeout 0`` is "no limit" (the default on 1.3.4; builds before 1.3
+    defaulted to five minutes). The loop owns the deadline: it scales with the diff and
+    REVIEWER_TIMEOUT can raise it past any ceiling fixed here.
     """
     return [
         "agy",
@@ -228,14 +246,57 @@ def agy_command(model: str, *extra: str) -> list[str]:
         "--output-format",
         "stream-json",
         "--print-timeout",
-        f"{REVIEWER_TIMEOUT_MAX // 60}m",
+        "0",
         *extra,
     ]
+
+
+def agy_state_dir() -> _Path:
+    """Where agy keeps sign-in state, conversations and plans; it must stay writable."""
+    return _Path.home() / ".gemini" / "antigravity-cli"
+
+
+def agy_sandbox(workspace: _Path) -> list[str]:
+    """The bubblewrap prefix: every path read-only except the workspace and agy's state.
+
+    Kept in step with the bash launcher in docs/ensemble-review.md by a test. The
+    network is left alone -- agy is a client of a hosted model -- and so is /proc, which
+    it needs to run at all.
+    """
+    state = str(agy_state_dir())
+    return [
+        "bwrap",
+        "--ro-bind",
+        "/",
+        "/",
+        "--dev",
+        "/dev",
+        "--proc",
+        "/proc",
+        "--bind",
+        str(workspace),
+        str(workspace),
+        "--bind",
+        state,
+        state,
+        "--die-with-parent",
+        "--",
+    ]
+
+
+def agy_unsandboxed() -> bool:
+    """Whether the host is trusted to confine agy itself (a disposable container)."""
+    return bool(os.environ.get("MMCRA_SKIP_AGY_SANDBOX_CHECK"))
 
 
 def agy_message(prompt: str) -> str:
     """One prompt, framed the way ``--input-format stream-json`` reads it."""
     return json.dumps({"event": "user", "message": {"content": prompt}}) + "\n"
+
+
+def agy_review_message(prompt: str) -> str:
+    """The reviewer prompt as agy receives it: the preamble, then the shared prompt."""
+    return agy_message(AGY_PREAMBLE + prompt)
 
 
 def agy_result(stdout: str) -> dict[str, Any] | None:
@@ -263,62 +324,55 @@ def agy_result(stdout: str) -> dict[str, Any] | None:
     return None
 
 
-def agy_is_confined(model: str) -> tuple[bool, str]:
-    """Verify that agy, run exactly as a reviewer runs, does not write to its workspace.
+def agy_is_confined() -> tuple[bool, str]:
+    """Verify, with no model call, that agy's sandbox refuses writes outside its workspace.
 
-    Weaker than the codex check, and worth saying why: agy has no model-free sandbox
-    subcommand, so this has to ask the *model* to write and watch whether the write
-    lands. A refusal by policy and a refusal by the model look the same from here. What
-    it does rule out is the failure that matters -- a write that goes through -- and the
-    ambiguity the codex check was built around: a check that never ran is not a pass.
-    The nonce exists only in the file, so a reply that contains it proves agy started,
-    ran under these flags, and could read.
-
-    One model call, so ``detect_backends`` runs it only when the slot is switched on.
+    The codex check's three steps, against the exact wrapper a reviewer runs under, plus
+    a fourth: the workspace must stay writable, or agy fails in a way that looks like a
+    reviewer with nothing to say. A canary that survives because the sandbox never
+    launched is not a pass.
     """
-    if shutil.which("agy") is None:
-        return False, "agy is not installed"
-    with tempfile.TemporaryDirectory() as tmp:
-        nonce = uuid.uuid4().hex
-        canary = _Path(tmp) / "canary.txt"
-        canary.write_text(nonce, encoding="utf-8")
-        prompt = (
-            "Automated permissions check. Read canary.txt in the current directory and"
-            " quote its contents in your reply. Then replace the entire contents of"
-            " canary.txt with the single word: changed."
+    if shutil.which("bwrap") is None:
+        return False, (
+            "bwrap (bubblewrap) is not installed, and nothing else can make agy"
+            " read-only; install it, or set MMCRA_SKIP_AGY_SANDBOX_CHECK=1 on a host"
+            " that is already sandboxed"
         )
-        try:
-            done = _run(
-                agy_command(model),
-                cwd=_Path(tmp),
-                input=agy_message(prompt),
-                timeout=AGY_CHECK_TIMEOUT,
-            )
-        except subprocess.TimeoutExpired:
-            return (
-                False,
-                f"agy did not finish the confinement check in {AGY_CHECK_TIMEOUT}s",
-            )
-        result = agy_result(done.stdout or "")
-        if result is None or result.get("status") != "SUCCESS":
-            said = (result or {}).get("error") or (
-                (done.stderr or "").strip().splitlines() or ["no output"]
-            )[-1]
-            return False, (
-                f"agy confinement check did not run: {str(said)[:200]}"
-                " -- signed in? (run `agy` once interactively) AGY_MODEL valid? (`agy models`)"
-            )
-        if nonce not in str(result.get("response") or ""):
-            return False, (
-                "agy did not read the canary, so the check proves nothing;"
-                " a reviewer also needs read access"
-            )
-        if canary.read_text(encoding="utf-8").strip() != nonce:
-            return False, (
-                "agy ALLOWED a write under --mode=plan -- it is not read-only on this host."
-                " Check permissions.allow in ~/.gemini/antigravity-cli/settings.json."
-            )
-    return True, "agy verified: ran, read its workspace, did not write to it"
+    try:
+        agy_state_dir().mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory() as ws, tempfile.TemporaryDirectory() as out:
+            workspace, canary = _Path(ws), _Path(out) / "canary.txt"
+            canary.write_bytes(b"original")
+            wrap = agy_sandbox(workspace)
+
+            def sh(script: str) -> subprocess.CompletedProcess[str]:
+                return _run([*wrap, "sh", "-c", script], cwd=workspace, timeout=30)
+
+            # 1. does the sandbox run anything at all?
+            ran = sh("echo SANDBOX_OK")
+            if "SANDBOX_OK" not in (ran.stdout or ""):
+                detail = ((ran.stderr or "").strip().splitlines() or [""])[-1][:200]
+                hint = ""
+                if "uid map" in detail or "userns" in detail or "namespace" in detail:
+                    hint = (
+                        " -- looks like the kernel is blocking unprivileged user"
+                        " namespaces; see docs/codex-sandbox.md"
+                    )
+                return False, f"bwrap could not start: {detail}{hint}"
+            # 2. can it read outside? a reviewer that cannot read the system cannot run.
+            if "original" not in (sh(f"cat {shlex.quote(str(canary))}").stdout or ""):
+                return False, "bwrap sandbox could not read outside the workspace"
+            # 3. the one that matters: is a write outside the workspace REFUSED?
+            sh(f"echo changed > {shlex.quote(str(canary))}")
+            if not canary.is_file() or canary.read_bytes() != b"original":
+                return False, "bwrap sandbox ALLOWED a write outside the workspace"
+            # 4. and inside it, allowed? agy keeps its working files there.
+            sh(f"echo ok > {shlex.quote(str(workspace / 'probe'))}")
+            if not (workspace / "probe").is_file():
+                return False, "bwrap sandbox refused a write inside agy's workspace"
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"agy sandbox check failed: {exc}"
+    return True, "agy sandbox verified read-only outside its workspace (no model call)"
 
 
 def detect_backends(verify_codex: bool = True) -> dict[str, bool]:
@@ -330,8 +384,9 @@ def detect_backends(verify_codex: bool = True) -> dict[str, bool]:
     externally sandboxed, e.g. a disposable container).
 
     agy is held to the same standard whenever it is installed and not switched off
-    (``REVIEW_USE_AGY=0``); its check is a model call. ``MMCRA_SKIP_AGY_SANDBOX_CHECK=1``
-    bypasses it.
+    (``REVIEW_USE_AGY=0``): its sandbox is proven by ``agy_is_confined``.
+    ``MMCRA_SKIP_AGY_SANDBOX_CHECK=1`` runs agy without the sandbox, for hosts that
+    are already one.
     """
     found = {
         cli: shutil.which(cli) is not None
@@ -342,14 +397,16 @@ def detect_backends(verify_codex: bool = True) -> dict[str, bool]:
         if not ok:
             print(f"  codex: DISABLED for review -- {reason}")
             found["codex"] = False
-    if found["agy"] and agy_enabled():
-        model = agy_model()
-        if model is None:
+    if found["agy"] and not agy_enabled():
+        found["agy"] = False  # installed is not the same as in use; say which
+    if found["agy"]:
+        if agy_model() is None:
             print("  agy: DISABLED -- there is no model to run")
             found["agy"] = False
-        elif not os.environ.get("MMCRA_SKIP_AGY_SANDBOX_CHECK"):
-            print(f"  agy: checking confinement ({model}, one model call)...")
-            ok, reason = agy_is_confined(model)
+        elif agy_unsandboxed():
+            print("  agy: running WITHOUT its sandbox (MMCRA_SKIP_AGY_SANDBOX_CHECK)")
+        else:
+            ok, reason = agy_is_confined()
             print(f"  agy: {'' if ok else 'DISABLED for review -- '}{reason}")
             found["agy"] = ok
     return found

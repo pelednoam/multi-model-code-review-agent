@@ -34,10 +34,6 @@ PROGRESS_INTERVAL = 30
 #: How often to check whether a reviewer has finished. Short enough that the
 #: round does not sit idle after the last one exits.
 POLL_INTERVAL = 2
-#: How long agy's confinement check gets. It is one model call on a two-line
-#: file, but it is a model call, and a cold start includes the sign-in check.
-AGY_CHECK_TIMEOUT = 300
-
 #: ``agy models`` is a listing, not a model call, but it goes over the network.
 AGY_MODELS_TIMEOUT = 60
 

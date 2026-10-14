@@ -30,7 +30,7 @@ def _try_load_existing_result(result_path: Path, slot: int) -> dict[str, Any] | 
     return validate_result(d, slot, EXPECTED_REVIEWERS)
 
 
-def _unwrap_claude_result(text: str) -> str:
+def _unwrap_envelope(text: str) -> str:
     """Take the review out of the envelope its CLI wrapped it in.
 
     ``claude -p --output-format json`` wraps it in ``{"result": "<text>"}``. agy's
@@ -40,6 +40,10 @@ def _unwrap_claude_result(text: str) -> str:
     """
     agy = agy_result(text)
     if agy is not None:
+        # ERROR, CANCELED, INTERRUPTED and WAITING can all carry review-shaped output.
+        # A turn that did not finish is not a review, however finished it looks.
+        if agy.get("status") != "SUCCESS":
+            return ""
         if isinstance(agy.get("structured_output"), dict):
             return json.dumps(agy["structured_output"])
         return str(agy.get("response") or "")
@@ -58,7 +62,7 @@ def _extract_from_raw(round_dir: Path, slot: int) -> dict[str, Any] | None:
     raw_path = round_dir / f"raw-{slot}.txt"
     if not raw_path.exists():
         return None
-    text = _unwrap_claude_result(raw_path.read_text())
+    text = _unwrap_envelope(raw_path.read_text())
     start = text.find("{")
     end = text.rfind("}")
     if start < 0 or end <= start:

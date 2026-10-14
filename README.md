@@ -130,7 +130,7 @@ Default precedence (no Bedrock opt-in):
 |---|---|---|---|
 | Security (Opus) | Claude CLI opus (free) | Hermes Opus (Bedrock, paid) | -- |
 | Correctness | Codex CLI GPT-5.5 (free) | Claude CLI haiku (free) | Hermes Haiku (Bedrock) |
-| Readability | Gemini CLI (free) | Claude CLI sonnet (free) | Hermes Sonnet (Bedrock) |
+| Readability | agy (opt-in, verified) or Gemini CLI | Claude CLI sonnet (free) | Hermes Sonnet (Bedrock) |
 | Spec-contract (Opus) | Claude CLI opus (free) | Hermes Opus (Bedrock, paid) | -- |
 
 ### Bedrock opt-in (when you actually want Hermes)
@@ -155,7 +155,7 @@ When opted in, the precedence flips for Anthropic reviewers:
 |---|---|---|---|
 | Security (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
 | Correctness | Hermes Haiku (Bedrock) | Codex CLI GPT-5.5 (free) | Claude CLI haiku (free) |
-| Readability | Hermes Sonnet (Bedrock) | Gemini CLI (free) | Claude CLI sonnet (free) |
+| Readability | Hermes Sonnet (Bedrock) | agy (opt-in, verified) or Gemini CLI | Claude CLI sonnet (free) |
 | Spec-contract (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
 
 **With all CLIs installed** (claude + codex + gemini): the full review
@@ -463,6 +463,23 @@ Anthropic reviewers. For cross-provider diversity, also install:
   does not include quota for `gemini-2.5-pro` (it returns HTTP 429).
   If you have paid quota and want Pro, set `GEMINI_MODEL=gemini-2.5-pro`
   in your shell before running the agent.
+- [Antigravity CLI](https://antigravity.google/docs/cli/headless/) (`agy`)
+  for Google's frontier models, e.g. Gemini 4 Argon, in the readability
+  slot. Opt-in, and it takes slot 3 ahead of the gemini CLI:
+  ```bash
+  curl -fsSL https://antigravity.google/cli/install.sh | bash
+  agy                                   # once, interactively: Google sign-in
+  agy models                            # pick a slug; there is no default
+  export REVIEW_USE_AGY=1 AGY_MODEL=<slug>
+  ```
+  Which models you get depends on your plan (Argon needs Google AI Ultra
+  or an eligible Gemini Enterprise plan). agy auto-allows writes inside its
+  workspace and has no deny list, so the slot is pinned three ways:
+  `--mode=plan --sandbox`, an empty temp workspace outside the repo (the
+  diff and audit are in the prompt), and a canary check at startup -- one
+  model call -- that drops the slot if a write gets through
+  (`MMCRA_SKIP_AGY_SANDBOX_CHECK=1` skips it on an already-sandboxed host).
+  Its answer is held to the result schema with `--json-schema`.
 - [Hermes Agent](https://github.com/NousResearch/hermes-agent) +
   AWS Bedrock for best isolation (data stays in your AWS account)
 
@@ -706,6 +723,7 @@ have detected it via fingerprint matching and exited with code 2
 | Claude CLI | Anthropic infrastructure | Good (`--allowedTools`) | Claude subscription |
 | Codex CLI | OpenAI infrastructure | Good (sandbox) | ChatGPT subscription |
 | Gemini CLI | Google infrastructure | Good (`--approval-mode plan`) | AI Studio free tier |
+| Antigravity CLI | Google infrastructure | Good (`--mode=plan --sandbox`, empty workspace, canary-verified) | Google AI plan |
 
 For sensitive/FDA-path code where data-at-rest guarantees matter, use
 Hermes+Bedrock for all reviewers.

@@ -19,6 +19,8 @@ import json
 
 from typing import TYPE_CHECKING
 
+from .backends import agy_result
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -123,6 +125,11 @@ def _salvage(round_dir: Path, slot: int) -> str:
     text = raw.read_text(encoding="utf-8", errors="replace").strip()
     if not text:
         return ""
+    agy = agy_result(text)
+    if agy is not None:
+        # A failed turn has no response but says why, which is the useful part.
+        said = agy.get("response") or agy.get("error") or ""
+        return str(said).strip()[:_SALVAGE_CHARS]
     try:
         wrapper = json.loads(text)
     except (json.JSONDecodeError, ValueError):

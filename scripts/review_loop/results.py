@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
+from .backends import agy_result
 from .findings import validate_result
 
 if TYPE_CHECKING:
@@ -30,10 +31,18 @@ def _try_load_existing_result(result_path: Path, slot: int) -> dict[str, Any] | 
 
 
 def _unwrap_claude_result(text: str) -> str:
-    """Claude -p --output-format json wraps the result in a {result: str} envelope.
+    """Take the review out of the envelope its CLI wrapped it in.
 
-    Unwrap if needed, otherwise return the text as-is.
+    ``claude -p --output-format json`` wraps it in ``{"result": "<text>"}``. agy's
+    stream-json ends in a ``result`` event whose ``structured_output`` is the
+    schema-checked object, with ``response`` -- free text -- as the fallback.
+    Anything else is returned as-is.
     """
+    agy = agy_result(text)
+    if agy is not None:
+        if isinstance(agy.get("structured_output"), dict):
+            return json.dumps(agy["structured_output"])
+        return str(agy.get("response") or "")
     try:
         wrapper = json.loads(text)
     except (json.JSONDecodeError, ValueError):

@@ -75,6 +75,15 @@ HAS_CLAUDE=false; command -v claude &>/dev/null && HAS_CLAUDE=true
 HAS_CODEX=false;  command -v codex  &>/dev/null && HAS_CODEX=true
 HAS_GEMINI=false; command -v gemini &>/dev/null && HAS_GEMINI=true
 
+# agy (Antigravity CLI): opt-in with REVIEW_USE_AGY=1 and AGY_MODEL=<slug from `agy models`>.
+# Only true once the confinement check has passed -- the same check the convergence loop runs, so
+# the two paths cannot disagree about whether agy is safe to use. It prints its reason either way.
+HAS_AGY=false
+if [ "${REVIEW_USE_AGY:-}" = "1" ] && command -v agy &>/dev/null; then
+  python3 -c 'import sys; from scripts.review_loop.backends import detect_backends; sys.exit(0 if detect_backends(verify_codex=False)["agy"] else 1)' \
+    && HAS_AGY=true
+fi
+
 # Bedrock opt-in: set when the user verbally asked for hermes/bedrock,
 # OR when the project pinned it via .use-hermes.
 PREFER_HERMES=false
@@ -95,7 +104,7 @@ Default precedence (PREFER_HERMES=false):
 |---|---|---|---|
 | Security (Opus) | Claude CLI opus (free) | Hermes Opus (Bedrock, paid) | -- |
 | Correctness | Codex CLI GPT-5.5 (free) | Claude CLI haiku (free) | Hermes Haiku (Bedrock) |
-| Readability | Gemini CLI (free) | Claude CLI sonnet (free) | Hermes Sonnet (Bedrock) |
+| Readability | agy (opt-in, verified) or Gemini CLI | Claude CLI sonnet (free) | Hermes Sonnet (Bedrock) |
 | Spec-contract (Opus) | Claude CLI opus (free) | Hermes Opus (Bedrock, paid) | -- |
 
 Bedrock opt-in precedence (PREFER_HERMES=true), used for regulated codebases that need data-at-rest in your AWS account:
@@ -104,7 +113,7 @@ Bedrock opt-in precedence (PREFER_HERMES=true), used for regulated codebases tha
 |---|---|---|---|
 | Security (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
 | Correctness | Hermes Haiku (Bedrock) | Codex CLI GPT-5.5 (free) | Claude CLI haiku (free) |
-| Readability | Hermes Sonnet (Bedrock) | Gemini CLI (free) | Claude CLI sonnet (free) |
+| Readability | Hermes Sonnet (Bedrock) | agy (opt-in, verified) or Gemini CLI | Claude CLI sonnet (free) |
 | Spec-contract (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
 
 **Why local CLIs first by default**: free (uses existing subscriptions), reliable auth (each CLI manages its own OAuth), and for most projects (open-source, non-regulated) there's no real value to paid Bedrock routing.
@@ -120,6 +129,7 @@ Bedrock opt-in precedence (PREFER_HERMES=true), used for regulated codebases tha
 | `claude` | `-p` | `--allowedTools "Read Grep Glob"` **plus** `--disallowedTools "Edit Write MultiEdit NotebookEdit Bash"` -- `--allowedTools` alone only skips the permission prompt, it does *not* confine the agent | stdin (`< prompt.txt`) | `--output-format json` wraps in `{"result":"..."}` |
 | `codex` | `codex exec` **plus `-s read-only` and `-c approvals_reviewer="user"`** -- both are pinned by the tool and neither is optional: no sandbox flag was passed at all before, and `-s read-only` on its own is silently overridden by a global `approvals_reviewer = "auto_review"` (see docs/codex-sandbox.md). Codex is also canary-tested at launch and its slot is DROPPED if the sandbox does not actually refuse a write (optional `-m <model> -c model_reasoning_effort=<level>` -- override via `CODEX_MODEL`, `CODEX_REASONING_EFFORT`; `=high` is the "GPT-5.5 Pro" equivalent) | verified read-only, not assumed | stdin (pipe) | `-o <file>` writes last message |
 | `gemini` | `-p` | `--model <m> --approval-mode plan --skip-trust` (default `<m>` is `gemini-2.5-flash` for free-tier compatibility; override via `GEMINI_MODEL`) | stdin (pipe) | stdout (text, may have fences) |
+| `agy` | `--input-format stream-json --output-format stream-json` (no `-p`: the prompt is one JSON line on stdin, because a single argument is capped at 128 KB) **plus `--mode=plan --sandbox`**, pinned. Opt-in: `REVIEW_USE_AGY=1` and `AGY_MODEL=<slug>` from `agy models`; there is no default slug. agy auto-allows writes inside its workspace and has no deny list, so it runs in an **empty temp directory outside the repo** and is canary-tested before use -- the slot is DROPPED if the canary is written | `--mode=plan --sandbox`, empty workspace, verified by canary | stdin (one stream-json line) | stream-json; the last `result` event carries `structured_output` (enforced by `--json-schema`) |
 | `hermes` | `-z --yolo` | `-t file` | `-z` flag (has ARG_MAX risk for large prompts) | reviewer writes file directly |
 
 ### Retrieving the reviewers' output
@@ -460,7 +470,7 @@ launch_hermes() {
 
 # Launch via a coding agent CLI (free, stdin-based).
 # Callers pass 'claude-<model>' (e.g. claude-opus, claude-sonnet,
-# claude-haiku), 'codex', or 'gemini'.
+# claude-haiku), 'codex', 'gemini', or 'agy'.
 launch_cli() {
   local num=$1 cli=$2 prompt_file=$3
 
@@ -525,6 +535,24 @@ launch_cli() {
       echo $! > "$REVIEW_TMP/pid-$num"
       echo "R$num: Gemini CLI (${GEMINI_MODEL:-gemini-2.5-flash}) [free]"
       ;;
+    agy)
+      # Antigravity CLI. Only reached when HAS_AGY=true, i.e. its confinement check passed.
+      # Runs in an empty directory OUTSIDE the repo: agy auto-allows writes inside its workspace,
+      # and everything it needs is in the prompt. The prompt goes in as one stream-json line on
+      # stdin; agy exits when stdin closes and the turn completes.
+      local schema="$PWD/docs/ensemble_review_result_schema.json"
+      local ws; ws="$(mktemp -d)"
+      { cd "$ws" && timeout -k 10 "$REVIEWER_TIMEOUT" agy --mode=plan --sandbox \
+          --model "$AGY_MODEL" \
+          --input-format stream-json --output-format stream-json \
+          --print-timeout 45m --json-schema "$schema" \
+          < <(python3 -c 'import json, sys; print(json.dumps({"event": "user", "message": {"content": open(sys.argv[1]).read()}}))' "$prompt_file") \
+          1>"$REVIEW_TMP/stdout-$num.txt" \
+          2>"$REVIEW_TMP/stderr-$num.txt"
+        echo $? > "$REVIEW_TMP/done-$num"; } &
+      echo $! > "$REVIEW_TMP/pid-$num"
+      echo "R$num: Antigravity CLI ($AGY_MODEL) [subscription]"
+      ;;
     *)
       echo "R$num: SKIPPED (unknown backend: $cli)"
       return 1
@@ -569,10 +597,14 @@ elif $HAS_HERMES; then
   launch_hermes 2 us.anthropic.claude-haiku-4-5-20251001-v1:0 "$REVIEW_TMP/prompt-2.txt"
 fi
 
-# R3: Readability -- Gemini preferred (3rd provider for diversity).
-# When PREFER_HERMES is set, the Bedrock sonnet path runs first.
+# R3: Readability -- Google preferred (3rd provider for diversity): agy when opted in and
+# verified, else Gemini. When PREFER_HERMES is set, the Bedrock sonnet path runs first.
+# `${HAS_AGY:-false}`, not `$HAS_AGY`: an unset variable expands to an empty command, which
+# succeeds, and would route the slot to a backend nobody verified.
 if $PREFER_HERMES && $HAS_HERMES; then
   launch_hermes 3 us.anthropic.claude-sonnet-4-6-v1 "$REVIEW_TMP/prompt-3.txt"
+elif ${HAS_AGY:-false}; then
+  launch_cli 3 agy "$REVIEW_TMP/prompt-3.txt"
 elif $HAS_GEMINI; then
   launch_cli 3 gemini "$REVIEW_TMP/prompt-3.txt"
 elif $HAS_CLAUDE; then
@@ -631,11 +663,22 @@ extract_json() {
   python3 -c "
 import json, sys
 text = open(sys.argv[1]).read()
+# agy stream-json: one event per line, the answer in the last result event.
+for line in reversed(text.splitlines()):
+    try:
+        ev = json.loads(line)
+    except ValueError:
+        continue
+    if isinstance(ev, dict) and ev.get('event') == 'result' and isinstance(ev.get('result'), dict):
+        r = ev['result']
+        so = r.get('structured_output')
+        text = json.dumps(so) if isinstance(so, dict) else str(r.get('response') or r.get('error') or '')
+        break
 try:
     wrapper = json.loads(text)
     if isinstance(wrapper.get('result'), str):
         text = wrapper['result']
-except (json.JSONDecodeError, ValueError):
+except (json.JSONDecodeError, ValueError, AttributeError):
     pass
 start = text.find('{')
 end = text.rfind('}')
@@ -696,7 +739,7 @@ Run with `run_in_background: true`. Export the detection variables first: the sc
 shell and inherits nothing from the call that wrote it.
 
 ```bash
-export REVIEW_TMP HAS_CLAUDE HAS_HERMES HAS_CODEX HAS_GEMINI PREFER_HERMES
+export REVIEW_TMP HAS_CLAUDE HAS_HERMES HAS_CODEX HAS_GEMINI HAS_AGY AGY_MODEL PREFER_HERMES
 "$REVIEW_TMP/run-reviewers.sh" 2>&1 | tee "$REVIEW_TMP/round.log"
 ```
 
@@ -748,7 +791,7 @@ Report what the status lines say rather than guessing. "Three of four are still 
 thing to tell a waiting human; silence is not.
 
 
-**Tool restriction**: Hermes uses `-t file` (best isolation). Claude CLI uses `--allowedTools "Read Grep Glob"` (read-only). Codex uses its default sandbox. Gemini uses `--approval-mode plan` (read-only). Extraction errors logged to `$REVIEW_TMP/extract-N.err`.
+**Tool restriction**: Hermes uses `-t file` (best isolation). Claude CLI uses `--allowedTools "Read Grep Glob"` (read-only). Codex uses its default sandbox. Gemini uses `--approval-mode plan` (read-only). agy uses `--mode=plan --sandbox` in an empty workspace outside the repo, and is canary-verified before use. Extraction errors logged to `$REVIEW_TMP/extract-N.err`.
 
 ## 7. Collect and validate results
 

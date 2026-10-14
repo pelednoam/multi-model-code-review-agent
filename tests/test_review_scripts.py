@@ -1956,9 +1956,10 @@ class TestRunnerScript:
 
     def test_every_reviewer_records_a_pid_and_an_exit_status(self) -> None:
         runner = self._runner()
-        # Four slots, each recording both, is what makes progress observable from another shell.
-        assert runner.count('echo $! > "$REVIEW_TMP/pid-$num"') == 4
-        assert runner.count('echo $? > "$REVIEW_TMP/done-$num"') == 4
+        # Every launcher (hermes, claude, codex, gemini, agy) recording both is what makes
+        # progress observable from another shell.
+        assert runner.count('echo $! > "$REVIEW_TMP/pid-$num"') == 5
+        assert runner.count('echo $? > "$REVIEW_TMP/done-$num"') == 5
         # The status must be written by the subshell that ran the reviewer. A separate waiter
         # cannot: `wait` refuses a pid that is not its own child, so it would record a bogus
         # status immediately while the reviewer was still running.
@@ -1972,7 +1973,8 @@ class TestRunnerScript:
         assert "\nset -m" in runner
         assert 'kill -- "-$(cat "$REVIEW_TMP/pid-$num")"' in runner
         # SIGKILL escalation, because a CLI that traps SIGTERM otherwise outlives the round.
-        assert runner.count('timeout -k 10 "$REVIEWER_TIMEOUT"') == 4
+        # One per launcher.
+        assert runner.count('timeout -k 10 "$REVIEWER_TIMEOUT"') == 5
 
     def test_a_failed_slot_still_produces_a_result_with_a_true_reason(self) -> None:
         runner = self._runner()
@@ -2250,3 +2252,345 @@ class TestAMissingReviewerIsNotConvergence:
     def test_the_new_exit_code_is_documented(self) -> None:
         readme = (REPO_ROOT / "README.md").read_text()
         assert "| 11 | **Incomplete** |" in readme
+
+
+class TestAgyReviewer:
+    """agy, the Antigravity CLI, in slot 3.
+
+    Its read-only-ness rests on three things and each is tested here: flags pinned in
+    code, an empty workspace outside the repository, and a canary that has to survive
+    before the slot is used at all. Its docs promise none of them on their own -- reads
+    and writes inside the workspace are auto-allowed in headless mode.
+    """
+
+    MODEL = "gemini-4-argon"
+    BACKENDS = {
+        "hermes": True,
+        "claude": True,
+        "codex": False,
+        "gemini": True,
+        "agy": True,
+    }
+
+    @pytest.fixture
+    def on(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("REVIEW_USE_AGY", "1")
+        monkeypatch.setenv("AGY_MODEL", self.MODEL)
+        monkeypatch.delenv("REVIEW_USE_GEMINI", raising=False)
+
+    def _cmd(self, tmp_path: Path, slot: int = 3, prefer_hermes: bool = False) -> list[str]:
+        from scripts.review_loop.reviewers import _choose_command
+
+        choice = _choose_command(
+            slot, tmp_path / "prompt.txt", tmp_path, self.BACKENDS, prefer_hermes
+        )
+        assert choice is not None
+        return choice[0]
+
+    # -- routing -----------------------------------------------------------------
+
+    @pytest.mark.usefixtures("on")
+    def test_slot_3_runs_agy_when_switched_on(self, tmp_path: Path) -> None:
+        from scripts.review_loop.reviewers import _choose_command
+
+        choice = _choose_command(3, tmp_path / "p.txt", tmp_path, self.BACKENDS)
+        assert choice is not None
+        cmd, label = choice
+        assert cmd[0] == "agy"
+        assert cmd[cmd.index("--model") + 1] == self.MODEL
+        # The prompt names the model that actually answered, not the lens default.
+        assert label == self.MODEL
+
+    def test_off_by_default(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        monkeypatch.delenv("REVIEW_USE_AGY", raising=False)
+        monkeypatch.setenv("AGY_MODEL", self.MODEL)
+        monkeypatch.delenv("REVIEW_USE_GEMINI", raising=False)
+        assert self._cmd(tmp_path)[0] == "claude"
+
+    def test_no_model_means_no_agy(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # No default slug: a guessed one would fail every round instead of saying once.
+        monkeypatch.setenv("REVIEW_USE_AGY", "1")
+        monkeypatch.delenv("AGY_MODEL", raising=False)
+        monkeypatch.delenv("REVIEW_USE_GEMINI", raising=False)
+        assert self._cmd(tmp_path)[0] == "claude"
+
+    @pytest.mark.usefixtures("on")
+    def test_only_slot_3(self, tmp_path: Path) -> None:
+        for slot in (1, 2, 4):
+            assert self._cmd(tmp_path, slot)[0] != "agy"
+
+    @pytest.mark.usefixtures("on")
+    def test_bedrock_opt_in_still_takes_slot_3(self, tmp_path: Path) -> None:
+        assert self._cmd(tmp_path, prefer_hermes=True)[0] == "hermes"
+
+    @pytest.mark.usefixtures("on")
+    def test_an_unverified_agy_is_not_used(self, tmp_path: Path) -> None:
+        # detect_backends sets agy False when the canary fails; that must stick.
+        from scripts.review_loop.reviewers import _choose_command
+
+        choice = _choose_command(
+            3, tmp_path / "p.txt", tmp_path, {**self.BACKENDS, "agy": False}
+        )
+        assert choice is not None and choice[0][0] != "agy"
+
+    # -- the command -------------------------------------------------------------
+
+    @pytest.mark.usefixtures("on")
+    def test_the_safety_flags_are_pinned(self, tmp_path: Path) -> None:
+        cmd = self._cmd(tmp_path)
+        assert "--mode=plan" in cmd
+        assert "--sandbox" in cmd
+        assert "--dangerously-skip-permissions" not in cmd
+
+    @pytest.mark.usefixtures("on")
+    def test_the_schema_is_enforced_by_the_cli(self, tmp_path: Path) -> None:
+        cmd = self._cmd(tmp_path)
+        assert Path(cmd[cmd.index("--json-schema") + 1]) == SCHEMA_PATH
+
+    @pytest.mark.usefixtures("on")
+    def test_the_prompt_is_not_an_argument(self, tmp_path: Path) -> None:
+        # One argument is capped at 128 KB on Linux; a large diff passes that.
+        cmd = self._cmd(tmp_path)
+        assert not {"-p", "--print", "--prompt"} & set(cmd)
+        assert cmd[cmd.index("--input-format") + 1] == "stream-json"
+        assert cmd[cmd.index("--output-format") + 1] == "stream-json"
+
+    @pytest.mark.usefixtures("on")
+    def test_agy_does_not_cut_off_a_review_the_loop_would_wait_for(
+        self, tmp_path: Path
+    ) -> None:
+        from scripts.review_loop.config import REVIEWER_TIMEOUT_MAX
+
+        cmd = self._cmd(tmp_path)
+        assert cmd[cmd.index("--print-timeout") + 1] == f"{REVIEWER_TIMEOUT_MAX // 60}m"
+
+    @pytest.mark.usefixtures("on")
+    def test_launch_is_outside_the_repo_with_one_stream_json_line(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from scripts.review_loop import reviewers
+
+        class _Pipe:
+            text = ""
+
+            def write(self, s: str) -> None:
+                self.text += s
+
+            def close(self) -> None:
+                pass
+
+        seen: dict[str, object] = {}
+
+        class _Proc:
+            pid = 1
+
+            def __init__(self, cmd: list[str], **kw: object) -> None:
+                seen.update(kw, cmd=cmd)
+                self.stdin = _Pipe()
+                seen["stdin"] = self.stdin
+
+        monkeypatch.setattr(reviewers.subprocess, "Popen", _Proc)
+        tracked = reviewers._launch_one(
+            3, reviewers._LENSES[2], "+DIFF-MARKER", "{}", "ctx", tmp_path, self.BACKENDS
+        )
+        assert tracked is not None
+        tracked[3].close()
+        tracked[4].close()
+
+        workspace = Path(str(seen["cwd"]))
+        assert workspace.is_dir() and not any(workspace.iterdir())
+        assert REPO_ROOT not in workspace.parents
+        stdin = seen["stdin"]
+        assert isinstance(stdin, _Pipe)
+        lines = stdin.text.splitlines()
+        assert len(lines) == 1
+        message = json.loads(lines[0])
+        assert message["event"] == "user"
+        assert "+DIFF-MARKER" in message["message"]["content"]
+
+    # -- reading its answer ------------------------------------------------------
+
+    @staticmethod
+    def _stream(result: dict[str, object]) -> str:
+        return "\n".join(
+            json.dumps(event)
+            for event in (
+                {"event": "init", "cwd": "/tmp/mmcra-agy-x", "permission_mode": "plan"},
+                {"event": "step_update", "state": "DONE", "text_delta": "{ not it"},
+                {"event": "result", "result": result},
+            )
+        )
+
+    def _review(self) -> dict[str, object]:
+        return {
+            "reviewer": "readability_performance",
+            "model": self.MODEL,
+            "findings": [{"severity": "warning", "issue": "dead code"}],
+            "overall_assessment": "One dead branch.",
+        }
+
+    def test_structured_output_is_the_result(self, tmp_path: Path) -> None:
+        from scripts.review_loop.results import extract_results
+
+        (tmp_path / "raw-3.txt").write_text(
+            self._stream(
+                {"status": "SUCCESS", "response": "done", "structured_output": self._review()}
+            )
+        )
+        result = extract_results(tmp_path)[2]
+        assert result is not None
+        assert result["findings"][0]["issue"] == "dead code"
+        assert (tmp_path / "result-3.json").exists()
+
+    def test_the_response_text_is_the_fallback(self, tmp_path: Path) -> None:
+        from scripts.review_loop.results import extract_results
+
+        (tmp_path / "raw-3.txt").write_text(
+            self._stream({"status": "SUCCESS", "response": json.dumps(self._review())})
+        )
+        result = extract_results(tmp_path)[2]
+        assert result is not None and result["model"] == self.MODEL
+
+    def test_a_failed_turn_says_why(self, tmp_path: Path) -> None:
+        (tmp_path / "raw-3.txt").write_text(
+            self._stream({"status": "ERROR", "error": "quota exhausted for this model"})
+        )
+        assert "quota exhausted" in describe_outputs(tmp_path)
+
+    def test_claude_envelopes_are_unaffected(self) -> None:
+        from scripts.review_loop.results import _unwrap_claude_result
+
+        claude = json.dumps({"type": "result", "result": '{"a": 1}'})
+        assert _unwrap_claude_result(claude) == '{"a": 1}'
+
+    # -- the confinement check ---------------------------------------------------
+
+    @staticmethod
+    def _agy(
+        reply: str | None = None,
+        writes: bool = False,
+        status: str = "SUCCESS",
+        stdout: str | None = None,
+        calls: list[dict[str, object]] | None = None,
+    ):  # type: ignore[no-untyped-def]
+        def run(cmd: list[str], cwd: Path, **kw: object) -> SimpleNamespace:
+            if calls is not None:
+                calls.append({"cmd": cmd, "cwd": cwd, **kw})
+            canary = Path(cwd) / "canary.txt"
+            token = canary.read_text()
+            if writes:
+                canary.write_text("changed")
+            if stdout is not None:
+                return SimpleNamespace(stdout=stdout, stderr="Error: authentication required")
+            said = reply if reply is not None else f"The file says {token}."
+            event = {"event": "result", "result": {"status": status, "response": said}}
+            return SimpleNamespace(stdout=json.dumps(event), stderr="")
+
+        return run
+
+    def _confined(
+        self, monkeypatch: pytest.MonkeyPatch, run: object
+    ) -> tuple[bool, str]:
+        from scripts.review_loop import backends
+
+        monkeypatch.setattr(backends.shutil, "which", lambda c: f"/usr/bin/{c}")
+        monkeypatch.setattr(backends, "_run", run)
+        return backends.agy_is_confined(self.MODEL)
+
+    def test_a_refused_write_passes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        ok, reason = self._confined(monkeypatch, self._agy())
+        assert ok, reason
+
+    def test_a_write_that_lands_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        ok, reason = self._confined(monkeypatch, self._agy(writes=True))
+        assert not ok
+        assert "ALLOWED a write" in reason
+
+    def test_a_check_that_never_ran_is_not_a_pass(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The codex ambiguity again: an untouched canary is also what nothing looks like."""
+        ok, reason = self._confined(monkeypatch, self._agy(stdout=""))
+        assert not ok
+        assert "did not run" in reason
+        assert "authentication required" in reason
+
+    def test_a_failed_turn_is_not_a_pass(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        ok, reason = self._confined(monkeypatch, self._agy(status="ERROR"))
+        assert not ok and "did not run" in reason
+
+    def test_a_reply_without_the_token_is_not_a_pass(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # It answered, but nothing shows it read the file -- so nothing shows it tried.
+        ok, reason = self._confined(monkeypatch, self._agy(reply="I will not do that."))
+        assert not ok and "did not read" in reason
+
+    def test_a_hung_check_is_not_a_pass(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def hang(cmd: list[str], **kw: object) -> None:
+            raise subprocess.TimeoutExpired(cmd, 1)
+
+        ok, reason = self._confined(monkeypatch, hang)
+        assert not ok and "did not finish" in reason
+
+    def test_the_check_runs_agy_exactly_as_a_reviewer_does(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from scripts.review_loop.backends import AGY_SAFETY_ARGS, agy_command
+
+        calls: list[dict[str, object]] = []
+        self._confined(monkeypatch, self._agy(calls=calls))
+        (call,) = calls
+        assert call["cmd"] == agy_command(self.MODEL)
+        assert set(AGY_SAFETY_ARGS) <= set(agy_command(self.MODEL))
+        assert json.loads(str(call["input"]))["event"] == "user"
+
+    # -- detection ---------------------------------------------------------------
+
+    def _detect(
+        self, monkeypatch: pytest.MonkeyPatch, verdict: tuple[bool, str] | None
+    ) -> dict[str, bool]:
+        from scripts.review_loop import backends
+
+        monkeypatch.setenv("MMCRA_SKIP_CODEX_SANDBOX_CHECK", "1")
+        monkeypatch.setattr(backends.shutil, "which", lambda c: f"/usr/bin/{c}")
+
+        def check(model: str) -> tuple[bool, str]:
+            if verdict is None:
+                raise AssertionError("the agy check ran when it should not have")
+            return verdict
+
+        monkeypatch.setattr(backends, "agy_is_confined", check)
+        return backends.detect_backends()
+
+    @pytest.mark.usefixtures("on")
+    def test_an_unconfined_agy_is_dropped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("MMCRA_SKIP_AGY_SANDBOX_CHECK", raising=False)
+        found = self._detect(monkeypatch, (False, "write landed"))
+        assert found["agy"] is False
+        assert found["claude"] is True
+
+    @pytest.mark.usefixtures("on")
+    def test_a_confined_agy_is_kept(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("MMCRA_SKIP_AGY_SANDBOX_CHECK", raising=False)
+        assert self._detect(monkeypatch, (True, "verified"))["agy"] is True
+
+    def test_no_model_call_unless_switched_on(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("REVIEW_USE_AGY", raising=False)
+        self._detect(monkeypatch, None)
+
+    def test_switched_on_without_a_model_is_dropped_without_a_call(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("REVIEW_USE_AGY", "1")
+        monkeypatch.delenv("AGY_MODEL", raising=False)
+        assert self._detect(monkeypatch, None)["agy"] is False
+
+    @pytest.mark.usefixtures("on")
+    def test_the_check_can_be_skipped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("MMCRA_SKIP_AGY_SANDBOX_CHECK", "1")
+        assert self._detect(monkeypatch, None)["agy"] is True

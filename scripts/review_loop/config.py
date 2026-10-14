@@ -34,6 +34,14 @@ PROGRESS_INTERVAL = 30
 #: How often to check whether a reviewer has finished. Short enough that the
 #: round does not sit idle after the last one exits.
 POLL_INTERVAL = 2
+#: How long agy's confinement check gets. It is one model call on a two-line
+#: file, but it is a model call, and a cold start includes the sign-in check.
+AGY_CHECK_TIMEOUT = 300
+
+#: The reviewer schema, handed to agy's ``--json-schema`` so the shape of its
+#: answer is enforced by the CLI rather than only asked for in the prompt.
+RESULT_SCHEMA = REPO_ROOT / "docs" / "ensemble_review_result_schema.json"
+
 MERGE_TIMEOUT = 900
 TEST_TIMEOUT = 300
 

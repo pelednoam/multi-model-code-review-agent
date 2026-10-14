@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
 import signal
 import subprocess
+import tempfile
 import time
 import uuid
 from pathlib import Path
 from typing import IO
 
+from .backends import agy_command, agy_enabled, agy_message, agy_model
 from .config import (
     LATE_RESULT_GRACE,
     POLL_INTERVAL,
     PROGRESS_INTERVAL,
+    RESULT_SCHEMA,
     reviewer_timeout,
 )
 
@@ -171,6 +176,30 @@ def _gemini_enabled() -> bool:
     return os.environ.get("REVIEW_USE_GEMINI", "") == "1"
 
 
+def _agy_cmd(model: str) -> list[str]:
+    """``agy`` as a reviewer: the shared, pinned invocation plus the result schema.
+
+    The schema is the point of this backend over the gemini CLI. That slot's failure
+    was answers the parser could not use; with ``--json-schema`` the shape is enforced
+    by the CLI and arrives as ``structured_output``, not just requested in the prompt.
+    """
+    extra = ["--json-schema", str(RESULT_SCHEMA)] if RESULT_SCHEMA.is_file() else []
+    return agy_command(model, *extra)
+
+
+def _agy_workspace() -> str:
+    """An empty directory for agy to run in, outside the repository under review.
+
+    agy auto-allows reads *and writes* inside its workspace, so the repository must not
+    be its workspace. Everything it needs -- the diff and the audit -- is in the prompt.
+    Empty also leaves nothing to wander through: the gemini CLI's failure in this slot
+    was exploring the repository instead of reviewing the diff in front of it.
+    """
+    path = tempfile.mkdtemp(prefix="mmcra-agy-")
+    atexit.register(shutil.rmtree, path, ignore_errors=True)
+    return path
+
+
 def _codex_extra_args() -> list[str]:
     """Build the extra ``codex exec`` flags from CODEX_* env vars.
 
@@ -258,6 +287,11 @@ def _choose_command(
             str(result_path),
             "-",
         ], None
+    model = agy_model()
+    if slot == 3 and agy_enabled() and model and backends.get("agy"):
+        # Ahead of gemini: both are Google, and this one can be held to the schema.
+        # backends["agy"] is only true once its confinement check has passed.
+        return _agy_cmd(model), model
     if slot == 3 and _gemini_enabled() and backends["gemini"]:
         # Opt-in, because in practice it does not review. Across eight rounds
         # on a real project this slot returned zero findings every single time,
@@ -289,7 +323,7 @@ def _choose_command(
 
 def _stdin_backends() -> tuple[str, ...]:
     """CLI backends that accept the prompt on stdin (not via filepath)."""
-    return ("codex", "gemini", "claude")
+    return ("codex", "gemini", "claude", "agy")
 
 
 def _launch_one(
@@ -325,8 +359,10 @@ def _launch_one(
     err_f = open(
         round_dir / f"stderr-{slot}.txt", "w", encoding="utf-8", errors="replace"
     )  # noqa: SIM115
+    is_agy = cmd[0] == "agy"
     proc = subprocess.Popen(
         cmd,
+        cwd=_agy_workspace() if is_agy else None,
         stdin=subprocess.PIPE if cmd[0] in _stdin_backends() else None,
         stdout=out_f,
         stderr=err_f,
@@ -340,7 +376,7 @@ def _launch_one(
     if cmd[0] in _stdin_backends():
         assert proc.stdin is not None  # PIPE guaranteed above
         try:
-            proc.stdin.write(prompt)
+            proc.stdin.write(agy_message(prompt) if is_agy else prompt)
             proc.stdin.close()
         except OSError as exc:
             # An unauthenticated backend exits before reading, and the write

@@ -295,7 +295,8 @@ def _choose_command(
 
     Returns ``(cmd, rebuild_label)``, where ``rebuild_label`` is set when
     the chosen backend needs the prompt to be rebuilt with a different
-    model label (slot 2's hermes-haiku path). Returns ``None`` if no
+    model label (slot 2's hermes-haiku path; agy and gemini, which name the
+    model they run). Returns ``None`` if no
     backend is available.
     """
     if prefer_hermes and backends["hermes"]:
@@ -388,16 +389,21 @@ def _launch_one(
     backend = cmd[0]
     workspace: Path | None = None
     if backend == "agy":
+        # If agy cannot be set up, the slot falls through to its next backend, as
+        # the routing tables say -- an empty slot 3 every round never converges.
+        rest = {**backends, "agy": False}
         workspace = _agy_workspace(repo)
         if workspace is None:
-            print(f"  R{slot}: SKIPPED (no agy workspace outside the repo; see TMPDIR)")
-            return None
+            print(f"  R{slot}: agy has no workspace outside the repo (see TMPDIR)")
+            return _launch_one(slot, lens_args, diff, audit, context, round_dir,
+                               rest, prefer_hermes, repo)  # fmt: skip
         if not agy_unsandboxed():
             try:
                 state = agy_seed_state(_scratch_dir("mmcra-agy-state-"))
             except OSError as exc:
-                print(f"  R{slot}: SKIPPED (could not prepare agy's state: {exc})")
-                return None
+                print(f"  R{slot}: could not prepare agy's state ({exc})")
+                return _launch_one(slot, lens_args, diff, audit, context, round_dir,
+                                   rest, prefer_hermes, repo)  # fmt: skip
             cmd = [*agy_sandbox(workspace, state), *cmd]
         # What agy is actually sent, so the prompt file stays the record of it.
         prompt_path.write_text(AGY_PREAMBLE + prompt)

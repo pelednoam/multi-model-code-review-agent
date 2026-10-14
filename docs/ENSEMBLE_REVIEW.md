@@ -37,7 +37,7 @@ ensemble-review agent (docs/ensemble-review.md)
   |
   |-- hermes opus (Bedrock) OR claude -p opus           --> result-1.json (security)
   |-- codex exec (GPT-5.5) OR hermes haiku              --> result-2.json (correctness)
-  |-- gemini -p (Gemini) OR hermes sonnet OR claude -p  --> result-3.json (readability)
+  |-- agy (Gemini, sandboxed) OR gemini OR hermes sonnet OR claude -p --> result-3.json (readability)
   |-- hermes opus (Bedrock) OR claude -p opus           --> result-4.json (spec-contract)
   |   (all four run IN PARALLEL, 10min timeout each)
   |
@@ -54,7 +54,7 @@ User sees: preflight audit, blocking findings, grouped criticals/warnings, conve
 |---|---|---|
 | Security & robustness | Opus via Hermes/Bedrock (preferred) OR Claude CLI | Injection, auth, unsafe deserialization, secrets, race conditions, swallowed exceptions |
 | Correctness & edge cases | GPT-5.5 via Codex CLI (preferred) OR Haiku via Hermes/Claude CLI | Off-by-one, null paths, shape mismatches, contract violations, logic errors, missing coverage |
-| Readability & performance | Gemini CLI (preferred) OR Sonnet via Hermes/Claude CLI | Naming, function length, abstraction leaks, dead code, N+1 I/O, memory growth |
+| Readability & performance | agy -- Antigravity CLI, best Gemini model listed, under a verified bwrap sandbox (preferred) OR Gemini CLI OR Sonnet via Hermes/Claude CLI | Naming, function length, abstraction leaks, dead code, N+1 I/O, memory growth |
 | Spec-contract compliance | Opus via Hermes/Bedrock (preferred) OR Claude CLI | Code vs signed artifacts, manifest drift, feature count mismatches, fallback/zero-fill that changes cohorts |
 
 ## Runtime audit inputs

@@ -79,7 +79,7 @@ HAS_GEMINI=false; command -v gemini &>/dev/null && HAS_GEMINI=true
 # agy (Antigravity CLI): on wherever it is installed; REVIEW_USE_AGY=0 switches it off. The model is AGY_MODEL if set, else the best
 # Gemini model `agy models` lists for this sign-in (newest version, then Pro/Argon over Flash over
 # Lite, then highest effort) -- picked fresh each run, so a newer model is used once the plan has it.
-# Only true once the confinement check has passed on that model -- the same check the convergence
+# Only true once the sandbox check has passed (no model call) -- the same check the convergence
 # loop runs, so the two paths cannot disagree about whether agy is safe to use. Status lines go to
 # stderr; the model it settled on is the only thing on stdout.
 HAS_AGY=false
@@ -385,7 +385,7 @@ Lens: off-by-one, null paths, shape/dtype mismatches, contract violations, logic
 
 **Coverage gaps**: when the audit JSON contains a non-empty `coverage_gaps` array, this reviewer MUST propose specific test cases for each uncovered line/branch. Each such finding should have `category: "test"` and `suggested_fix` containing the actual test code (function name, inputs, assertions) -- not a description. The merge agent will apply these tests verbatim, so they must be runnable as-is.
 
-### Reviewer 3 -- Readability, maintainability & performance (Sonnet 4.6 via Bedrock)
+### Reviewer 3 -- Readability, maintainability & performance (agy/Gemini by default; Sonnet 4.6 via Bedrock when opted in)
 
 Output: `$REVIEW_TMP/result-3.json`
 
@@ -583,7 +583,9 @@ launch_cli() {
           < <(PYTHONPATH="$root" python3 -c 'import sys; from scripts.review_loop.backends import agy_review_message; sys.stdout.write(agy_review_message(open(sys.argv[1]).read()))' "$prompt_file") \
           1>"$REVIEW_TMP/stdout-$num.txt" \
           2>"$REVIEW_TMP/stderr-$num.txt"
-        echo $? > "$REVIEW_TMP/done-$num"; rm -rf "$ws" "$state"; } &
+        rc=$?; rm -rf "$ws" "$state"; echo "$rc" > "$REVIEW_TMP/done-$num"; } &
+      # The marker comes last: once it exists the runner may kill this job's group, and
+      # cleanup -- which removes the copy of agy's sign-in token -- must already be done.
       echo $! > "$REVIEW_TMP/pid-$num"
       echo "R$num: Antigravity CLI ($AGY_MODEL) [subscription]"
       ;;
@@ -637,8 +639,8 @@ fi
 # succeeds, and would route the slot to a backend nobody verified.
 if $PREFER_HERMES && $HAS_HERMES; then
   launch_hermes 3 us.anthropic.claude-sonnet-4-6-v1 "$REVIEW_TMP/prompt-3.txt"
-elif ${HAS_AGY:-false}; then
-  launch_cli 3 agy "$REVIEW_TMP/prompt-3.txt"
+elif ${HAS_AGY:-false} && launch_cli 3 agy "$REVIEW_TMP/prompt-3.txt"; then
+  :  # launched; if agy could not be set up, launch_cli returned 1 and the next backend runs
 elif $HAS_GEMINI; then
   launch_cli 3 gemini "$REVIEW_TMP/prompt-3.txt"
 elif $HAS_CLAUDE; then
@@ -830,7 +832,7 @@ Report what the status lines say rather than guessing. "Three of four are still 
 thing to tell a waiting human; silence is not.
 
 
-**Tool restriction**: Hermes uses `-t file` (best isolation). Claude CLI uses `--allowedTools "Read Grep Glob"` plus `--disallowedTools` for every writing tool. Codex is pinned to `-s read-only` (and canary-verified by the convergence loop; this runner does not run that check). Gemini uses `--approval-mode plan` (read-only). agy runs under bubblewrap -- filesystem read-only outside an empty workspace, home and /tmp hidden, environment cleared, verified before use -- plus `--sandbox --disable-slash-commands`. Extraction errors logged to `$REVIEW_TMP/extract-N.err`.
+**Tool restriction**: Hermes uses `-t file` (best isolation). Claude CLI: this runner passes `--allowedTools "Read Grep Glob"` only; the convergence loop adds `--disallowedTools` for every writing tool, since `--allowedTools` alone does not confine. Codex: this runner uses its configured sandbox; the convergence loop pins `-s read-only` and `approvals_reviewer="user"` and canary-tests them. Gemini uses `--approval-mode plan` (read-only). agy runs under bubblewrap -- filesystem read-only outside an empty workspace, home and /tmp hidden, environment cleared, verified before use -- plus `--sandbox --disable-slash-commands`. Extraction errors logged to `$REVIEW_TMP/extract-N.err`.
 
 ## 7. Collect and validate results
 

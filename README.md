@@ -493,8 +493,11 @@ Anthropic reviewers. For cross-provider diversity, also install:
   Under that wrapper agy's own write tool got `read-only file system`. The
   wrapper is verified at startup without a model call, codex-style, and
   the slot is dropped if any of that fails. Not closed: the network, which
-  agy needs, and with it abstract sockets and system sockets under `/run`;
-  reaching those takes running a program, which headless agy refuses.
+  agy needs, and with it abstract sockets and system sockets under `/run`.
+  Headless agy refused the one shell command it tried, but agy also has
+  browser and MCP tools, and whether those reach the network unprompted
+  has not been tested -- treat the sandbox as stopping writes and
+  credential reads, not as network isolation.
 
   **Default-on means data egress.** Wherever agy is installed and signed
   in, the scrubbed diff and audit now also go to Google. Set

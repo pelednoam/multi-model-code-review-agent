@@ -1968,7 +1968,11 @@ class TestRunnerScript:
         # Every launcher (hermes, claude, codex, gemini, agy) recording both is what makes
         # progress observable from another shell.
         assert runner.count('echo $! > "$REVIEW_TMP/pid-$num"') == 5
-        assert runner.count('echo $? > "$REVIEW_TMP/done-$num"') == 5
+        # agy's records its status after cleanup, so it holds it in $rc first.
+        statuses = runner.count('echo $? > "$REVIEW_TMP/done-$num"') + runner.count(
+            'echo "$rc" > "$REVIEW_TMP/done-$num"'
+        )
+        assert statuses == 5
         # The status must be written by the subshell that ran the reviewer. A separate waiter
         # cannot: `wait` refuses a pid that is not its own child, so it would record a bogus
         # status immediately while the reviewer was still running.
@@ -2605,7 +2609,10 @@ class TestAgyReviewer:
         monkeypatch.setattr(reviewers, "REPO_ROOT", repo)
         monkeypatch.setattr(reviewers.tempfile, "tempdir", str(repo / "tmp"))
         tracked, seen = self._launch(monkeypatch, tmp_path)
-        assert tracked is None and not seen
+        # Not agy, and not an empty slot either: the next backend takes it.
+        cmd = seen["cmd"]
+        assert isinstance(cmd, list) and "agy" not in cmd and cmd[0] == "claude"
+        assert not list((repo / "tmp").iterdir())  # and the refused workspace is gone
 
     def test_the_repo_under_review_is_refused_too(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -2618,6 +2625,30 @@ class TestAgyReviewer:
         monkeypatch.setattr(reviewers.tempfile, "tempdir", str(target / ".tmp"))
         assert reviewers._agy_workspace(target) is None
         assert reviewers._agy_workspace(tmp_path / "elsewhere") is not None
+
+    def test_strays_survive_odd_paths(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """HOME with a trailing slash crashed detection; a space in TMPDIR failed it."""
+        if not self._bwrap_works():
+            pytest.skip("bwrap or agy cannot run here")
+        from scripts.review_loop import backends
+
+        spaced = Path(tempfile.mkdtemp(prefix="review scratch "))
+        monkeypatch.setenv("HOME", str(Path.home()) + "/")
+        monkeypatch.setattr(backends.tempfile, "tempdir", str(spaced))
+        ok, reason = backends.agy_is_confined()
+        assert ok, reason
+
+    def test_a_slot_whose_agy_cannot_be_set_up_falls_through(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from scripts.review_loop import reviewers
+
+        monkeypatch.setenv("REVIEW_USE_AGY", "1")
+        monkeypatch.setenv("AGY_MODEL", self.MODEL)
+        monkeypatch.setattr(reviewers, "_agy_workspace", lambda repo=None: None)
+        _, seen = self._launch(monkeypatch, tmp_path)
+        cmd = seen["cmd"]
+        assert isinstance(cmd, list) and cmd[0] == "claude"
 
     @pytest.mark.parametrize("value", ["", "0"])
     def test_skip_flag_zero_keeps_the_sandbox(
@@ -2729,9 +2760,10 @@ class TestAgyReviewer:
 
     @staticmethod
     def _bwrap_works() -> bool:
+        """Real-sandbox tests need bwrap that runs, and agy (the check starts it)."""
         import shutil as _shutil
 
-        if _shutil.which("bwrap") is None:
+        if _shutil.which("bwrap") is None or _shutil.which("agy") is None:
             return False
         done = subprocess.run(
             ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "true"],
@@ -2743,7 +2775,7 @@ class TestAgyReviewer:
     def test_the_real_sandbox_passes(self) -> None:
         """Not a mock: the wrapper agy runs under, against the real filesystem."""
         if not self._bwrap_works():
-            pytest.skip("bwrap cannot run here")
+            pytest.skip("bwrap or agy cannot run here")
         from scripts.review_loop.backends import agy_is_confined
 
         ok, reason = agy_is_confined()
@@ -2763,7 +2795,7 @@ class TestAgyReviewer:
         self, monkeypatch: pytest.MonkeyPatch, drop: tuple[str, ...], caught: str
     ) -> None:
         if not self._bwrap_works():
-            pytest.skip("bwrap cannot run here")
+            pytest.skip("bwrap or agy cannot run here")
         from scripts.review_loop import backends
 
         real = backends.agy_sandbox
@@ -2783,7 +2815,10 @@ class TestAgyReviewer:
     @staticmethod
     def _unconfined(cmd: list[str], **kw: object) -> subprocess.CompletedProcess[str]:
         # A "sandbox" that runs the command with the wrapper stripped: no confinement.
+        # agy need not be installed for this: its start-up step is answered here.
         bare = cmd[cmd.index("--") + 1 :]
+        if "agy --version" in bare[-1]:
+            return subprocess.CompletedProcess(bare, 0, "AGY_OK\n", "")
         return subprocess.run(bare, capture_output=True, text=True, check=False)
 
     def test_a_sandbox_that_lets_writes_through_fails(

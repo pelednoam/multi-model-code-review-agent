@@ -316,7 +316,8 @@ def agy_sandbox(workspace: _Path, state: _Path) -> list[str]:
 
     Not closed, and said so in the README: the network, which agy needs to reach its
     model -- and with it abstract-namespace sockets -- and system sockets under /run.
-    What reaches those is a program, and headless agy refuses to run commands.
+    Headless agy refused the one terminal command it tried; whether its browser and
+    MCP tools can reach the network unprompted has not been measured.
 
     The bash launcher in docs/ensemble-review.md builds its wrapper by calling this, so
     there is one copy.
@@ -443,13 +444,15 @@ def agy_is_confined() -> tuple[bool, str]:
 
             def strays(root: _Path) -> set[str]:
                 """What ``root`` shows inside beyond what the wrapper mounted there."""
+                # Paths, not strings: HOME=/home/user/ is the same directory.
                 mounted = {
                     _Path(arg).relative_to(root).parts[0]
                     for arg in wrap
-                    if arg != str(root) and _Path(arg).is_relative_to(root)
+                    if _Path(arg).is_relative_to(root) and _Path(arg) != root
                 }
-                listed = sh(f"ls -A {shlex.quote(str(root))}").stdout or ""
-                return set(listed.split()) - mounted
+                # One name per line, so a name with a space stays one name.
+                listed = sh(f"ls -A1 {shlex.quote(str(root))}").stdout or ""
+                return {n for n in listed.split("\n") if n} - mounted
 
             # 1. does the sandbox run anything at all?
             ran = sh("echo SANDBOX_OK")

@@ -75,13 +75,20 @@ HAS_CLAUDE=false; command -v claude &>/dev/null && HAS_CLAUDE=true
 HAS_CODEX=false;  command -v codex  &>/dev/null && HAS_CODEX=true
 HAS_GEMINI=false; command -v gemini &>/dev/null && HAS_GEMINI=true
 
-# agy (Antigravity CLI): opt-in with REVIEW_USE_AGY=1 and AGY_MODEL=<slug from `agy models`>.
-# Only true once the confinement check has passed -- the same check the convergence loop runs, so
-# the two paths cannot disagree about whether agy is safe to use. It prints its reason either way.
+# agy (Antigravity CLI): opt-in with REVIEW_USE_AGY=1. The model is AGY_MODEL if set, else the best
+# Gemini model `agy models` lists for this sign-in (newest version, then Pro/Argon over Flash over
+# Lite, then highest effort) -- picked fresh each run, so a newer model is used once the plan has it.
+# Only true once the confinement check has passed on that model -- the same check the convergence
+# loop runs, so the two paths cannot disagree about whether agy is safe to use. Status lines go to
+# stderr; the model it settled on is the only thing on stdout.
 HAS_AGY=false
 if [ "${REVIEW_USE_AGY:-}" = "1" ] && command -v agy &>/dev/null; then
-  python3 -c 'import sys; from scripts.review_loop.backends import detect_backends; sys.exit(0 if detect_backends(verify_codex=False)["agy"] else 1)' \
-    && HAS_AGY=true
+  AGY_MODEL="$(python3 -c 'import contextlib, sys
+from scripts.review_loop.backends import agy_model, detect_backends
+with contextlib.redirect_stdout(sys.stderr):
+    ok = detect_backends(verify_codex=False)["agy"]
+print(agy_model() if ok else "")')"
+  [ -n "$AGY_MODEL" ] && HAS_AGY=true
 fi
 
 # Bedrock opt-in: set when the user verbally asked for hermes/bedrock,
@@ -129,7 +136,7 @@ Bedrock opt-in precedence (PREFER_HERMES=true), used for regulated codebases tha
 | `claude` | `-p` | `--allowedTools "Read Grep Glob"` **plus** `--disallowedTools "Edit Write MultiEdit NotebookEdit Bash"` -- `--allowedTools` alone only skips the permission prompt, it does *not* confine the agent | stdin (`< prompt.txt`) | `--output-format json` wraps in `{"result":"..."}` |
 | `codex` | `codex exec` **plus `-s read-only` and `-c approvals_reviewer="user"`** -- both are pinned by the tool and neither is optional: no sandbox flag was passed at all before, and `-s read-only` on its own is silently overridden by a global `approvals_reviewer = "auto_review"` (see docs/codex-sandbox.md). Codex is also canary-tested at launch and its slot is DROPPED if the sandbox does not actually refuse a write (optional `-m <model> -c model_reasoning_effort=<level>` -- override via `CODEX_MODEL`, `CODEX_REASONING_EFFORT`; `=high` is the "GPT-5.5 Pro" equivalent) | verified read-only, not assumed | stdin (pipe) | `-o <file>` writes last message |
 | `gemini` | `-p` | `--model <m> --approval-mode plan --skip-trust` (default `<m>` is `gemini-2.5-flash` for free-tier compatibility; override via `GEMINI_MODEL`) | stdin (pipe) | stdout (text, may have fences) |
-| `agy` | `--input-format stream-json --output-format stream-json` (no `-p`: the prompt is one JSON line on stdin, because a single argument is capped at 128 KB) **plus `--mode=plan --sandbox`**, pinned. Opt-in: `REVIEW_USE_AGY=1` and `AGY_MODEL=<slug>` from `agy models`; there is no default slug. agy auto-allows writes inside its workspace and has no deny list, so it runs in an **empty temp directory outside the repo** and is canary-tested before use -- the slot is DROPPED if the canary is written | `--mode=plan --sandbox`, empty workspace, verified by canary | stdin (one stream-json line) | stream-json; the last `result` event carries `structured_output` (enforced by `--json-schema`) |
+| `agy` | `--input-format stream-json --output-format stream-json` (no `-p`: the prompt is one JSON line on stdin, because a single argument is capped at 128 KB) **plus `--mode=plan --sandbox`**, pinned. Opt-in: `REVIEW_USE_AGY=1`. Model: `AGY_MODEL` if set, else the best Gemini model `agy models` lists, picked each run. agy auto-allows writes inside its workspace and has no deny list, so it runs in an **empty temp directory outside the repo** and is canary-tested before use -- the slot is DROPPED if the canary is written | `--mode=plan --sandbox`, empty workspace, verified by canary | stdin (one stream-json line) | stream-json; the last `result` event carries `structured_output` (enforced by `--json-schema`) |
 | `hermes` | `-z --yolo` | `-t file` | `-z` flag (has ARG_MAX risk for large prompts) | reviewer writes file directly |
 
 ### Retrieving the reviewers' output

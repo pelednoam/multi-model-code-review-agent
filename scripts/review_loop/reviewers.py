@@ -287,11 +287,13 @@ def _choose_command(
             str(result_path),
             "-",
         ], None
-    model = agy_model()
-    if slot == 3 and agy_enabled() and model and backends.get("agy"):
+    if slot == 3 and agy_enabled() and backends.get("agy"):
         # Ahead of gemini: both are Google, and this one can be held to the schema.
-        # backends["agy"] is only true once its confinement check has passed.
-        return _agy_cmd(model), model
+        # backends["agy"] is only true once its confinement check has passed, on the
+        # same model -- agy_model() picks once per run.
+        model = agy_model()
+        if model:
+            return _agy_cmd(model), model
     if slot == 3 and _gemini_enabled() and backends["gemini"]:
         # Opt-in, because in practice it does not review. Across eight rounds
         # on a real project this slot returned zero findings every single time,

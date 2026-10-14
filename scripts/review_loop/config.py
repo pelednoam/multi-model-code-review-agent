@@ -38,6 +38,9 @@ POLL_INTERVAL = 2
 #: file, but it is a model call, and a cold start includes the sign-in check.
 AGY_CHECK_TIMEOUT = 300
 
+#: ``agy models`` is a listing, not a model call, but it goes over the network.
+AGY_MODELS_TIMEOUT = 60
+
 #: The reviewer schema, handed to agy's ``--json-schema`` so the shape of its
 #: answer is enforced by the CLI rather than only asked for in the prompt.
 RESULT_SCHEMA = REPO_ROOT / "docs" / "ensemble_review_result_schema.json"

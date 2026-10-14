@@ -2272,6 +2272,36 @@ class TestAgyReviewer:
         "agy": True,
     }
 
+    # What `agy models` listed on the machine this was written on, 2026-10-14.
+    LISTED = [
+        "gemini-3.8-flash-high",
+        "gemini-3.8-flash-medium",
+        "gemini-3.8-flash-low",
+        "claude-sonnet-4-6",
+        "claude-opus-4-6-thinking",
+        "gpt-oss-120b-medium",
+    ]
+
+    @pytest.fixture(autouse=True)
+    def _fresh_pick(self, monkeypatch: pytest.MonkeyPatch) -> object:
+        # The pick is cached per run; each test is a run. And no test may reach the
+        # real `agy models` -- it is installed on some machines that run this suite.
+        from scripts.review_loop import backends
+
+        def unreachable() -> list[str]:
+            raise AssertionError("a test reached the real `agy models`")
+
+        monkeypatch.setattr(backends, "agy_models", unreachable)
+        backends._picked_agy_model.cache_clear()
+        yield
+        backends._picked_agy_model.cache_clear()
+
+    def _listing(self, monkeypatch: pytest.MonkeyPatch, slugs: list[str]) -> None:
+        from scripts.review_loop import backends
+
+        monkeypatch.setattr(backends.shutil, "which", lambda c: f"/usr/bin/{c}")
+        monkeypatch.setattr(backends, "agy_models", lambda: list(slugs))
+
     @pytest.fixture
     def on(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("REVIEW_USE_AGY", "1")
@@ -2307,14 +2337,99 @@ class TestAgyReviewer:
         monkeypatch.delenv("REVIEW_USE_GEMINI", raising=False)
         assert self._cmd(tmp_path)[0] == "claude"
 
-    def test_no_model_means_no_agy(
+    def test_no_gemini_listed_means_no_agy(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        # No default slug: a guessed one would fail every round instead of saying once.
         monkeypatch.setenv("REVIEW_USE_AGY", "1")
         monkeypatch.delenv("AGY_MODEL", raising=False)
         monkeypatch.delenv("REVIEW_USE_GEMINI", raising=False)
+        self._listing(monkeypatch, ["claude-sonnet-4-6", "gpt-oss-120b-medium"])
         assert self._cmd(tmp_path)[0] == "claude"
+
+    def test_unset_model_is_picked_from_what_this_machine_lists(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from scripts.review_loop.reviewers import _choose_command
+
+        monkeypatch.setenv("REVIEW_USE_AGY", "1")
+        monkeypatch.delenv("AGY_MODEL", raising=False)
+        self._listing(monkeypatch, self.LISTED)
+        choice = _choose_command(3, tmp_path / "p.txt", tmp_path, self.BACKENDS)
+        assert choice is not None
+        cmd, label = choice
+        assert cmd[cmd.index("--model") + 1] == "gemini-3.8-flash-high"
+        assert label == "gemini-3.8-flash-high"
+
+    def test_an_explicit_model_wins_without_asking_agy(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from scripts.review_loop.backends import agy_model
+
+        monkeypatch.setenv("AGY_MODEL", "claude-opus-4-6-thinking")
+        # The autouse fixture makes any call to `agy models` fail the test.
+        assert agy_model() == "claude-opus-4-6-thinking"
+
+    def test_the_pick_is_made_once_per_run(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The confinement check and the reviewer must run the same model.
+        from scripts.review_loop import backends
+
+        calls: list[int] = []
+        monkeypatch.delenv("AGY_MODEL", raising=False)
+        monkeypatch.setattr(backends.shutil, "which", lambda c: f"/usr/bin/{c}")
+        monkeypatch.setattr(
+            backends, "agy_models", lambda: calls.append(1) or list(self.LISTED)
+        )
+        assert backends.agy_model() == backends.agy_model() == "gemini-3.8-flash-high"
+        assert len(calls) == 1
+
+    @pytest.mark.parametrize(
+        ("listed", "best"),
+        [
+            # This machine today.
+            (LISTED, "gemini-3.8-flash-high"),
+            # The day the plan includes Argon: a newer version beats a higher effort.
+            ([*LISTED, "gemini-4-argon"], "gemini-4-argon"),
+            # Same version: Pro above Flash above Lite, whatever the effort.
+            (
+                ["gemini-3.8-flash-lite-high", "gemini-3.8-flash-low", "gemini-3.8-pro-low"],
+                "gemini-3.8-pro-low",
+            ),
+            # Versions compare as numbers, not strings.
+            (["gemini-3.10-flash-low", "gemini-3.9-flash-high"], "gemini-3.10-flash-low"),
+            # Nothing Gemini: no pick, rather than a duplicate of another slot's provider.
+            (["claude-opus-4-6-thinking", "gpt-oss-120b-medium"], None),
+            ([], None),
+        ],
+    )
+    def test_ranking(self, listed: list[str], best: str | None) -> None:
+        from scripts.review_loop.backends import best_agy_model
+
+        assert best_agy_model(listed) == best
+
+    def test_the_listing_is_parsed_from_agys_output(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from scripts.review_loop import backends
+
+        monkeypatch.undo()  # the real agy_models, with a fake agy behind it
+        out = "Fetching available models...\n" + "".join(
+            f"{slug}\tDisplay Name\n" for slug in self.LISTED
+        )
+        monkeypatch.setattr(
+            backends, "_run", lambda *a, **k: SimpleNamespace(stdout=out, stderr="")
+        )
+        assert backends.agy_models() == self.LISTED
+
+    def test_a_listing_that_fails_is_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from scripts.review_loop import backends
+
+        monkeypatch.undo()
+
+        def hang(cmd: list[str], **kw: object) -> None:
+            raise subprocess.TimeoutExpired(cmd, 1)
+
+        monkeypatch.setattr(backends, "_run", hang)
+        assert backends.agy_models() == []
 
     @pytest.mark.usefixtures("on")
     def test_only_slot_3(self, tmp_path: Path) -> None:
@@ -2588,7 +2703,25 @@ class TestAgyReviewer:
     ) -> None:
         monkeypatch.setenv("REVIEW_USE_AGY", "1")
         monkeypatch.delenv("AGY_MODEL", raising=False)
+        self._listing(monkeypatch, ["claude-sonnet-4-6"])
         assert self._detect(monkeypatch, None)["agy"] is False
+
+    def test_the_check_runs_on_the_picked_model(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from scripts.review_loop import backends
+
+        monkeypatch.setenv("REVIEW_USE_AGY", "1")
+        monkeypatch.delenv("AGY_MODEL", raising=False)
+        monkeypatch.delenv("MMCRA_SKIP_AGY_SANDBOX_CHECK", raising=False)
+        monkeypatch.setenv("MMCRA_SKIP_CODEX_SANDBOX_CHECK", "1")
+        self._listing(monkeypatch, self.LISTED)
+        checked: list[str] = []
+        monkeypatch.setattr(
+            backends, "agy_is_confined", lambda m: (checked.append(m) or True, "ok")
+        )
+        assert backends.detect_backends()["agy"] is True
+        assert checked == ["gemini-3.8-flash-high"]
 
     @pytest.mark.usefixtures("on")
     def test_the_check_can_be_skipped(self, monkeypatch: pytest.MonkeyPatch) -> None:

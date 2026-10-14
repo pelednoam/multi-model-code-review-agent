@@ -469,11 +469,15 @@ Anthropic reviewers. For cross-provider diversity, also install:
   ```bash
   curl -fsSL https://antigravity.google/cli/install.sh | bash
   agy                                   # once, interactively: Google sign-in
-  agy models                            # pick a slug; there is no default
-  export REVIEW_USE_AGY=1 AGY_MODEL=<slug>
+  export REVIEW_USE_AGY=1
   ```
-  Which models you get depends on your plan (Argon needs Google AI Ultra
-  or an eligible Gemini Enterprise plan). agy auto-allows writes inside its
+  The model is picked for you each run: the best Gemini model `agy models`
+  lists for your sign-in -- newest version, then Pro/Argon over Flash over
+  Lite, then highest effort -- and the run prints which one. Claude and GPT
+  models are passed over, because slots 1, 2 and 4 already cover those
+  providers. Which models you get depends on your plan (Argon needs Google
+  AI Ultra or an eligible Gemini Enterprise plan); when it gets Argon, the
+  next run uses it. `AGY_MODEL=<slug>` overrides the pick. agy auto-allows writes inside its
   workspace and has no deny list, so the slot is pinned three ways:
   `--mode=plan --sandbox`, an empty temp workspace outside the repo (the
   diff and audit are in the prompt), and a canary check at startup -- one

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -11,7 +13,12 @@ import uuid
 from pathlib import Path as _Path
 from typing import TYPE_CHECKING, Any
 
-from .config import AGY_CHECK_TIMEOUT, REPO_ROOT, REVIEWER_TIMEOUT_MAX
+from .config import (
+    AGY_CHECK_TIMEOUT,
+    AGY_MODELS_TIMEOUT,
+    REPO_ROOT,
+    REVIEWER_TIMEOUT_MAX,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -114,13 +121,83 @@ def agy_enabled() -> bool:
 
 
 def agy_model() -> str | None:
-    """The model agy runs, from ``AGY_MODEL``.
+    """The model agy runs: ``AGY_MODEL`` if set, else the best one this account lists.
 
-    No default. Slugs are whatever ``agy models`` lists, they change with releases, and
-    an unknown one is an error rather than a fallback -- a guessed default would fail
-    every round instead of saying once what is missing.
+    Not a hard-coded default. Which slugs exist depends on the Google plan behind the
+    sign-in and changes with releases, and an unknown slug is an error rather than a
+    fallback -- so a fixed default would fail on any machine that lacks it. Asking
+    ``agy models`` instead picks what this machine actually has, and moves to a newer
+    model (Gemini 4 Argon, once the plan includes it) without anyone editing anything.
     """
-    return os.environ.get("AGY_MODEL") or None
+    explicit = os.environ.get("AGY_MODEL")
+    if explicit:
+        return explicit
+    return _picked_agy_model() if shutil.which("agy") else None
+
+
+@functools.cache
+def _picked_agy_model() -> str | None:
+    """Pick once per run, and say what was picked and from what."""
+    slugs = agy_models()
+    pick = best_agy_model(slugs)
+    if pick is None:
+        print(
+            f"  agy: AGY_MODEL is unset and none of the {len(slugs)} models in"
+            " `agy models` is a Gemini model; set AGY_MODEL to use one anyway"
+        )
+    else:
+        print(
+            f"  agy: AGY_MODEL is unset; picked {pick} (newest Gemini, highest effort,"
+            f" of {len(slugs)} in `agy models`)"
+        )
+    return pick
+
+
+def agy_models() -> list[str]:
+    """The model slugs ``agy models`` lists for this sign-in, or [] if it cannot say.
+
+    Its output is a progress line, then one ``<slug>\\t<display name>`` per model.
+    """
+    try:
+        done = _run(
+            ["agy", "models"], stdin=subprocess.DEVNULL, timeout=AGY_MODELS_TIMEOUT
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    return [
+        line.split("\t", 1)[0].strip()
+        for line in (done.stdout or "").splitlines()
+        if "\t" in line
+    ]
+
+
+_GEMINI_VERSION = re.compile(r"gemini-(\d+(?:\.\d+)*)")
+_EFFORT = {"low": 0, "medium": 1, "high": 2}
+
+
+def _agy_rank(slug: str) -> tuple[tuple[int, ...], int, int] | None:
+    """How good a reviewer ``slug`` should be, or None if it is not a Gemini model.
+
+    Gemini only: this slot exists to add a third provider family, and the Claude and
+    GPT models agy also offers duplicate what slots 1, 2 and 4 already run. Among
+    Gemini models: newest version first; then tier, with Lite below Flash below
+    everything else (Pro, Argon, and whatever comes next); then reasoning effort, a
+    slug without one counting as medium.
+    """
+    match = _GEMINI_VERSION.match(slug)
+    if match is None:
+        return None
+    version = tuple(int(part) for part in match.group(1).split("."))
+    rest = slug[match.end() :]
+    tier = 0 if "lite" in rest else 1 if "flash" in rest else 2
+    effort = _EFFORT.get(rest.rsplit("-", 1)[-1], 1)
+    return version, tier, effort
+
+
+def best_agy_model(slugs: list[str]) -> str | None:
+    """The best reviewer among ``slugs`` by ``_agy_rank``, or None if none is Gemini."""
+    ranked = [(rank, slug) for slug in slugs if (rank := _agy_rank(slug))]
+    return max(ranked)[1] if ranked else None
 
 
 def agy_command(model: str, *extra: str) -> list[str]:
@@ -262,7 +339,7 @@ def detect_backends(verify_codex: bool = True) -> dict[str, bool]:
     if found["agy"] and agy_enabled():
         model = agy_model()
         if model is None:
-            print("  agy: DISABLED -- REVIEW_USE_AGY=1 but AGY_MODEL is unset")
+            print("  agy: DISABLED -- REVIEW_USE_AGY=1 but there is no model to run")
             found["agy"] = False
         elif not os.environ.get("MMCRA_SKIP_AGY_SANDBOX_CHECK"):
             print(f"  agy: checking confinement ({model}, one model call)...")

@@ -31,7 +31,7 @@ Read `result-*.json`. Everything else is intermediate.
 
 | File | What it is |
 |---|---|
-| `result-N.json` | **The findings.** One validated object per reviewer, matching `docs/ensemble_review_result_schema.json`. This is what you want. |
+| `result-N.json` | **The findings.** One object per reviewer, checked for the schema's required top-level keys and a list of finding objects (agy's is also held to `docs/ensemble_review_result_schema.json` by `--json-schema`; `scripts/validate_review_results.py` checks the full schema). This is what you want. |
 | `raw-N.txt` | Whatever the CLI printed on stdout, before parsing. Empty for the codex slot on a *successful* run — see below. For agy, one stream-json event per line; the review is the final `result` event's `structured_output`, and only a turn whose status is `SUCCESS` counts. |
 | `codex-out-N.txt` | The codex slot's answer, its last message (`-o`), read before its `raw-N.txt`. |
 | `stderr-N.txt` | Diagnostics. Read this when a slot is missing a `result-N.json`. |
@@ -154,7 +154,7 @@ def _display_text(text: str, event: dict[str, Any] | None) -> str:
     """What to show of a reviewer's unusable reply: ``text``, unwrapped as far as it can
     be, and trimmed. ``event`` is agy's result event, if agy wrote it.
 
-    For showing, not parsing (that is ``results._unwrap_envelope``): it keeps what a
+    For showing, not parsing (that is ``results.unwrap_envelope``): it keeps what a
     failed turn says, and a refused tool call, where parsing keeps nothing.
     """
     if event is not None:

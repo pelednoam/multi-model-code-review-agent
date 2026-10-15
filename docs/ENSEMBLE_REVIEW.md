@@ -35,11 +35,13 @@ ensemble-review agent (docs/ensemble-review.md)
   |  3. run scripts/review_preflight.py --> runtime-audit.json
   |  4. build repo-aware context bundle (docs, manifests, specs)
   |
-  |-- hermes opus (Bedrock) OR claude -p opus           --> result-1.json (security)
-  |-- codex exec (GPT-5.5) OR hermes haiku              --> result-2.json (correctness)
+  |-- claude -p opus OR hermes opus                     --> result-1.json (security)
+  |-- codex exec (GPT-5.5) OR claude -p haiku OR hermes haiku
+  |                                                     --> result-2.json (correctness)
   |-- agy (Gemini, sandboxed) OR gemini (opt-in) OR claude -p sonnet OR hermes sonnet
-  |     (pinned to Bedrock: hermes sonnet first)        --> result-3.json (readability)
-  |-- hermes opus (Bedrock) OR claude -p opus           --> result-4.json (spec-contract)
+  |                                                     --> result-3.json (readability)
+  |-- claude -p opus OR hermes opus                     --> result-4.json (spec-contract)
+  |   (pinned to Bedrock, .use-hermes: hermes first in every slot)
   |   (all four run IN PARALLEL, 10min timeout each)
   |
   |  5. validate results against JSON schema
@@ -53,10 +55,10 @@ User sees: preflight audit, blocking findings, grouped criticals/warnings, conve
 
 | Reviewer | Routing chain | Focus |
 |---|---|---|
-| Security & robustness | Opus via Hermes/Bedrock (preferred) OR Claude CLI | Injection, auth, unsafe deserialization, secrets, race conditions, swallowed exceptions |
-| Correctness & edge cases | GPT-5.5 via Codex CLI (preferred) OR Haiku via Hermes/Claude CLI | Off-by-one, null paths, shape mismatches, contract violations, logic errors, missing coverage |
+| Security & robustness | Opus via Claude CLI OR Hermes/Bedrock (first when pinned to Bedrock) | Injection, auth, unsafe deserialization, secrets, race conditions, swallowed exceptions |
+| Correctness & edge cases | GPT-5.5 via Codex CLI (preferred) OR Haiku via Claude CLI OR Hermes/Bedrock (first when pinned) | Off-by-one, null paths, shape mismatches, contract violations, logic errors, missing coverage |
 | Readability & performance | agy -- Antigravity CLI, best Gemini model listed, under a verified bwrap sandbox (preferred) OR Gemini CLI (only with `REVIEW_USE_GEMINI=1`) OR Sonnet via Claude CLI/Hermes; a project pinned to Bedrock runs Sonnet via Hermes first, and Google only if asked | Naming, function length, abstraction leaks, dead code, N+1 I/O, memory growth |
-| Spec-contract compliance | Opus via Hermes/Bedrock (preferred) OR Claude CLI | Code vs signed artifacts, manifest drift, feature count mismatches, fallback/zero-fill that changes cohorts |
+| Spec-contract compliance | Opus via Claude CLI OR Hermes/Bedrock (first when pinned to Bedrock) | Code vs signed artifacts, manifest drift, feature count mismatches, fallback/zero-fill that changes cohorts |
 
 ## Runtime audit inputs
 

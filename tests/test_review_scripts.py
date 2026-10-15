@@ -1556,6 +1556,20 @@ class TestVendoredExclusion:
         )
         return repo
 
+    def test_a_change_to_the_vendored_code_is_named(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Left out of the diff, a change weakening the reviewer's own sandbox code ran
+        # in full mode with no reviewer having seen it.
+        from scripts.review_loop.diff import _warn_of_vendored_changes
+
+        repo = self._host_repo(tmp_path)
+        _warn_of_vendored_changes(repo, "HEAD~1")
+        said = capsys.readouterr().out
+        assert "scripts/review_preflight.py" in said and "not reviewed" in said
+        _warn_of_vendored_changes(repo, "HEAD")
+        assert capsys.readouterr().out == ""
+
     def test_agent_repo_still_reviews_itself(self, tmp_path: Path) -> None:
         from scripts.review_loop.config import diff_pathspec, is_agent_repo
 
@@ -2223,6 +2237,39 @@ class TestRunnerScript:
         # relative TMPDIR put its output, and its done marker, somewhere else.
         runner = runner_script()
         assert 'OUT_DIR="$(cd "$OUT_DIR" && pwd -P)"' in runner
+
+    def test_outputs_that_could_not_be_published_are_kept_and_not_read(
+        self, tmp_path: Path
+    ) -> None:
+        # A failed copy, and the cleanup removed the only copies; the extraction read
+        # whatever was in $REVIEW_TMP under their names.
+        runner = runner_script()
+        tmp, out = tmp_path / "review", tmp_path / "out"
+        tmp.mkdir()
+        out.mkdir()
+        (out / "stdout-1.txt").write_text("the only copy")
+        start = runner.index("PUBLISHED=false")
+        flags = runner[start : runner.index("publish_outputs() {")]
+        script = tmp_path / "t.sh"
+        script.write_text(
+            f"REVIEW_TMP={shlex.quote(str(tmp))}\nOUT_DIR={shlex.quote(str(out))}\n"
+            "AGY_SCRATCH=()\nkill_jobs() { :; }\n"
+            + shell_function(runner, "remove_agy_scratch")
+            + flags
+            + shell_function(runner, "publish_outputs")
+            + shell_function(runner, "finish_round")
+            + "cp() { return 1; }\n"
+            + "publish_outputs || echo FAILED\nfinish_round\n"
+            + 'echo "published=$PUBLISHED"\n'
+        )
+        done = subprocess.run(
+            ["bash", str(script)], capture_output=True, text=True, timeout=30
+        )
+        assert "FAILED" in done.stdout and "published=false" in done.stdout
+        assert f"kept in {out}" in done.stdout
+        assert (out / "stdout-1.txt").read_text() == "the only copy"
+        post = runner[runner.index("# Post-process") :]
+        assert '$PUBLISHED && [ -n "$src" ]' in post
 
     def test_a_slot_is_read_only_from_its_own_clis_file(self, tmp_path: Path) -> None:
         # Every slot was read from codex-out-N.txt, then claude-raw-N.json, then

@@ -6,7 +6,7 @@ import subprocess
 import sys
 from typing import TYPE_CHECKING
 
-from .config import SCRIPTS_DIR, diff_pathspec, is_agent_repo
+from .config import SCRIPTS_DIR, VENDORED_PATHS, diff_pathspec, is_agent_repo
 from .proc import run
 
 if TYPE_CHECKING:
@@ -42,6 +42,31 @@ class SecretsDetectedError(RuntimeError):
 DEFAULT_BASE = "origin/main"
 
 
+def _warn_of_vendored_changes(repo: Path, base: str) -> None:
+    """Name the vendored review files this change touches, which are not reviewed.
+
+    They are left out of a host project's diff (``diff_pathspec``) so that a fresh
+    install is not spent reviewing the reviewer. But full mode runs the project's own
+    copy -- its sandbox builder among them -- so a change that weakens it would run
+    with no reviewer having seen it. Re-vendoring changes them too, so this warns
+    rather than refuses.
+    """
+    if is_agent_repo(repo):
+        return
+    changed = run(
+        ["git", "diff", "--merge-base", base, "--name-only", "--", *VENDORED_PATHS],
+        cwd=repo,
+    )
+    names = (changed.stdout or "").split()
+    if changed.returncode == 0 and names:
+        shown = ", ".join(names[:5]) + (", ..." if len(names) > 5 else "")
+        print(
+            f"  WARNING: this change touches the reviewer's own vendored files"
+            f" ({shown}), which are not reviewed; full mode runs them. If they did"
+            " not come from re-running install.sh, check them by hand."
+        )
+
+
 def collect_diff(round_dir: Path, repo: Path, base: str = DEFAULT_BASE) -> tuple[Path, int]:
     """Collect the scrubbed diff between ``base`` and the working tree.
 
@@ -73,6 +98,7 @@ def collect_diff(round_dir: Path, repo: Path, base: str = DEFAULT_BASE) -> tuple
     # host project, so without this a host's first review spends most of its
     # budget -- 60% of the diff on a fresh install -- reviewing the reviewer.
     pathspec = diff_pathspec(repo)
+    _warn_of_vendored_changes(repo, base)
     untracked = _untracked(repo, pathspec)
     git = run(["git", "diff", "--merge-base", base, "--", *pathspec], cwd=repo)
     if git.returncode != 0:

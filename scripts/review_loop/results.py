@@ -113,7 +113,7 @@ def agy_answer(result: dict[str, Any] | None) -> str:
     return str(result.get("response") or "")
 
 
-def _unwrap_envelope(text: str, agy_ran: bool = False) -> str:
+def unwrap_envelope(text: str, agy_ran: bool = False) -> str:
     """Take the review out of the envelope its CLI wrapped it in.
 
     ``claude -p --output-format json`` wraps it in ``{"result": "<text>"}``. agy's
@@ -160,7 +160,7 @@ def _extract_from(
         raw = output.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
-    text = _unwrap_envelope(raw, backend == "agy")
+    text = unwrap_envelope(raw, backend == "agy")
     d = parse_review(text)
     if d is None:
         return None

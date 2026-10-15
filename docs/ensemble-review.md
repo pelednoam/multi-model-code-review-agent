@@ -147,15 +147,18 @@ Bedrock opt-in precedence (PREFER_HERMES=true), used for regulated codebases tha
 | `codex` | `codex exec` **plus `-s read-only` and `-c approvals_reviewer="user"`** (in both the convergence loop and this runner) -- both are pinned by the tool and neither is optional: no sandbox flag was passed at all before, and `-s read-only` on its own is silently overridden by a global `approvals_reviewer = "auto_review"` (see docs/codex-sandbox.md). Codex is also canary-tested at launch and its slot is DROPPED if the sandbox does not actually refuse a write (optional `-m <model> -c model_reasoning_effort=<level>` -- override via `CODEX_MODEL`, `CODEX_REASONING_EFFORT`; `=high` is the "GPT-5.5 Pro" equivalent) | verified read-only, not assumed | stdin (file) | `-o <file>` writes last message |
 | `gemini` | `-p` | `--model <m> --approval-mode plan --skip-trust` (default `<m>` is `gemini-2.5-flash` for free-tier compatibility; override via `GEMINI_MODEL`) | stdin (file) | stdout (text, may have fences) |
 | `agy` | `--input-format stream-json --output-format stream-json` (no `-p`: the prompt is one JSON line on stdin, because a single argument is capped at 128 KB) **plus `--sandbox --disable-slash-commands`**, pinned. On by default where installed; `REVIEW_USE_AGY=0` switches it off. Model: `AGY_MODEL` if set, else the best Gemini model `agy models` lists, picked each run. agy has no deny list and was measured writing outside its workspace, so it runs under **bubblewrap** (see [agy-sandbox.md](agy-sandbox.md)), verified at startup without a model call and again before each launch; the slot goes to its next backend if that fails. The prompt opens with a no-tools preamble: a refused tool call ends agy's turn with no answer | bubblewrap read-only filesystem, verified; `--sandbox --disable-slash-commands` (no `--mode=plan`: it is a slash command, so a no-op once expansion is off) | stdin (one stream-json line) | stream-json; the last `result` event carries `structured_output` (enforced by `--json-schema`) |
-| `hermes` | `-z --yolo` | `-t file` | `-z` flag (has ARG_MAX risk for large prompts) | stdout (the answer text; the prompt asks for the JSON in the reply, not in a file) |
+| `hermes` | `-z --yolo` | none: `-t file` limits it to the file toolset, which writes under `--yolo`; only the convergence loop's tamper check reports writes | `-z` flag (has ARG_MAX risk for large prompts) | stdout (the answer text; the prompt asks for the JSON in the reply, not in a file) |
 
 ### Retrieving the reviewers' output
 
 Every round writes to `data/reviews/loop_<timestamp>/round-<n>/`, and the run
 prints that path plus an `ARTIFACTS.md` key into the directory itself.
 
-**Read `result-N.json`. That is where the findings are.** Each one is a
-validated object matching `docs/ensemble_review_result_schema.json`.
+**Read `result-N.json`. That is where the findings are.** Each one is an
+object with the schema's required top-level keys and a list of finding objects,
+as the loop checks it (agy's is also held to
+`docs/ensemble_review_result_schema.json` by `--json-schema`; run
+`scripts/validate_review_results.py` for the full schema).
 
 ```bash
 ROUND=$(ls -td data/reviews/loop_*/round-* | head -1)
@@ -492,16 +495,19 @@ mark_done() {
   echo "$2" > "$REVIEW_TMP/done-$1"
 }
 # publish_outputs: what the reviewers wrote, into $REVIEW_TMP, replacing whatever is there under
-# those names, which no reviewer of this run wrote.
+# those names, which no reviewer of this run wrote; 1 if any of it could not be, and PUBLISHED
+# stays false: OUT_DIR, with the only copies, is then kept, and nothing is read from $REVIEW_TMP.
+PUBLISHED=false PUBLISH_TRIED=false
 publish_outputs() {
   local num name
+  PUBLISH_TRIED=true
   for num in 1 2 3 4; do
     for name in "stdout-$num.txt" "stderr-$num.txt" "claude-raw-$num.json" "codex-out-$num.txt"; do
-      rm -f -- "$REVIEW_TMP/$name"
-      [ -f "$OUT_DIR/$name" ] && cp -- "$OUT_DIR/$name" "$REVIEW_TMP/$name"
+      rm -f -- "$REVIEW_TMP/$name" || return 1
+      if [ -f "$OUT_DIR/$name" ]; then cp -- "$OUT_DIR/$name" "$REVIEW_TMP/$name" || return 1; fi
     done
   done
-  return 0
+  PUBLISHED=true
 }
 
 # What the runner kills and removes, it keeps in its own memory, never in a file: a reviewer can
@@ -579,11 +585,20 @@ else
 fi
 # Signals ignored first: a second Ctrl-C or TERM during the cleanup ran its trap's `exit`, which
 # cut the cleanup short and left reviewers running.
+# The reviewers' outputs are published here too if the run ends before the sweep did it, and OUT_DIR
+# is removed only once they are: otherwise it holds the only copies, and is named.
 finish_round() {
   trap '' INT TERM HUP QUIT
   kill_jobs 1 2 3 4
   remove_agy_scratch
-  [ -z "${OUT_DIR:-}" ] || rm -rf -- "$OUT_DIR"
+  [ -n "${OUT_DIR:-}" ] || return 0
+  # Once: a second try after a failed one would remove the copies the warning points to.
+  $PUBLISH_TRIED || publish_outputs
+  if $PUBLISHED; then
+    rm -rf -- "$OUT_DIR"
+  else
+    echo "WARNING: the reviewers' outputs could not be copied into $REVIEW_TMP; kept in $OUT_DIR"
+  fi
 }
 # remove_agy_scratch: agy's scratch gone, or named: one left behind may hold a copy of its sign-in
 # token, and an rm that failed said nothing. Made writable first, in case agy made it read-only.
@@ -776,7 +791,10 @@ launch_cli() {
       # Pin to gemini-2.5-flash because gemini-2.5-pro is not in the
       # free tier (returns HTTP 429). Override with GEMINI_MODEL=... if
       # you have paid quota.
-      { timeout --foreground -k 10 "$REVIEWER_TIMEOUT" gemini \
+      # In an empty directory of its own, not the repository under review, whose
+      # .gemini/settings.json -- chosen by the change being reviewed -- it would load.
+      mkdir -p "$OUT_DIR/ws-$num" || { echo "R$num: SKIPPED (no directory for gemini)"; return 1; }
+      { cd "$OUT_DIR/ws-$num" && timeout --foreground -k 10 "$REVIEWER_TIMEOUT" gemini \
           --model "${GEMINI_MODEL:-gemini-2.5-flash}" \
           --approval-mode plan --skip-trust \
           < "$prompt_file" \
@@ -801,7 +819,12 @@ launch_cli() {
       prepare_agy "$num" "$prompt_file" || return 1
       JOB_BACKEND[$num]=agy
       echo agy > "$REVIEW_TMP/backend-$num.txt"
-      { cd "$AGY_WS" && "${AGY_ENVP[@]}" timeout --foreground -k 10 "$REVIEWER_TIMEOUT" "${AGY_BWRAP[@]}" agy \
+      # Every descriptor the runner holds beyond 0-2 closed first: bwrap would hand each into
+      # the sandbox, where the check -- which runs from Python, with them closed -- never saw it.
+      { for fd in /proc/$BASHPID/fd/*; do
+          fd=${fd##*/}; [ "$fd" -gt 2 ] && eval "exec $fd>&-"
+        done 2>/dev/null
+        cd "$AGY_WS" && "${AGY_ENVP[@]}" timeout --foreground -k 10 "$REVIEWER_TIMEOUT" "${AGY_BWRAP[@]}" agy \
           --sandbox --disable-slash-commands \
           --model "$AGY_MODEL" \
           --input-format stream-json --output-format stream-json \
@@ -933,7 +956,7 @@ kill_jobs 1 2 3 4
 # Now, not at exit: a killed agy job never reached its own cleanup of the token copy.
 remove_agy_scratch
 # Every reviewer is stopped: nothing is left to write what is copied.
-publish_outputs
+publish_outputs || echo "WARNING: could not copy the reviewers' outputs into $REVIEW_TMP"
 
 # Extract review JSON from raw output, as the convergence loop does: Claude's wrapper, fences and
 # preamble; agy's stream only when agy ran the slot (any reviewer can be talked into printing a line
@@ -953,7 +976,8 @@ for num in 1 2 3 4; do
   # like another CLI's output, may have been put there by a reviewer with a file tool. Checked as
   # the loop checks it, codex's answer included.
   src="${JOB_OUT[$num]:-}"
-  [ -n "$src" ] && [ -f "$src" ] && extract_json "$src" "$result" "$num" "${JOB_BACKEND[$num]:-}"
+  $PUBLISHED && [ -n "$src" ] && [ -f "$src" ] \
+    && extract_json "$src" "$result" "$num" "${JOB_BACKEND[$num]:-}"
 
   # If no result produced, write a synthetic error. The done-marker distinguishes the two very
   # different failures a reader needs to tell apart: a reviewer that ran and produced unparseable
@@ -967,6 +991,7 @@ for num in 1 2 3 4; do
       *)       why="exited $(cat "$OUT_DIR/done-$num") without usable JSON" ;;
     esac
     [ -n "${JOB_PID[$num]:-}" ] || why="never launched (no backend available for this slot)"
+    $PUBLISHED || why="its output could not be copied into \$REVIEW_TMP (kept in $OUT_DIR)"
     review_helper placeholder "$result" "$num" "$why"
     echo "WARNING: Reviewer $num produced no result ($why)"
   fi

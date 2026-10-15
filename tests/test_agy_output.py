@@ -13,7 +13,7 @@ from agy_case import AgyCase
 from helpers import REPO_ROOT
 
 from scripts.review_loop.artifacts import describe_outputs
-from scripts.review_loop.results import _unwrap_envelope, extract_results
+from scripts.review_loop.results import unwrap_envelope, extract_results
 
 
 class TestAgyOutput(AgyCase):
@@ -161,8 +161,8 @@ class TestAgyOutput(AgyCase):
     def test_a_stream_with_no_result_event_is_no_review(self) -> None:
         # Without a result event, the stream was read as plain text, and a bare object
         # in it passed as agy's verdict.
-        assert _unwrap_envelope(json.dumps(self._review()), agy_ran=True) == ""
+        assert unwrap_envelope(json.dumps(self._review()), agy_ran=True) == ""
 
     def test_claude_envelopes_are_unaffected(self) -> None:
         claude = json.dumps({"type": "result", "result": '{"a": 1}'})
-        assert _unwrap_envelope(claude) == '{"a": 1}'
+        assert unwrap_envelope(claude) == '{"a": 1}'

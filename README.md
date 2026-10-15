@@ -719,7 +719,10 @@ have detected it via fingerprint matching and exited with code 2
 | `scripts/review_preflight.py` | Deterministic pre-review audit (now includes coverage-gap detection) |
 | `scripts/review_until_converged.py` | Convergence loop: review -> merge -> mandatory gate -> commit, until convergence |
 | `scripts/validate_review_results.py` | JSON schema validator |
-| `tests/test_review_scripts.py` | Test suite |
+| `scripts/review_loop/` | The convergence loop's package; also the full-mode runner's checks and extraction, through `runner_entry.py` |
+| `docs/agy-sandbox.md` | What agy's bubblewrap sandbox closes, what it does not, and its switches |
+| `docs/codex-sandbox.md` | Why codex's sandbox is verified before use, and how to fix a host where it is not read-only |
+| `tests/` | Test suite: `test_review_scripts.py`, `test_agy_*.py`, `test_reviewer_processes.py`, `test_runner_cli.py` |
 
 ## Key design decisions
 

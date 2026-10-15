@@ -291,3 +291,10 @@ class TestAgyCommand(AgyCase):
         # REVIEWER_TIMEOUT can raise the loop's deadline past any ceiling fixed here.
         cmd = self._cmd(tmp_path)
         assert cmd[cmd.index("--print-timeout") + 1] == "0"
+
+    def test_slot_2_on_claude_is_named_haiku(self, tmp_path: Path) -> None:
+        # The lens names codex's model; on claude, the prompt and result said gpt-5.5.
+        found = {**self.BACKENDS, "codex": False}
+        choice = _choose_command(2, tmp_path / "p.txt", tmp_path, found)
+        assert choice is not None and choice[0][0] == "claude"
+        assert choice[1] == "claude-haiku-4.5"

@@ -202,11 +202,41 @@ class TestAgySandboxCheck(AgyCase):
         # Before 5.3 the owner is unknown: only a bus-like name counted, and any other
         # of this user's listening sockets passed.
         monkeypatch.setattr(agy_sandbox_check.os, "getuid", lambda: 1000)
-        monkeypatch.setattr(agy_sandbox_check, "_listener_uid", lambda name: listener)
+        monkeypatch.setattr(
+            agy_sandbox_check, "_listener_uid", lambda name, kind: listener
+        )
         self._reach(monkeypatch)
         unknown = [agy_sandbox_check._Sock(b"\0some-daemon", None)]
         reason = agy_sandbox_check._check_reachable(None, unknown)  # type: ignore[arg-type]
         assert bool(reason) is refused
+
+    def test_an_owner_that_cannot_be_learnt_is_not_a_pass(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A datagram socket has no listener to ask, and a listener that does not answer
+        # is not one that admits no one: both passed, as "nothing listening".
+        monkeypatch.setattr(agy_sandbox_check.os, "getuid", lambda: 1000)
+        self._reach(monkeypatch)
+        dgram = agy_sandbox_check._Sock(b"\0notify", None, True, socket.SOCK_DGRAM)
+        reason = agy_sandbox_check._check_reachable(None, [dgram])  # type: ignore[arg-type]
+        assert reason and "cannot tell whose" in reason
+
+        def silent(name: bytes, kind: int) -> int:
+            raise OSError("'@slow' did not answer")
+
+        monkeypatch.setattr(agy_sandbox_check, "_listener_uid", silent)
+        slow = [agy_sandbox_check._Sock(b"\0slow", None)]
+        with pytest.raises(OSError, match="did not answer"):
+            agy_sandbox_check._check_reachable(None, slow)  # type: ignore[arg-type]
+
+    def test_a_seqpacket_listener_is_asked_as_one(self) -> None:
+        # Asked with a stream connection, it refused, and read as nothing listening.
+        name = f"\0mmcra-seq-{os.getpid()}".encode()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as mine:
+            mine.bind(name)
+            mine.listen(1)
+            uid = agy_sandbox_check._listener_uid(name, socket.SOCK_SEQPACKET)
+            assert uid == os.getuid()
 
     def test_run_as_root_roots_sockets_are_its_own(
         self, monkeypatch: pytest.MonkeyPatch

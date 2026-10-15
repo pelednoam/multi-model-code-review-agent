@@ -411,7 +411,8 @@ def _choose_command(
             "--skip-trust",
         ], _gemini_model()
     if backends["claude"]:
-        return _claude_cmd(slot), None
+        # Slot 2's lens names codex's model; on claude it is haiku, and says so.
+        return _claude_cmd(slot), ("claude-haiku-4.5" if slot == 2 else None)
 
     # Last-resort Hermes paths if no local CLI matched.
     if slot in (1, 4) and backends["hermes"]:
@@ -423,9 +424,8 @@ def _choose_command(
     return None
 
 
-def _stdin_backends() -> tuple[str, ...]:
-    """CLI backends that accept the prompt on stdin (not via filepath)."""
-    return ("codex", "gemini", "claude", "agy")
+#: CLI backends that take the prompt on stdin (hermes takes a file path).
+_STDIN_BACKENDS = ("codex", "gemini", "claude", "agy")
 
 
 @dataclass(frozen=True)
@@ -494,7 +494,7 @@ def _launch_one(
     # it launched (``launch_reviewers`` returns it), not by this file.
     (round_.round_dir / f"backend-{slot}.txt").write_text(backend, encoding="utf-8")
     fed = None
-    if backend in _stdin_backends():
+    if backend in _STDIN_BACKENDS:
         fed = agy_message(prompt) if backend == "agy" else prompt
     proc, out_f, err_f = _spawn(
         slot, picked.cmd, backend, picked.workspace, fed, round_.writes_to, register
@@ -518,6 +518,14 @@ def _pick_backend(slot: int, round_: _Round) -> _Picked | None:
         if choice is None:
             return None
         cmd, label = choice
+        if cmd[0] == "gemini":
+            # Not from the repository under review, whose .gemini/settings.json --
+            # chosen by the change being reviewed -- it would load (--skip-trust):
+            # an empty directory of its own, in the round's private one. Its prompt
+            # carries the diff and the audit.
+            workspace = round_.writes_to / f"ws-{slot}"
+            workspace.mkdir(exist_ok=True)
+            return _Picked(cmd, "gemini", label, workspace)
         if cmd[0] != "agy":
             return _Picked(cmd, cmd[0], label, None)
         prepared = _prepare_agy(slot, cmd, round_.repo)
@@ -679,6 +687,7 @@ def launch_reviewers(
     """
     procs: list[ReviewerProc] = []
     out_dir: Path | None = None
+    published = False
     # A plain SIGTERM or SIGHUP would skip the finally below, leaving the reviewers
     # running and agy's token copy on disk.
     with signals_unwind():
@@ -690,7 +699,7 @@ def launch_reviewers(
             for i, lens_args in enumerate(_LENSES, 1):
                 _launch_one(i, lens_args, round_, procs.append)
             _await_reviewers(procs, out_dir, diff.count("\n") + 1)
-            return {slot: backend for slot, _, backend, _, _ in procs}
+            answered = {slot: backend for slot, _, backend, _, _ in procs}
         finally:
             # Every group, finished or not: a reviewer that exited can leave helpers
             # running in its group, spending quota and writing its output. Each
@@ -702,16 +711,23 @@ def launch_reviewers(
                     out_f.close()
                     err_f.close()
                 if out_dir is not None:
-                    _publish_or_keep(out_dir, round_dir)
+                    published = _publish_or_keep(out_dir, round_dir)
                 _release_scratch()
+    if not published:
+        # What is in round_dir under the outputs' names was not written by this
+        # round's reviewers -- some may be stale, or planted -- so none of it is read.
+        print("  No reviewer output is read this round: it could not be copied in.")
+        return {}
+    return answered
 
 
 #: What a reviewer writes while it runs, per slot: stdout, stderr, codex's answer.
 _OUTPUTS = ("raw-{}.txt", "stderr-{}.txt", "codex-out-{}.txt")
 
 
-def _publish_or_keep(out_dir: Path, round_dir: Path) -> None:
-    """``_publish_outputs``, or, if it fails, keep the private copies and say where.
+def _publish_or_keep(out_dir: Path, round_dir: Path) -> bool:
+    """``_publish_outputs``; or, if it fails, keep the private copies, say where, and
+    return False.
 
     They are the only copies of the round's reviews: a failed copy -- a full disk, a
     round directory gone read-only -- must not end with them removed as scratch. The
@@ -723,6 +739,8 @@ def _publish_or_keep(out_dir: Path, round_dir: Path) -> None:
         if out_dir in _ROUND_SCRATCH:
             _ROUND_SCRATCH.remove(out_dir)
         print(f"  WARNING: reviewer outputs kept in {out_dir}: could not copy ({exc})")
+        return False
+    return True
 
 
 def _publish_outputs(out_dir: Path, round_dir: Path) -> None:

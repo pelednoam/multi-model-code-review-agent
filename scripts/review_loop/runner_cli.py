@@ -12,7 +12,9 @@ from __future__ import annotations
 import contextlib
 import inspect
 import json
+import os
 import sys
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -31,7 +33,7 @@ from .config import env_flag
 from .findings import validate_result
 from .results import (
     EXPECTED_REVIEWERS,
-    _unwrap_envelope,
+    unwrap_envelope,
     agy_answer,
     agy_failure,
     agy_result,
@@ -117,11 +119,19 @@ def _agy_input(prompt_file: str, message_file: str) -> int:
     The prompt with agy's no-tools preamble goes to ``message_file``, and only then is
     the preamble written into ``prompt_file``, the record of what agy was sent: if the
     first fails, the prompt is untouched for the backend the slot falls through to.
+    And the second replaces the file whole, from a copy written beside it: written in
+    place, a failure halfway left a truncated prompt for that backend.
     """
     path = Path(prompt_file)
     prompt = AGY_PREAMBLE + path.read_text(encoding="utf-8")
     Path(message_file).write_text(agy_message(prompt), encoding="utf-8")
-    path.write_text(prompt, encoding="utf-8")
+    fd, copy = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as new:
+            new.write(prompt)
+        os.replace(copy, path)
+    finally:
+        Path(copy).unlink(missing_ok=True)
     return 0
 
 
@@ -141,7 +151,7 @@ def _extract(raw: str, out: str, slot: str, backend: str = "") -> int:
             return 1
         text = agy_answer(result)
     else:
-        text = _unwrap_envelope(text)
+        text = unwrap_envelope(text)
     review = validate_result(parse_review(text), int(slot), EXPECTED_REVIEWERS)
     if review is None:
         print("no review in the output: no JSON object with the required keys and a"

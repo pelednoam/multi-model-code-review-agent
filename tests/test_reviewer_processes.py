@@ -194,3 +194,15 @@ class TestReviewerProcesses(AgyCase):
             out_f.close()
             err_f.close()
         assert (tmp_path / "raw-1.txt").read_text() == "done\n"
+
+    def test_a_round_whose_outputs_were_not_published_reads_nothing(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Kept privately after a failed copy, the outputs were still looked for in the
+        # round directory -- where anything under their names was not this round's.
+        self._launch_stub(monkeypatch, ["sh", "-c", "echo answer"])
+        monkeypatch.setattr(reviewers, "_await_reviewers", lambda *a: None)
+        monkeypatch.setattr(reviewers, "_publish_or_keep", lambda out, rd: False)
+        assert (
+            reviewers.launch_reviewers(tmp_path, "diff", "{}", "", self.BACKENDS) == {}
+        )

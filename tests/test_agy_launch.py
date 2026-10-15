@@ -393,3 +393,17 @@ class TestAgyLaunch(AgyCase):
         # REVIEW_USE_AGY=0 means off; MMCRA_SKIP_AGY_SANDBOX_CHECK=0 must not mean "skip".
         monkeypatch.setenv("MMCRA_SKIP_AGY_SANDBOX_CHECK", value)
         assert agy.agy_unsandboxed() is False
+
+    def test_gemini_runs_outside_the_repository(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # From the repository under review, --skip-trust had it load the project's own
+        # .gemini/settings.json, which the change being reviewed chooses.
+        monkeypatch.setenv("REVIEW_USE_GEMINI", "1")
+        found = {**self.BACKENDS, "agy": False}
+        out = tmp_path / "out"
+        out.mkdir()
+        round_ = reviewers._Round("d", "{}", "", tmp_path, found, False, None, out)
+        picked = reviewers._pick_backend(3, round_)
+        assert picked is not None and picked.backend == "gemini"
+        assert picked.workspace == out / "ws-3" and picked.workspace.is_dir()

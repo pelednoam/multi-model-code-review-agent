@@ -223,6 +223,8 @@ class _Sock(NamedTuple):
     #: Whether it takes connections or datagrams from others: a listening stream
     #: socket, or a datagram one. A client's connected socket has a name too.
     accepts: bool = True
+    #: SOCK_STREAM, SOCK_DGRAM or SOCK_SEQPACKET.
+    kind: int = socket.SOCK_STREAM
 
 
 def _unix_sockets() -> list[_Sock]:
@@ -298,25 +300,25 @@ def _diag_socket(body: bytes) -> _Sock:
     whether it accepts anything from others."""
     if len(body) < _UNIX_DIAG_MSG.size:
         raise OSError("a truncated socket in the kernel's socket list")
-    _, kind_, state, _, _, _, _ = _UNIX_DIAG_MSG.unpack_from(body)
-    accepts = kind_ == _SOCK_DGRAM or state == _TCP_LISTEN
+    _, sock_type, state, _, _, _, _ = _UNIX_DIAG_MSG.unpack_from(body)
+    accepts = sock_type == _SOCK_DGRAM or state == _TCP_LISTEN
     name, uid = b"", None
     offset = _UNIX_DIAG_MSG.size
     while offset < len(body):
         if offset + _RTATTR.size > len(body):
             raise OSError("a truncated attribute in the kernel's socket list")
-        length, kind = _RTATTR.unpack_from(body, offset)
+        length, attr_type = _RTATTR.unpack_from(body, offset)
         if length < _RTATTR.size or offset + length > len(body):
             raise OSError("a malformed attribute in the kernel's socket list")
         value = body[offset + _RTATTR.size : offset + length]
-        if kind == _UNIX_DIAG_NAME:
+        if attr_type == _UNIX_DIAG_NAME:
             # A path ends at its first NUL (a binder may count the terminator); an
             # abstract name is every byte after its leading one.
             name = value if value[:1] == b"\0" else value.split(b"\0", 1)[0]
-        elif kind == _UNIX_DIAG_UID and len(value) >= 4:
+        elif attr_type == _UNIX_DIAG_UID and len(value) >= 4:
             uid = struct.unpack_from("=I", value)[0]
         offset += (length + 3) & ~3
-    return _Sock(name, uid, accepts)
+    return _Sock(name, uid, accepts, sock_type)
 
 
 def _shown(name: bytes) -> str:
@@ -362,7 +364,12 @@ def _check_sockets(box: _Box, socks: list[_Sock]) -> str | None:
             or _X_DISPLAY.fullmatch(sock.name)
         ):
             continue
-        owner = sock.uid if sock.uid is not None else _listener_uid(sock.name)
+        owner = sock.uid
+        if owner is None:
+            if sock.kind == _SOCK_DGRAM:
+                # A datagram socket has no listener to ask: not knowing is not a pass.
+                return f"cannot tell whose datagram socket {_shown(sock.name)} is"
+            owner = _listener_uid(sock.name, sock.kind)
         if owner == me:
             return (
                 f"bwrap sandbox can reach {_shown(sock.name)}, an abstract socket of"
@@ -371,18 +378,25 @@ def _check_sockets(box: _Box, socks: list[_Sock]) -> str | None:
     return None
 
 
-def _listener_uid(name: bytes) -> int | None:
+def _listener_uid(name: bytes, kind: int = socket.SOCK_STREAM) -> int | None:
     """Whose process listens at abstract socket ``name``, from the connection's peer
-    credentials -- or None if it takes no connection, and so admits no one."""
+    credentials -- or None if nothing listens there any more, and so admits no one.
+
+    Connected with the socket's own type: a seqpacket listener refuses a stream
+    connection, which read as nothing listening. Anything else that keeps the answer
+    from coming -- a timeout, say -- raises OSError: not knowing is not a pass.
+    """
     try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+        with socket.socket(socket.AF_UNIX, kind) as conn:
             conn.settimeout(2)
             conn.connect(name)
             creds = conn.getsockopt(
                 socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")
             )
-    except OSError:
+    except (ConnectionRefusedError, FileNotFoundError):
         return None
+    except TimeoutError as exc:
+        raise OSError(f"{_shown(name)} did not answer") from exc
     _, uid, _ = struct.unpack("3i", creds)
     return uid
 

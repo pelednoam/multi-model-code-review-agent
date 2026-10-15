@@ -169,3 +169,17 @@ class TestAgyOutput(AgyCase):
         # Read as claude's, another CLI's answer shaped like the envelope had the
         # envelope's string taken for its review.
         assert unwrap_envelope(claude, "codex") == claude
+
+    def test_json_nested_past_the_parsers_limit_is_no_review(
+        self, tmp_path: Path
+    ) -> None:
+        # It raised RecursionError, which nothing caught, and the round ended.
+        from scripts.review_loop.results import agy_result, parse_review
+
+        deep = "[" * 100_000 + "]" * 100_000
+        assert parse_review('{"a": ' + deep + "}") is None
+        assert agy_result(deep) is None
+        assert unwrap_envelope(deep, "claude") == deep
+        (tmp_path / "raw-1.txt").write_text(deep)
+        assert extract_results(tmp_path, {1: "claude"})[0] is None
+        assert "R1" in describe_outputs(tmp_path, {1: "claude"})

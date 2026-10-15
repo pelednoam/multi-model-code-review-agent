@@ -476,8 +476,9 @@ run the runner with that one. For cross-provider diversity, also install:
   for Google's frontier models, e.g. Gemini 4 Argon, in the readability
   slot. On by default wherever it is installed, ahead of the gemini CLI;
   `REVIEW_USE_AGY` set to anything but `1`/`true`/`yes`/`on` switches it off. A project
-  that pinned Bedrock (`.use-hermes`, `--prefer-hermes`, or a "bedrock review"
-  request) gets agy only with `REVIEW_USE_AGY=1`.
+  that pinned Bedrock (`.use-hermes`, `--prefer-hermes`, or a "hermes review" /
+  "bedrock review" / "isolated review" request) gets agy only with
+  `REVIEW_USE_AGY=1`.
   Setup is install and sign in:
   ```bash
   curl -fsSL https://antigravity.google/cli/install.sh | bash

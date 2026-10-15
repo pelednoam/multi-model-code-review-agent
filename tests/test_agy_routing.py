@@ -121,7 +121,7 @@ class TestAgyRouting(AgyCase):
         monkeypatch.delenv("AGY_MODEL", raising=False)
         monkeypatch.setattr(agy.shutil, "which", lambda c: f"/usr/bin/{c}")
         monkeypatch.setattr(
-            agy, "agy_models", lambda: calls.append(1) or list(self.LISTED)
+            agy, "agy_models", lambda *a: calls.append(1) or list(self.LISTED)
         )
         assert (
             agy.agy_model_choice()[0]
@@ -318,3 +318,46 @@ class TestAgyCommand(AgyCase):
         found = {**self.BACKENDS, "hermes": False, "codex": True}
         choice = _choose_command(2, tmp_path / "p.txt", tmp_path, found, True)
         assert choice is not None and choice[0][0] == first
+
+    @pytest.mark.parametrize(
+        "slug", ["gemini-x\x1b]0;owned\x07", "a b", "-flag", "x" * 200]
+    )
+    def test_a_listed_model_that_is_not_a_name_is_dropped(
+        self, monkeypatch: pytest.MonkeyPatch, slug: str
+    ) -> None:
+        # `agy models` is a network answer, printed and passed as --model unchecked.
+        monkeypatch.setattr(agy, "agy_models", real_agy_models)
+        monkeypatch.setattr(agy.shutil, "which", lambda c: f"/usr/bin/{c}")
+        out = f"{slug}\tDisplay\ngemini-3.8-flash-high\tGemini\n"
+        monkeypatch.setattr(agy, "run", lambda *a, **k: SimpleNamespace(stdout=out))
+        monkeypatch.setenv("MMCRA_SKIP_AGY_SANDBOX_CHECK", "1")
+        assert agy.agy_models() == ["gemini-3.8-flash-high"]
+
+    def test_an_explicit_model_that_is_not_a_name_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("AGY_MODEL", "gemini; rm -rf /")
+        model, how = agy.agy_model_choice()
+        assert model is None and "not a model name" in how
+
+    def test_a_listing_that_failed_is_asked_again(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Cached, one empty listing -- offline for a moment -- kept agy off all loop.
+        monkeypatch.delenv("AGY_MODEL", raising=False)
+        monkeypatch.setattr(agy.shutil, "which", lambda c: f"/usr/bin/{c}")
+        answers = [[], ["gemini-3.8-flash-high"]]
+        monkeypatch.setattr(agy, "agy_models", lambda *a: answers.pop(0))
+        first, how = agy.agy_model_choice()
+        assert first is None and "listed no models" in how
+        assert agy.agy_model_choice()[0] == "gemini-3.8-flash-high"
+
+    def test_codex_names_the_model_it_runs(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        found = {**self.BACKENDS, "codex": True}
+        choice = _choose_command(2, tmp_path / "p.txt", tmp_path, found)
+        assert choice is not None and choice[0][0] == "codex" and choice[1] is None
+        monkeypatch.setenv("CODEX_MODEL", "gpt-5.5-codex")
+        choice = _choose_command(2, tmp_path / "p.txt", tmp_path, found)
+        assert choice is not None and choice[1] == "gpt-5.5-codex"

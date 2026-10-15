@@ -58,7 +58,7 @@ class AgyCase:
         # would go to whatever fake process a test has put in place.
         agy_sandbox._bwrap_supports("--disable-userns")
 
-        def unreachable() -> list[str]:
+        def unreachable(*a: object) -> list[str]:
             raise AssertionError("a test reached the real `agy models`")
 
         monkeypatch.setattr(agy, "agy_models", unreachable)
@@ -73,7 +73,7 @@ class AgyCase:
 
     def _listing(self, monkeypatch: pytest.MonkeyPatch, slugs: list[str]) -> None:
         monkeypatch.setattr(agy.shutil, "which", lambda c: f"/usr/bin/{c}")
-        monkeypatch.setattr(agy, "agy_models", lambda: list(slugs))
+        monkeypatch.setattr(agy, "agy_models", lambda *a: list(slugs))
 
     @pytest.fixture
     def on(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -230,7 +230,7 @@ class AgyCase:
         for that; these tests are about the filesystem and processes, and the socket
         rules have tests of their own, with sockets they control.
         """
-        monkeypatch.setattr(agy_sandbox_check, "_unix_sockets", lambda: [])
+        monkeypatch.setattr(agy_sandbox_check, "unix_sockets", lambda: [])
 
     @staticmethod
     def _bwrap_works() -> bool:
@@ -275,16 +275,16 @@ class AgyCase:
 
         monkeypatch.setattr(agy_sandbox_check, "_reachable", probe)
 
-    #: The host's sockets, as ``agy_sandbox_check._unix_sockets`` lists them.
+    #: The host's sockets, as ``agy_sandbox_check.unix_sockets`` lists them.
     SOCKETS = [
-        agy_sandbox_check._Sock(b"/var/lib/incus/unix.socket", 0),
-        agy_sandbox_check._Sock(b"/run/systemd/resolve/io.systemd.Resolve", 991),
+        agy_sandbox_check.Sock(b"/var/lib/incus/unix.socket", 0),
+        agy_sandbox_check.Sock(b"/run/systemd/resolve/io.systemd.Resolve", 991),
     ]
 
     @staticmethod
-    def _mine(name: bytes, accepts: bool = True) -> agy_sandbox_check._Sock:
-        """A socket of this user's, as ``agy_sandbox_check._unix_sockets`` lists it."""
-        return agy_sandbox_check._Sock(name, os.getuid(), accepts)
+    def _mine(name: bytes, accepts: bool = True) -> agy_sandbox_check.Sock:
+        """A socket of this user's, as ``agy_sandbox_check.unix_sockets`` lists it."""
+        return agy_sandbox_check.Sock(name, os.getuid(), accepts)
 
     def _detect(
         self, monkeypatch: pytest.MonkeyPatch, verdict: tuple[bool, str] | None
@@ -292,7 +292,7 @@ class AgyCase:
         monkeypatch.setenv("MMCRA_SKIP_CODEX_SANDBOX_CHECK", "1")
         monkeypatch.setattr(agy.shutil, "which", lambda c: f"/usr/bin/{c}")
 
-        def check() -> tuple[bool, str]:
+        def check(*a: object) -> tuple[bool, str]:
             if verdict is None:
                 raise AssertionError("the agy check ran when it should not have")
             return verdict

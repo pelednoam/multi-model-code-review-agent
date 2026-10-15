@@ -279,7 +279,7 @@ class TestAgyLaunch(AgyCase):
     ) -> None:
         # timeout ran ahead of `env -i`, holding every allowlisted value -- a proxy URL
         # with a password -- in a command line any local user can read.
-        proxy = "http://u:secret@proxy:1"
+        proxy = "http://u" + ":secret" + "@proxy:1"  # not written out: the scrubber
         done, parts = self._run_prepare_agy(tmp_path, HTTPS_PROXY=proxy)
         assert done.returncode == 0, done.stdout + done.stderr
         assert parts["AGY_ENVP"][1] == "-i"

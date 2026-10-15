@@ -54,7 +54,7 @@ _LENSES = [
         "correctness and edge cases",
         "logic errors, JSON parsing, bash quoting, edge cases",
         "correctness",
-        "gpt-5.5-codex",
+        "gpt-5.5",
     ),
     (
         "readability and performance",
@@ -362,10 +362,12 @@ def _choose_command(
     Anthropic reviewers. Used by regulated codebases that need
     data-at-rest in their AWS account.
 
-    Returns ``(cmd, rebuild_label)``, where ``rebuild_label`` is set when
-    the chosen backend needs the prompt to be rebuilt with a different
-    model label (slot 2's hermes-haiku path, and agy, which names the model
-    it runs). Returns ``None`` if no backend is available.
+    Returns ``(cmd, label)``, where ``label`` is the model the prompt should
+    name when it is not the lens's own: slot 2 on hermes or claude (haiku) or
+    on codex with CODEX_MODEL set, gemini and agy, which name the model they
+    run. Returns ``None`` if no backend is available. ``prompt_path`` need not
+    exist yet: hermes is handed the path, and reads it when it is launched,
+    after the prompt is written.
     """
     if prefer_hermes and backends["hermes"]:
         if slot in (1, 4):
@@ -388,7 +390,7 @@ def _choose_command(
             "-o",
             str(result_path),
             "-",
-        ], None
+        ], os.environ.get("CODEX_MODEL") or None  # the model it runs, when one is named
     # A project that pinned Bedrock did so to keep its code with providers it chose;
     # if Hermes is unavailable, slot 3 must not fall to a Google default it never
     # agreed to. There, agy runs only when asked for by name (REVIEW_USE_AGY=1).

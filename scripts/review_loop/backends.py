@@ -94,7 +94,7 @@ def _codex_sh(script: str, path: Path) -> list[str]:
 
 
 def detect_backends(
-    verify_codex: bool = True, prefer_hermes: bool = False
+    verify_codex: bool = True, prefer_hermes: bool = False, repo: Path | None = None
 ) -> dict[str, bool]:
     """Detect which CLI backends are installed.
 
@@ -118,13 +118,15 @@ def detect_backends(
             print(f"  codex: DISABLED for review -- {reason}")
             found["codex"] = False
     if found["agy"]:
-        found["agy"] = _agy_usable(prefer_hermes)
+        found["agy"] = _agy_usable(prefer_hermes, repo)
     return found
 
 
-def _agy_usable(prefer_hermes: bool) -> bool:
+def _agy_usable(prefer_hermes: bool, repo: Path | None = None) -> bool:
     """Whether the installed agy is to review -- wanted here, its sandbox proven, a
-    model to run -- saying why not."""
+    model to run -- saying why not. ``repo``, the repository under review, is hidden
+    from agy while it is checked and while it lists its models, as in a review."""
+    also_hide = (repo,) if repo is not None else ()
     if prefer_hermes and not env_flag("REVIEW_USE_AGY"):
         # Pinned to Bedrock to keep the code with providers it chose: agy is not run at
         # all -- not its check, not a signed-in listing of its models -- unless asked
@@ -142,10 +144,10 @@ def _agy_usable(prefer_hermes: bool) -> bool:
     if agy_unsandboxed():
         print("  agy: running WITHOUT its sandbox (MMCRA_SKIP_AGY_SANDBOX_CHECK)")
     else:
-        ok, reason = agy_is_confined()
+        ok, reason = agy_is_confined(also_hide)
         print(f"  agy: {'' if ok else 'DISABLED for review -- '}{reason}")
         if not ok:
             return False
-    model, how = agy_model_choice()
+    model, how = agy_model_choice(also_hide)
     print(f"  agy: {how}" if model else f"  agy: DISABLED -- {how}")
     return model is not None

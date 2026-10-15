@@ -16,15 +16,16 @@ import struct
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any
 
 from .agy_sandbox import agy_wrapper, scratch_dirs, user_homes
-from .config import REPO_ROOT
+from .config import REPO_ROOT, env_flag
 from .proc import run, signals_unwind
 from .results import printable
+from .unix_sockets import SOCK_DGRAM, Sock, unix_sockets
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    pass
 
 
 # -- proving the sandbox -------------------------------------------------------
@@ -97,22 +98,38 @@ def _probe(box: _Box, canary: Path, roots: list[Path]) -> dict[str, str]:
         " | tr '\\0' '\\n' | grep -q '^MMCRA_ENV_PROBE=' && echo LEAK",
         **{f"ls {i}": f"ls -A1 {q(str(root))}" for i, root in enumerate(roots)},
     }
+    # Each answer is followed by its exit status, ``key?`` in what this returns: an
+    # answer the probe never reached, or a listing that failed, is not one that found
+    # nothing. A probe cut short says which answer it stopped at, as ``_incomplete``.
     script = "\n".join(
-        f"echo {mark}{key}; {{ {ask}; }} 2>/dev/null" for key, ask in questions.items()
+        # On a line of its own: an answer need not end in a newline (the canary).
+        f"echo {mark}{key}; {{ {ask}; }} 2>/dev/null;"
+        f" status=$?; printf '\\n%s\\n' {q(f'{mark}={key}?')}\"$status\""
+        for key, ask in questions.items()
     )
     said = box.sh(script, env={**os.environ, "MMCRA_ENV_PROBE": "x"})
     answers: dict[str, list[str]] = {}
+    statuses: dict[str, str] = {}
     for line in said.split("\n"):
-        if line.startswith(mark):
+        if line.startswith(mark + "="):
+            key, _, status = line[len(mark) + 1 :].rpartition("?")
+            statuses[f"{key}?"] = status
+        elif line.startswith(mark):
             answers[line[len(mark) :]] = []
         elif answers:
             answers[next(reversed(answers))].append(line)
-    return {key: "\n".join(lines) for key, lines in answers.items()}
+    seen = {key: "\n".join(lines) for key, lines in answers.items()} | statuses
+    unfinished = [key for key in questions if f"{key}?" not in statuses]
+    if seen and unfinished:
+        seen["_incomplete"] = unfinished[0]
+    return seen
 
 
 def _check_runs(seen: dict[str, str], box: _Box) -> str | None:
     # First: a canary that survives because the sandbox never launched is not a pass.
     # Not one answer means the probe never ran, and why is in bwrap's stderr.
+    if "_incomplete" in seen:
+        return f"the sandbox probe stopped at {seen['_incomplete']!r}"
     if seen:
         return None
     # What the sandbox printed, escapes and all, made safe to print.
@@ -155,6 +172,9 @@ def _check_files(seen: dict[str, str], canary: Path, workspace: Path) -> str | N
 
 def _check_hidden(seen: dict[str, str], box: _Box, roots: list[Path]) -> str | None:
     for i, root in enumerate(roots):
+        # A listing that failed lists nothing, which is not the same as empty.
+        if seen.get(f"ls {i}?") != "0":
+            return f"could not list {root} inside the sandbox"
         listed = {name for name in seen.get(f"ls {i}", "").split("\n") if name}
         extra = listed - box.mounted_under(root)
         if extra:
@@ -195,133 +215,8 @@ def _check_environment(seen: dict[str, str]) -> str | None:
     return None
 
 
-#: sock_diag, the kernel's socket listing over netlink (linux/sock_diag.h,
-#: linux/unix_diag.h): a dump of every AF_UNIX socket, each with its name and owner.
-_NETLINK_SOCK_DIAG = 4
-_SOCK_DIAG_BY_FAMILY = 20
-_NLM_F_REQUEST, _NLM_F_DUMP, _NLM_F_DUMP_INTR = 0x1, 0x300, 0x10
-_NLMSG_ERROR, _NLMSG_DONE = 2, 3
-_UDIAG_SHOW_NAME, _UDIAG_SHOW_UID = 0x01, 0x40
-_UNIX_DIAG_NAME, _UNIX_DIAG_UID = 0, 7
-_NLMSG_HDR = struct.Struct("=IHHII")
-_UNIX_DIAG_REQ = struct.Struct("=BBHIIIII")
-_UNIX_DIAG_MSG = struct.Struct("=BBBBIII")
-_RTATTR = struct.Struct("=HH")
-#: unix_diag_msg's type and state that take a connection: a stream or seqpacket socket
-#: in TCP_LISTEN, or any datagram one.
-_SOCK_DGRAM, _TCP_LISTEN = 2, 10
-
 #: An X server's abstract socket, and its display number.
 _X_DISPLAY = re.compile(rb"\0/tmp/\.X11-unix/X(\d+)")
-
-
-class _Sock(NamedTuple):
-    """A bound unix socket: its name, and its owner (None where the kernel, before
-    5.3, does not say)."""
-
-    #: A path as it was bound (``b"/run/..."``), or an abstract name with its leading
-    #: NUL (``b"\\0/tmp/.X11-unix/X0"``).
-    name: bytes
-    uid: int | None = None
-    #: Whether it takes connections or datagrams from others: a listening stream
-    #: socket, or a datagram one. A client's connected socket has a name too.
-    accepts: bool = True
-    #: SOCK_STREAM, SOCK_DGRAM or SOCK_SEQPACKET.
-    kind: int = socket.SOCK_STREAM
-
-
-def _unix_sockets() -> list[_Sock]:
-    """Every bound unix socket in this network namespace, byte for byte, and its owner.
-
-    From the kernel over netlink, not /proc/net/unix: that file prints each name raw on
-    a line of its own, so a name with a line break in it reads as two sockets, neither
-    of them the real one, and a name that is not UTF-8 reads as some other name.
-
-    Raises OSError when the kernel will not list them, or the list comes back
-    interrupted or malformed; a short list would pass every check that reads it.
-    """
-    request = _UNIX_DIAG_REQ.pack(
-        socket.AF_UNIX,
-        0,
-        0,
-        0xFFFFFFFF,
-        0,
-        _UDIAG_SHOW_NAME | _UDIAG_SHOW_UID,
-        0xFFFFFFFF,
-        0xFFFFFFFF,
-    )
-    header = _NLMSG_HDR.pack(
-        _NLMSG_HDR.size + len(request),
-        _SOCK_DIAG_BY_FAMILY,
-        _NLM_F_REQUEST | _NLM_F_DUMP,
-        1,
-        0,
-    )
-    found: list[_Sock] = []
-    with socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, _NETLINK_SOCK_DIAG) as nl:
-        nl.settimeout(10)
-        nl.sendall(header + request)
-        while True:
-            data = nl.recv(1 << 20)
-            if not data:
-                raise OSError("the kernel's socket list ended early")
-            for kind, flags, body in _netlink_messages(data):
-                if flags & _NLM_F_DUMP_INTR:
-                    # The table changed while it was listed: a socket may be missing.
-                    raise OSError("the kernel's socket list was interrupted")
-                if kind == _NLMSG_DONE:
-                    _check_done(body)
-                    return found
-                if kind == _NLMSG_ERROR:
-                    raise OSError("the kernel would not list its sockets (sock_diag)")
-                sock = _diag_socket(body)
-                if sock.name:
-                    found.append(sock)
-
-
-def _netlink_messages(data: bytes) -> Iterator[tuple[int, int, bytes]]:
-    """Each message in one netlink read: its type, its flags and its body."""
-    offset = 0
-    while offset < len(data):
-        if offset + _NLMSG_HDR.size > len(data):
-            raise OSError("a truncated message in the kernel's socket list")
-        length, kind, flags, _, _ = _NLMSG_HDR.unpack_from(data, offset)
-        if length < _NLMSG_HDR.size or offset + length > len(data):
-            raise OSError("a malformed message in the kernel's socket list")
-        yield kind, flags, data[offset + _NLMSG_HDR.size : offset + length]
-        offset += (length + 3) & ~3
-
-
-def _check_done(body: bytes) -> None:
-    """NLMSG_DONE carries the dump's status: anything but 0 is a list cut short."""
-    if len(body) < 4 or struct.unpack_from("=i", body)[0] != 0:
-        raise OSError("the kernel's socket list did not complete")
-
-
-def _diag_socket(body: bytes) -> _Sock:
-    """One socket's unix_diag_msg: its name (empty if it has none), owner, and
-    whether it accepts anything from others."""
-    if len(body) < _UNIX_DIAG_MSG.size:
-        raise OSError("a truncated socket in the kernel's socket list")
-    _, sock_type, state, _, _, _, _ = _UNIX_DIAG_MSG.unpack_from(body)
-    accepts = sock_type == _SOCK_DGRAM or state == _TCP_LISTEN
-    name, uid = b"", None
-    offset = _UNIX_DIAG_MSG.size
-    while offset < len(body):
-        if offset + _RTATTR.size > len(body):
-            raise OSError("a truncated attribute in the kernel's socket list")
-        length, attr_type = _RTATTR.unpack_from(body, offset)
-        if length < _RTATTR.size or offset + length > len(body):
-            raise OSError("a malformed attribute in the kernel's socket list")
-        value = body[offset + _RTATTR.size : offset + length]
-        if attr_type == _UNIX_DIAG_NAME:
-            # A path ends at its first NUL (a binder may count the terminator); an
-            # abstract name is every byte after its leading one.
-            name = value if value[:1] == b"\0" else value.split(b"\0", 1)[0]
-        elif attr_type == _UNIX_DIAG_UID and len(value) >= 4:
-            uid = struct.unpack_from("=I", value)[0]
-        offset += (length + 3) & ~3
-    return _Sock(name, uid, accepts, sock_type)
 
 
 def _shown(name: bytes) -> str:
@@ -329,8 +224,8 @@ def _shown(name: bytes) -> str:
     return repr(name.replace(b"\0", b"@", 1).decode("utf-8", "backslashreplace"))
 
 
-def _check_sockets(box: _Box, socks: list[_Sock]) -> str | None:
-    """No socket in ``socks`` (``_unix_sockets``) can be connected to from inside.
+def _check_sockets(box: _Box, socks: list[Sock]) -> str | None:
+    """No socket in ``socks`` (``unix_sockets``) can be connected to from inside.
 
     They are the sockets of this network namespace, which the sandbox shares. X
     servers, of any owner, are asked separately (``_check_x_servers``).
@@ -342,7 +237,7 @@ def _check_sockets(box: _Box, socks: list[_Sock]) -> str | None:
     )
 
 
-def _check_relative_sockets(socks: list[_Sock]) -> str | None:
+def _check_relative_sockets(socks: list[Sock]) -> str | None:
     """A socket bound by a relative name cannot be checked: this user's or root's
     fails. Another user's lives in that user's own directory."""
     for sock in socks:
@@ -351,7 +246,7 @@ def _check_relative_sockets(socks: list[_Sock]) -> str | None:
     return None
 
 
-def _check_path_sockets(box: _Box, socks: list[_Sock]) -> str | None:
+def _check_path_sockets(box: _Box, socks: list[Sock]) -> str | None:
     """No path socket, whoever owns it, that the sandbox can write to where it was
     bound.
 
@@ -369,18 +264,24 @@ def _check_path_sockets(box: _Box, socks: list[_Sock]) -> str | None:
     return None
 
 
-def _check_abstract_sockets(socks: list[_Sock]) -> str | None:
+def _check_abstract_sockets(socks: list[Sock]) -> str | None:
     """No abstract socket of this user's that takes connections.
 
     No mount hides one: it belongs to the network namespace, which agy keeps to reach
     its model. Whatever listens there admits this user, whatever it is called (a
     session bus can take any name); a client's connected socket has a name too, and
     takes nothing. Where the kernel does not say whose (before 5.3), the listener
-    says, asked over a connection (``_listener_uid``). Root's system daemons check
-    who connects, and another user's admit that user only: counting those would let
-    any local user switch the slot off by binding one.
+    says, asked over a connection (``_listener_uid``).
+
+    Root's and other users' are not counted by default. That is an assumption, not
+    proof: they usually check who connects (multipathd, iscsid and a user's session
+    bus all do), and counting them would switch the slot off on a stock Ubuntu host
+    and let any local user do the same by binding one; but a daemon that admits this
+    user over one stays reachable. ``MMCRA_AGY_STRICT_SOCKETS=1`` counts every
+    abstract listener but the X servers, which are asked; docs/agy-sandbox.md says so.
     """
     me = os.getuid()
+    strict = env_flag("MMCRA_AGY_STRICT_SOCKETS")
     for sock in socks:
         if (
             not sock.accepts
@@ -390,10 +291,15 @@ def _check_abstract_sockets(socks: list[_Sock]) -> str | None:
             continue
         owner = sock.uid
         if owner is None:
-            if sock.kind == _SOCK_DGRAM:
+            if sock.kind == SOCK_DGRAM:
                 # A datagram socket has no listener to ask: not knowing is not a pass.
                 return f"cannot tell whose datagram socket {_shown(sock.name)} is"
             owner = _listener_uid(sock.name, sock.kind)
+        if strict and owner is not None and owner != me:
+            return (
+                f"bwrap sandbox can reach {_shown(sock.name)}, an abstract socket of"
+                f" uid {owner}'s (MMCRA_AGY_STRICT_SOCKETS)"
+            )
         if owner == me:
             return (
                 f"bwrap sandbox can reach {_shown(sock.name)}, an abstract socket of"
@@ -432,8 +338,8 @@ def _reachable(box: _Box, paths: list[bytes]) -> list[bytes] | str:
     host's list would push past the 128 KB limit on one argument, and not decoded,
     which would change a name that is not UTF-8 into another.
     """
-    if not paths:
-        return []
+    # Run even with no paths: the wrapper is started either way, so a wrapper that
+    # cannot start fails here, at launch, rather than passing for reaching nothing.
     # Each batch exits 0 whatever it found, so a status of anything else is the probe
     # failing -- no xargs, a sandbox that did not start -- which must not read as a
     # sandbox that reaches nothing.
@@ -459,7 +365,7 @@ def _reachable(box: _Box, paths: list[bytes]) -> list[bytes] | str:
     return [p for p in done.stdout.split(b"\0") if p]
 
 
-def _check_x_servers(socks: list[_Sock]) -> str | None:
+def _check_x_servers(socks: list[Sock]) -> str | None:
     """No X server in ``socks`` lets this user in without credentials, whoever owns it.
 
     Its abstract socket is reachable from inside, and one that admits a client with no
@@ -502,8 +408,8 @@ def _x_admits(name: bytes) -> bool:
     return reply == b"\x01"
 
 
-def _check_reachable(box: _Box, socks: list[_Sock]) -> str | None:
-    """No socket and no X server among ``socks`` (``_unix_sockets``) is reachable."""
+def _check_reachable(box: _Box, socks: list[Sock]) -> str | None:
+    """No socket and no X server among ``socks`` (``unix_sockets``) is reachable."""
     return _check_sockets(box, socks) or _check_x_servers(socks)
 
 
@@ -516,7 +422,7 @@ def agy_reachable(wrap: list[str], workspace: Path) -> str | None:
     is read here: the sandbox shares this network namespace, so it is the same list.
     """
     try:
-        return _check_reachable(_Box(wrap, workspace), _unix_sockets())
+        return _check_reachable(_Box(wrap, workspace), unix_sockets())
     except subprocess.TimeoutExpired as exc:
         return f"could not check what agy's sandbox can reach: {_timed_out(exc)}"
     except OSError as exc:
@@ -529,13 +435,15 @@ def _timed_out(exc: subprocess.TimeoutExpired) -> str:
     return f"the sandbox did not answer within {exc.timeout:.0f}s"
 
 
-def agy_is_confined() -> tuple[bool, str]:
+def agy_is_confined(also_hide: tuple[Path, ...] = ()) -> tuple[bool, str]:
     """Verify, with no model call, the wrapper a reviewer runs agy under.
 
     It runs holding no capabilities, agy starts in it, it reads outside the workspace
     but writes only inside, both homes, /tmp and /run hold only what was put there,
     the process namespace is not the host's, the environment is cleared, and nothing
     that runs code outside -- a socket, a session bus, an X server -- is reachable.
+    This checkout, the working directory and ``also_hide`` (the repository under
+    review) are hidden, and shown to be.
     """
     if shutil.which("bwrap") is None:
         return False, (
@@ -564,7 +472,9 @@ def agy_is_confined() -> tuple[bool, str]:
             # them -- but not one that holds the canary, which must stay readable.
             hidden = [
                 path
-                for path in dict.fromkeys(p.resolve() for p in (Path.cwd(), REPO_ROOT))
+                for path in dict.fromkeys(
+                    p.resolve() for p in (Path.cwd(), REPO_ROOT, *also_hide)
+                )
                 if path != Path("/") and not canary.is_relative_to(path)
             ]
             box = _Box(agy_wrapper(workspace, state, hidden), workspace)
@@ -575,7 +485,7 @@ def agy_is_confined() -> tuple[bool, str]:
                 return False, failure
             # Read here, not inside: the sandbox shares this network namespace, so it
             # is the same list, and a name in it cannot reach the probe's answers.
-            sockets = _unix_sockets()
+            sockets = unix_sockets()
             failure = (
                 _check_capabilities(seen)
                 or _check_agy_starts(seen)

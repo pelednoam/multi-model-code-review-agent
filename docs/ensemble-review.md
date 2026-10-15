@@ -94,7 +94,7 @@ review_helper() {
 # The switches the checks read, exported first: one set in this shell but not exported -- say
 # REVIEW_USE_AGY=0 -- is not seen by the helper, and agy would be detected anyway.
 export AGY_MODEL REVIEW_USE_AGY REVIEW_USE_GEMINI REVIEW_USE_CODEX MMCRA_SKIP_AGY_SANDBOX_CHECK \
-  MMCRA_SKIP_CODEX_SANDBOX_CHECK
+  MMCRA_SKIP_CODEX_SANDBOX_CHECK MMCRA_AGY_STRICT_SOCKETS
 
 # codex: only once its sandbox is shown to refuse a write (no model call). MMCRA_SKIP_CODEX_SANDBOX_CHECK=1
 # (or true/yes/on -- not 0) skips the check on a host that is already a sandbox.
@@ -148,7 +148,7 @@ Bedrock opt-in precedence (PREFER_HERMES=true), used for regulated codebases tha
 
 | CLI | Non-interactive | Read-only | Input | Output |
 |---|---|---|---|---|
-| `claude` | `-p` | `--allowedTools "Read Grep Glob"` **plus** `--disallowedTools "Edit Write MultiEdit NotebookEdit Bash WebFetch WebSearch"`, `--strict-mcp-config` (no MCP servers), `--setting-sources user` (no project hooks) and `--permission-mode dontAsk` -- `--allowedTools` alone only skips the permission prompt, it does *not* confine the agent | stdin (`< prompt.txt`) | `--output-format json` wraps in `{"result":"..."}` |
+| `claude` | `-p` | `--allowedTools "Read Grep Glob"` **plus** `--disallowedTools "Edit Write MultiEdit NotebookEdit Bash WebFetch WebSearch ReportFindings"`, `--strict-mcp-config` (no MCP servers), `--setting-sources user` (no project hooks) and `--permission-mode dontAsk` -- `--allowedTools` alone only skips the permission prompt, it does *not* confine the agent | stdin (`< prompt.txt`) | `--output-format json` wraps in `{"result":"..."}` |
 | `codex` | `codex exec` **plus `-s read-only` and `-c approvals_reviewer="user"`** (in both the convergence loop and this runner) -- both are pinned by the tool and neither is optional: no sandbox flag was passed at all before, and `-s read-only` on its own is silently overridden by a global `approvals_reviewer = "auto_review"` (see docs/codex-sandbox.md). Codex is also canary-tested at launch and its slot is DROPPED if the sandbox does not actually refuse a write (optional `-m <model> -c model_reasoning_effort=<level>` -- override via `CODEX_MODEL`, `CODEX_REASONING_EFFORT`; `=high` is the "GPT-5.5 Pro" equivalent) | verified read-only, not assumed | stdin (file) | `-o <file>` writes last message |
 | `gemini` | `-p` | `--model <m> --approval-mode plan --skip-trust` (default `<m>` is `gemini-2.5-flash` for free-tier compatibility; override via `GEMINI_MODEL`) | stdin (file) | stdout (text, may have fences) |
 | `agy` | `--input-format stream-json --output-format stream-json` (no `-p`: the prompt is one JSON line on stdin, because a single argument is capped at 128 KB) **plus `--sandbox --disable-slash-commands`**, pinned. On by default where installed; `REVIEW_USE_AGY=0` switches it off. Model: `AGY_MODEL` if set, else the best Gemini model `agy models` lists, picked each run. agy has no deny list and was measured writing outside its workspace, so it runs under **bubblewrap** (see docs/agy-sandbox.md), verified at startup without a model call and again before each launch; the slot goes to its next backend if that fails. The prompt opens with a no-tools preamble: a refused tool call ends agy's turn with no answer | bubblewrap read-only filesystem, verified; `--sandbox --disable-slash-commands` (no `--mode=plan`: it is a slash command, so a no-op once expansion is off) | stdin (one stream-json line) | stream-json; the last `result` event carries `structured_output` (enforced by `--json-schema`) |
@@ -566,6 +566,7 @@ JOB_PID=()
 JOB_BACKEND=()   # which CLI ran each slot, which decides how its output is read (unwrap_envelope)
 JOB_OUT=()       # the one file each slot's CLI writes its answer to, the only one read for it
 JOB_PROVIDER=()  # whose model answers each slot, for the diversity count
+JOB_MODEL=()     # the model that answers each slot, written into its result
 SCRATCH=()
 kill_jobs() {
   local sig
@@ -689,6 +690,7 @@ launch_hermes() {
   JOB_BACKEND[$num]=hermes
   echo hermes > "$REVIEW_TMP/backend-$num.txt"   # for watching
   JOB_PROVIDER[$num]=anthropic
+  JOB_MODEL[$num]="$hermes_model"
   echo $! > "$REVIEW_TMP/pid-$num"
   echo "R$num: Hermes ($hermes_model) [Bedrock]"
 }
@@ -798,6 +800,7 @@ launch_cli() {
       JOB_BACKEND[$num]=claude
       echo claude > "$REVIEW_TMP/backend-$num.txt"   # for watching
       JOB_PROVIDER[$num]=anthropic
+      JOB_MODEL[$num]="claude-$model"
       echo $! > "$REVIEW_TMP/pid-$num"
       echo "R$num: Claude CLI ($model, tools: $tools) [Claude subscription]"
       ;;
@@ -825,6 +828,7 @@ launch_cli() {
       JOB_BACKEND[$num]=codex
       echo codex > "$REVIEW_TMP/backend-$num.txt"   # for watching
       JOB_PROVIDER[$num]=openai
+      JOB_MODEL[$num]="${CODEX_MODEL:-gpt-5.5}"
       echo $! > "$REVIEW_TMP/pid-$num"
       local label="${CODEX_MODEL:-gpt-5.5}"
       [ -n "${CODEX_REASONING_EFFORT:-}" ] && label="$label/$CODEX_REASONING_EFFORT"
@@ -858,6 +862,7 @@ launch_cli() {
       JOB_BACKEND[$num]=gemini
       echo gemini > "$REVIEW_TMP/backend-$num.txt"   # for watching
       JOB_PROVIDER[$num]=google
+      JOB_MODEL[$num]="${GEMINI_MODEL:-gemini-2.5-flash}"
       echo $! > "$REVIEW_TMP/pid-$num"
       echo "R$num: Gemini CLI (${GEMINI_MODEL:-gemini-2.5-flash}) [Google AI Studio free tier]"
       ;;
@@ -898,6 +903,7 @@ launch_cli() {
         gpt-*)    JOB_PROVIDER[$num]=openai ;;
         *)        JOB_PROVIDER[$num]=google ;;
       esac
+      JOB_MODEL[$num]="$AGY_MODEL"
       echo $! > "$REVIEW_TMP/pid-$num"
       echo "R$num: Antigravity CLI ($AGY_MODEL) [Google AI plan]"
       echo "R$num: agy sends the diff and audit to Google (REVIEW_USE_AGY=0 to stop)"
@@ -1019,7 +1025,8 @@ publish_outputs || echo "WARNING: could not copy the reviewers' outputs into $RE
 # shaped like agy's), and only a turn that finished. Then the loop's own validation: the required
 # keys, findings that are a list of objects, and the reviewer named by the slot, not by the model.
 extract_json() {
-  review_helper extract "$1" "$2" "$3" "${4:-}" 2>"$REVIEW_TMP/extract-$(basename "$2" .json).err"
+  review_helper extract "$1" "$2" "$3" "${4:-}" "${5:-}" \
+    2>"$REVIEW_TMP/extract-$(basename "$2" .json).err"
 }
 
 # Post-process: normalize all output to result-N.json.
@@ -1034,7 +1041,7 @@ for num in 1 2 3 4; do
   # the loop checks it, codex's answer included.
   src="${JOB_OUT[$num]:-}"
   $PUBLISHED && [ -n "$src" ] && [ -f "$src" ] \
-    && extract_json "$src" "$result" "$num" "${JOB_BACKEND[$num]:-}"
+    && extract_json "$src" "$result" "$num" "${JOB_BACKEND[$num]:-}" "${JOB_MODEL[$num]:-}"
 
   # If no result produced, write a synthetic error. The done-marker distinguishes the two very
   # different failures a reader needs to tell apart: a reviewer that ran and produced unparseable
@@ -1066,7 +1073,8 @@ shell and inherits nothing from the call that wrote it.
 
 ```bash
 export REVIEW_TMP HAS_CLAUDE HAS_HERMES HAS_CODEX HAS_GEMINI HAS_AGY AGY_MODEL PREFER_HERMES \
-  MMCRA_SKIP_AGY_SANDBOX_CHECK REVIEW_USE_AGY REVIEW_USE_GEMINI REVIEW_USE_CODEX
+  MMCRA_SKIP_AGY_SANDBOX_CHECK MMCRA_AGY_STRICT_SOCKETS REVIEW_USE_AGY REVIEW_USE_GEMINI \
+  REVIEW_USE_CODEX
 "$REVIEW_TMP/run-reviewers.sh" 2>&1 | tee "$REVIEW_TMP/round.log"
 ```
 

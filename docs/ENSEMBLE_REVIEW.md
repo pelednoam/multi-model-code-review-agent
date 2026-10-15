@@ -57,7 +57,7 @@ User sees: preflight audit, blocking findings, grouped criticals/warnings, conve
 | Reviewer | Routing chain | Focus |
 |---|---|---|
 | Security & robustness | Opus via Claude CLI OR Hermes/Bedrock (first when pinned to Bedrock) | Injection, auth, unsafe deserialization, secrets, race conditions, swallowed exceptions |
-| Correctness & edge cases | GPT-5.5 via Codex CLI (preferred) OR Haiku via Claude CLI OR Hermes/Bedrock (first when pinned) | Off-by-one, null paths, shape mismatches, contract violations, logic errors, missing coverage |
+| Correctness & edge cases | GPT-5.5 via Codex CLI (preferred) OR Haiku via Claude CLI OR Hermes/Bedrock; a project pinned to Bedrock runs Haiku via Hermes first, and OpenAI only with `REVIEW_USE_CODEX=1` | Off-by-one, null paths, shape mismatches, contract violations, logic errors, missing coverage |
 | Readability & performance | agy -- Antigravity CLI, best Gemini model listed, under a verified bwrap sandbox (preferred) OR Gemini CLI (only with `REVIEW_USE_GEMINI=1`) OR Sonnet via Claude CLI/Hermes; a project pinned to Bedrock runs Sonnet via Hermes first, and Google only if asked | Naming, function length, abstraction leaks, dead code, N+1 I/O, memory growth |
 | Spec-contract compliance | Opus via Claude CLI OR Hermes/Bedrock (first when pinned to Bedrock) | Code vs signed artifacts, manifest drift, feature count mismatches, fallback/zero-fill that changes cohorts |
 

@@ -123,6 +123,16 @@ SHAPE_PATTERNS = [
     re.compile(r"sk-[a-zA-Z0-9_-]{20,192}"),
     re.compile(r"ghp_[a-zA-Z0-9]{36,}"),
     re.compile(r"gho_[a-zA-Z0-9]{36,}"),
+    # GitHub's other token kinds: fine-grained, app, user-to-server, refresh.
+    re.compile(r"github_pat_[0-9A-Za-z_]{40,}"),
+    re.compile(r"gh[sur]_[A-Za-z0-9]{36,}"),
+    # A Google API key: with agy on by default, the diff goes to Google itself.
+    re.compile(r"AIza[0-9A-Za-z_-]{35}"),
+    re.compile(r"(?:sk|rk)_live_[0-9a-zA-Z]{20,}"),
+    re.compile(r"xox[abprs]-[0-9A-Za-z-]{10,}"),
+    # A password in a URL's userinfo: scheme, "://", user, ":", password, "@" -- in a
+    # postgres or proxy URL. Written in two parts, so that this line is not one.
+    re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*:" + r"//[^\s/:@'\"]+:[^\s/@'\"]{3,}@"),
     re.compile(r"glpat-[a-zA-Z0-9\-]{20,}"),
     re.compile(r"(?i)DefaultEndpointsProtocol=https;AccountName="),
     re.compile(r'"type"\s*:\s*"service_account"'),

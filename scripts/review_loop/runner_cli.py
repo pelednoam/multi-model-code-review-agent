@@ -54,6 +54,10 @@ def _codex_check() -> int:
 def _agy_detect(prefer_hermes: str = "false") -> int:
     """Print the model agy will run, or nothing if agy is not to be used.
 
+    ``prefer_hermes`` is read as pinned unless it is exactly ``false``: the runner
+    passes ``true`` or ``false``, and anything else -- empty included -- keeping agy
+    out is the safe misreading.
+
     ``prefer_hermes`` is the runner's PREFER_HERMES, ``true`` for a project pinned to
     Bedrock: agy is then not even detected unless asked for by name.
     """
@@ -105,7 +109,12 @@ def _agy_reachable(workspace: str) -> int:
     """
     if agy_unsandboxed():
         return 0
-    wrap = [arg for arg in sys.stdin.buffer.read().decode().split("\0") if arg]
+    # Bytes, as the shell wrote them: decoded strictly, a path that is not UTF-8 failed;
+    # and empty arguments kept, so that what is checked is what runs. Only the final
+    # terminator goes.
+    wrap = [os.fsdecode(arg) for arg in sys.stdin.buffer.read().split(b"\0")]
+    if wrap and wrap[-1] == "":
+        wrap.pop()
     if not wrap:
         print("no sandbox to check")
         return 1
@@ -138,7 +147,7 @@ def _agy_input(prompt_file: str, message_file: str) -> int:
     return 0
 
 
-def _extract(raw: str, out: str, slot: str, backend: str = "") -> int:
+def _extract(raw: str, out: str, slot: str, backend: str = "", model: str = "") -> int:
     """Write the review in ``raw`` to ``out``, unwrapped and checked as the loop does it.
 
     agy's stream is read as such only when agy ran the slot, and only a finished turn
@@ -160,6 +169,10 @@ def _extract(raw: str, out: str, slot: str, backend: str = "") -> int:
         print("no review in the output: no JSON object with the required keys and a"
               " list of findings", file=sys.stderr)  # fmt: skip
         return 1
+    if model:
+        # The model that ran, as the runner launched it: the prompt names the lens's
+        # own, which a fallback backend is not.
+        review["model"] = model
     Path(out).write_text(json.dumps(review, indent=2), encoding="utf-8")
     return 0
 

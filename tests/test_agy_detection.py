@@ -74,7 +74,9 @@ class TestAgyDetection(AgyCase):
         # Detection ran first, so the loop could not tell it the project was pinned.
         entry = (REPO_ROOT / "scripts" / "review_until_converged.py").read_text()
         decided = entry.index("prefer_hermes = args.prefer_hermes or")
-        assert entry.index("detect_backends(prefer_hermes=prefer_hermes)") > decided
+        assert entry.index(
+            "detect_backends(prefer_hermes=prefer_hermes, repo=repo)"
+        ) > (decided)
 
     def test_a_bedrock_project_does_not_run_agy_at_all(
         self, monkeypatch: pytest.MonkeyPatch
@@ -92,7 +94,7 @@ class TestAgyDetection(AgyCase):
         monkeypatch.setattr(agy, "agy_models", ran)
         assert backends.detect_backends(prefer_hermes=True)["agy"] is False
         monkeypatch.setenv("REVIEW_USE_AGY", "1")
-        monkeypatch.setattr(backends, "agy_is_confined", lambda: (True, "verified"))
+        monkeypatch.setattr(backends, "agy_is_confined", lambda *a: (True, "verified"))
         monkeypatch.setenv("AGY_MODEL", self.MODEL)
         assert backends.detect_backends(prefer_hermes=True)["agy"] is True
 

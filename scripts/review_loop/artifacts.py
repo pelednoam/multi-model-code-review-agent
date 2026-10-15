@@ -161,7 +161,7 @@ def _display_text(text: str, event: dict[str, Any] | None) -> str:
         return agy_summary(event)[:_SALVAGE_CHARS]
     try:
         wrapper = json.loads(text)
-    except ValueError:
+    except (ValueError, RecursionError):  # nested past the parser's limit
         return text[:_SALVAGE_CHARS]
     if isinstance(wrapper, dict) and isinstance(wrapper.get("result"), str):
         return str(wrapper["result"]).strip()[:_SALVAGE_CHARS]

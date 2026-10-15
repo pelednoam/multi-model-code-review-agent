@@ -61,7 +61,7 @@ def agy_result(stdout: str) -> dict[str, Any] | None:
             continue
         try:
             event = json.loads(line)
-        except ValueError:
+        except (ValueError, RecursionError):  # nested past the parser's limit
             continue
         if (
             isinstance(event, dict)
@@ -146,7 +146,7 @@ def unwrap_envelope(text: str, backend: str) -> str:
         return text
     try:
         wrapper = json.loads(text)
-    except ValueError:
+    except (ValueError, RecursionError):  # nested past the parser's limit
         return text
     if isinstance(wrapper, dict) and isinstance(wrapper.get("result"), str):
         result: str = wrapper["result"]
@@ -165,7 +165,7 @@ def parse_review(text: str) -> dict[str, Any] | None:
         return None
     try:
         review = json.loads(text[start : end + 1])
-    except ValueError:
+    except (ValueError, RecursionError):  # nested past the parser's limit
         return None
     return review if isinstance(review, dict) else None
 

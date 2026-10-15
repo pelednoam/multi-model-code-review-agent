@@ -79,7 +79,7 @@ def agy_unsandboxed() -> bool:
 # -- the model -----------------------------------------------------------------
 
 
-def agy_model_choice() -> tuple[str | None, str]:
+def agy_model_choice(also_hide: tuple[Path, ...] = ()) -> tuple[str | None, str]:
     """The model agy runs -- ``AGY_MODEL`` if set, else the best one this account
     lists -- and how it was chosen, in words.
 
@@ -91,16 +91,33 @@ def agy_model_choice() -> tuple[str | None, str]:
     """
     explicit = os.environ.get("AGY_MODEL")
     if explicit:
+        if not _SLUG.fullmatch(explicit):
+            return None, f"AGY_MODEL={explicit!r} is not a model name"
         return explicit, f"model {explicit} (AGY_MODEL)"
     if not shutil.which("agy"):
         return None, "agy is not installed"
-    return _picked_agy_model()
+    picked = _picked_agy_model(also_hide)
+    if picked[0] is None:
+        # Not kept: a listing that failed once -- offline for a moment -- is asked
+        # again next time, rather than leaving agy off for the rest of a long loop.
+        _picked_agy_model.cache_clear()
+    return picked
+
+
+#: What a model slug looks like. ``agy models`` is a network answer, printed and then
+#: passed as --model: nothing else is taken from it.
+_SLUG = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")
 
 
 @functools.cache
-def _picked_agy_model() -> tuple[str | None, str]:
+def _picked_agy_model(also_hide: tuple[Path, ...] = ()) -> tuple[str | None, str]:
     """Pick once per run: the sandbox check and every round run the same model."""
-    slugs = agy_models()
+    slugs = agy_models(also_hide)
+    if not slugs:
+        return None, (
+            "`agy models` listed no models (signed out, offline, or it failed);"
+            " set AGY_MODEL to name one"
+        )
     pick = best_agy_model(slugs)
     if pick is None:
         return None, (
@@ -113,7 +130,7 @@ def _picked_agy_model() -> tuple[str | None, str]:
     )
 
 
-def agy_models() -> list[str]:
+def agy_models(also_hide: tuple[Path, ...] = ()) -> list[str]:
     """The model slugs ``agy models`` lists for this sign-in, or [] if it cannot say.
 
     Its output is a progress line, then one ``<slug>\\t<display name>`` per model.
@@ -126,7 +143,8 @@ def agy_models() -> list[str]:
             cmd = ["agy", "models"]
             if not agy_unsandboxed():
                 agy_seed_state(state)
-                cmd = [*agy_wrapper(workspace, state, (Path.cwd(), REPO_ROOT)), *cmd]
+                hidden = (Path.cwd(), REPO_ROOT, *also_hide)
+                cmd = [*agy_wrapper(workspace, state, hidden), *cmd]
             done = run(
                 cmd,
                 cwd=workspace,
@@ -135,11 +153,12 @@ def agy_models() -> list[str]:
             )
     except (subprocess.TimeoutExpired, OSError):
         return []
-    return [
+    slugs = (
         line.split("\t", 1)[0].strip()
         for line in (done.stdout or "").splitlines()
         if "\t" in line
-    ]
+    )
+    return [slug for slug in slugs if _SLUG.fullmatch(slug)]
 
 
 _GEMINI_VERSION = re.compile(r"gemini-(\d+(?:\.\d+)*)")

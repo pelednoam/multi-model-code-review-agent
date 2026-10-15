@@ -76,8 +76,8 @@ half an hour, and a bus, socket or X server can appear after startup. The slot g
 to its next backend if anything fails.
 
 A run opted in to Bedrock -- `.use-hermes` in the project, `--prefer-hermes`, or a
-"hermes"/"bedrock review" request in full mode -- does not run agy at all, the
-check included, unless `REVIEW_USE_AGY=1`.
+"hermes review", "bedrock review" or "isolated review" request in full mode -- does
+not run agy at all, the check included, unless `REVIEW_USE_AGY=1`.
 
 ## What it does not close
 
@@ -103,6 +103,14 @@ check included, unless `REVIEW_USE_AGY=1`.
   pointing at the branch.
 - **agy's browser and MCP tools.** Headless agy refused the one shell command it
   tried, but whether those tools reach the network unprompted has not been tested.
+- **Root's and other users' abstract sockets.** They are not counted: they usually
+  check who connects, and counting them would switch the slot off on a stock Ubuntu
+  host, where multipathd and iscsid keep two. A daemon that admits your user over
+  one anyway is reachable from inside. `MMCRA_AGY_STRICT_SOCKETS=1` counts every
+  abstract listener but the X servers (which are asked), at the cost of the slot on
+  such a host.
+- **Filesystems mounted after the sandbox starts.** A mount the host makes while agy
+  runs -- removable media, an automount -- appears inside, and is not made read-only.
 - **Being switched off by another local user.** The check fails closed, so any
   user who can leave a world-writable socket where the sandbox can see it
   (`/var/tmp`, say), or an X socket that never answers, turns the agy slot off
@@ -135,6 +143,8 @@ next backend.
   typo): do not use agy. It is on by default wherever it is installed, and then sends
   the scrubbed diff and audit to Google. Every round that does so says so.
 - `REVIEW_USE_AGY=1`: use agy even in a project pinned to Bedrock.
+- `MMCRA_AGY_STRICT_SOCKETS=1`: refuse every abstract socket that takes connections,
+  whoever owns it, not only your own (see above).
 - `MMCRA_SKIP_AGY_SANDBOX_CHECK=1` (or `true`, `yes`, `on`): run agy without the
   wrapper, on a host that is already a sandbox. `0`, or any other value, keeps the
   sandbox.

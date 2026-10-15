@@ -8,8 +8,13 @@ from __future__ import annotations
 
 
 #: The tools a claude reviewer is denied unless it is granted them by name: each one
-#: writes, runs a command, or reaches the network.
-CLAUDE_DENIED = ("Edit", "Write", "MultiEdit", "NotebookEdit", "Bash", "WebFetch", "WebSearch")  # fmt: skip
+#: writes, runs a command, or reaches the network -- or, ReportFindings, takes the
+#: review somewhere other than the JSON answer the loop reads: a reviewer handed it
+#: reported through it, and answered in prose.
+CLAUDE_DENIED = (
+    "Edit", "Write", "MultiEdit", "NotebookEdit", "Bash", "WebFetch", "WebSearch",
+    "ReportFindings",
+)  # fmt: skip
 
 
 def claude_denied(tools: str) -> tuple[list[str], list[str]]:

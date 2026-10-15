@@ -2390,21 +2390,21 @@ class TestRunnerScript:
         ("tools", "denied", "scoped"),
         [
             # The default list: everything that writes, runs a command, or goes online.
-            ("Read Grep Glob", "Edit Write MultiEdit NotebookEdit Bash WebFetch WebSearch", []),
+            ("Read Grep Glob", "Edit Write MultiEdit NotebookEdit Bash WebFetch WebSearch ReportFindings", []),
             # Tools given on purpose come off the list, and only those.
-            ("Read Grep Glob Bash Edit Write", "MultiEdit NotebookEdit WebFetch WebSearch", []),
-            ("Read,Bash", "Edit Write MultiEdit NotebookEdit WebFetch WebSearch", []),
-            ("Read Edit Write MultiEdit NotebookEdit Bash WebFetch WebSearch", "", []),
+            ("Read Grep Glob Bash Edit Write", "MultiEdit NotebookEdit WebFetch WebSearch ReportFindings", []),
+            ("Read,Bash", "Edit Write MultiEdit NotebookEdit WebFetch WebSearch ReportFindings", []),
+            ("Read Edit Write MultiEdit NotebookEdit Bash WebFetch WebSearch ReportFindings", "", []),
             # A scoped grant names the tool too -- and only the tool, not its scope --
             # and is said to be granted whole.
-            ("Read Grep Bash(git log:*)", "Edit Write MultiEdit NotebookEdit WebFetch WebSearch", ["Bash"]),
+            ("Read Grep Bash(git log:*)", "Edit Write MultiEdit NotebookEdit WebFetch WebSearch ReportFindings", ["Bash"]),
             (
                 "Read Bash(git log --grep Edit --all:*)",
-                "Edit Write MultiEdit NotebookEdit WebFetch WebSearch", ["Bash"],
+                "Edit Write MultiEdit NotebookEdit WebFetch WebSearch ReportFindings", ["Bash"],
             ),
             # Unbalanced: nothing is granted.
-            ("Read Edit Bash(git", "Edit Write MultiEdit NotebookEdit Bash WebFetch WebSearch", []),
-            ("Read Edit) Bash", "Edit Write MultiEdit NotebookEdit Bash WebFetch WebSearch", []),
+            ("Read Edit Bash(git", "Edit Write MultiEdit NotebookEdit Bash WebFetch WebSearch ReportFindings", []),
+            ("Read Edit) Bash", "Edit Write MultiEdit NotebookEdit Bash WebFetch WebSearch ReportFindings", []),
         ],
     )  # fmt: skip
     def test_an_override_lifts_only_the_tools_it_names(
@@ -2431,8 +2431,8 @@ class TestRunnerScript:
         )
         for tools, expected in [
             ("Read Grep Glob", "2|--disallowedTools Edit Write MultiEdit NotebookEdit"
-             " Bash WebFetch WebSearch"),
-            ("Read Edit Write MultiEdit NotebookEdit Bash WebFetch WebSearch", "0|"),
+             " Bash WebFetch WebSearch ReportFindings"),
+            ("Read Edit Write MultiEdit NotebookEdit Bash WebFetch WebSearch ReportFindings", "0|"),
         ]:  # fmt: skip
             done = subprocess.run(
                 ["bash", str(script), tools], capture_output=True, text=True, timeout=30
@@ -2446,7 +2446,7 @@ class TestRunnerScript:
         note, denied = done.stdout.strip().split("\n")
         assert note.startswith("R2: note: Bash is granted whole"), done.stdout
         assert denied == (
-            "2|--disallowedTools Edit Write MultiEdit NotebookEdit WebFetch WebSearch"
+            "2|--disallowedTools Edit Write MultiEdit NotebookEdit WebFetch WebSearch ReportFindings"
         )
 
     def test_the_loops_claude_reviewer_has_no_mcp_servers(self) -> None:
@@ -2583,6 +2583,34 @@ class TestCodexCanaryPath:
         assert not any(p.name == "pwned" for p in tmp_path.rglob("pwned"))
         for cmd in seen[1:]:
             assert str(odd) not in cmd[cmd.index("-c") + 1]
+
+
+class TestCredentialShapes:
+    """Credentials the scrubber knows by their shape alone."""
+
+    # Each built from parts: written out, the line would be redacted from this
+    # repository's own review diff.
+    @pytest.mark.parametrize(
+        "secret",
+        [
+            "postgres://app" + ":hunter2pass" + "@db.internal/prod",
+            "AIza" + "S" * 35,
+            "github" + "_pat_" + "A" * 40,
+            "gh" + "s_" + "a" * 36,
+            "sk" + "_live_" + "x" * 24,
+            "xo" + "xb-" + "1234567890-abc",
+        ],
+        ids=["url-userinfo", "google-api-key", "github-fine-grained", "github-app",
+             "stripe-live", "slack"],
+    )  # fmt: skip
+    def test_more_credential_shapes_are_redacted(self, secret: str) -> None:
+        # None was caught, and with agy on by default the diff goes to Google too.
+        line = f"+CONFIG = {secret!r}\n"
+        assert scrub_diff.scrub_line(line, False) != line
+
+    def test_a_url_without_a_password_is_kept(self) -> None:
+        line = "+see https://example.com/a:b and git@github.com:org/repo\n"
+        assert scrub_diff.scrub_line(line, False) == line
 
 
 class TestReviewedFixtures:

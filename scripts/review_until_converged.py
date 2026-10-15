@@ -304,7 +304,7 @@ def main() -> int:
     if prefer_hermes:
         print("Bedrock opt-in: routing Anthropic reviewers via Hermes")
 
-    backends = detect_backends(prefer_hermes=prefer_hermes)
+    backends = detect_backends(prefer_hermes=prefer_hermes, repo=repo)
     print(f"Backends: {backends}")
     if not backends["claude"] and not backends["hermes"]:
         print("ERROR: need claude or hermes for Anthropic reviewers")

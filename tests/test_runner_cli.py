@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -290,3 +291,72 @@ class TestRunnerCli:
     def test_the_real_schema_is_usable(self) -> None:
         done = self._cli("agy-schema", str(SCHEMA_PATH))
         assert done.returncode == 0 and json.loads(done.stdout)["type"] == "object"
+
+
+class TestRunnerCliInProcess:
+    """The same commands called in this process, as main() dispatches them."""
+
+    def test_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from scripts.review_loop import runner_cli
+
+        monkeypatch.setenv("MMCRA_X_FLAG", "yes")
+        assert runner_cli.main(["flag", "MMCRA_X_FLAG"]) == 0
+        monkeypatch.setenv("MMCRA_X_FLAG", "0")
+        assert runner_cli.main(["flag", "MMCRA_X_FLAG"]) == 1
+        assert runner_cli.main(["flag"]) == 2 and runner_cli.main([]) == 2
+
+    def test_extract_names_the_model_that_ran(self, tmp_path: Path) -> None:
+        # The prompt names the lens's own model; a fallback backend is another, and
+        # the result said the wrong one.
+        from scripts.review_loop import runner_cli
+
+        review = {"reviewer": "r", "model": "gpt-5.5", "findings": [],
+                  "overall_assessment": "ok"}  # fmt: skip
+        raw, out = tmp_path / "raw.txt", tmp_path / "result-2.json"
+        raw.write_text(json.dumps(review))
+        assert runner_cli.main(["extract", str(raw), str(out), "2", "claude",
+                                "claude-haiku"]) == 0  # fmt: skip
+        assert json.loads(out.read_text())["model"] == "claude-haiku"
+
+    def test_placeholder_and_claude_deny(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from scripts.review_loop import runner_cli
+
+        out = tmp_path / "result-3.json"
+        assert runner_cli.main(["placeholder", str(out), "3", "timed out"]) == 0
+        assert "timed out" in json.loads(out.read_text())["overall_assessment"]
+        assert runner_cli.main(["claude-deny", "Read Bash(git log:*)"]) == 0
+        said = capsys.readouterr()
+        assert "Bash" not in said.out.split() and "granted whole" in said.err
+
+    def test_reachable_reads_a_wrapper_that_is_not_utf8(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Decoded strictly, a path that is not UTF-8 failed; empty arguments were
+        # dropped, so the wrapper checked was not the one that ran.
+        from scripts.review_loop import runner_cli
+
+        seen: dict[str, object] = {}
+
+        def reachable(wrap: list[str], workspace: Path) -> None:
+            seen["wrap"] = wrap
+
+        monkeypatch.setattr(runner_cli, "agy_reachable", reachable)
+        monkeypatch.delenv("MMCRA_SKIP_AGY_SANDBOX_CHECK", raising=False)
+        data = b"bwrap\0--bind\0/srv/\xff\0\0--\0"
+        monkeypatch.setattr(runner_cli.sys, "stdin", SimpleNamespace(
+            buffer=SimpleNamespace(read=lambda: data)))  # fmt: skip
+        assert runner_cli.main(["agy-reachable", str(tmp_path)]) == 0
+        assert seen["wrap"] == ["bwrap", "--bind", os.fsdecode(b"/srv/\xff"), "", "--"]
+
+    def test_the_entry_point_runs_main(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import runpy
+
+        monkeypatch.setattr(sys, "argv", ["runner_entry.py", "flag", "MMCRA_UNSET_X"])
+        # It puts a stand-in ``scripts`` package in place; the real one comes back.
+        monkeypatch.setitem(sys.modules, "scripts", sys.modules["scripts"])
+        monkeypatch.delenv("MMCRA_UNSET_X", raising=False)
+        with pytest.raises(SystemExit) as done:
+            runpy.run_path(str(REPO_ROOT / TestRunnerCli.ENTRY), run_name="__main__")
+        assert done.value.code == 1

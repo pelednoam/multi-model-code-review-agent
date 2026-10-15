@@ -188,7 +188,7 @@ class TestAgySandboxCheck(AgyCase):
         # them switched the slot off on an ordinary host.
         # As user 1000, whoever runs the tests: as root, root's sockets are this user's.
         monkeypatch.setattr(agy_sandbox_check.os, "getuid", lambda: 1000)
-        Sock = agy_sandbox_check._Sock
+        Sock = agy_sandbox_check.Sock
         self._reach(monkeypatch)
         socks = [
             Sock(b"\0/org/kernel/linux/storage/multipathd", 0),
@@ -211,7 +211,7 @@ class TestAgySandboxCheck(AgyCase):
             agy_sandbox_check, "_listener_uid", lambda name, kind: listener
         )
         self._reach(monkeypatch)
-        unknown = [agy_sandbox_check._Sock(b"\0some-daemon", None)]
+        unknown = [agy_sandbox_check.Sock(b"\0some-daemon", None)]
         reason = agy_sandbox_check._check_reachable(None, unknown)  # type: ignore[arg-type]
         assert bool(reason) is refused
 
@@ -222,7 +222,7 @@ class TestAgySandboxCheck(AgyCase):
         # is not one that admits no one: both passed, as "nothing listening".
         monkeypatch.setattr(agy_sandbox_check.os, "getuid", lambda: 1000)
         self._reach(monkeypatch)
-        dgram = agy_sandbox_check._Sock(b"\0notify", None, True, socket.SOCK_DGRAM)
+        dgram = agy_sandbox_check.Sock(b"\0notify", None, True, socket.SOCK_DGRAM)
         reason = agy_sandbox_check._check_reachable(None, [dgram])  # type: ignore[arg-type]
         assert reason and "cannot tell whose" in reason
 
@@ -230,7 +230,7 @@ class TestAgySandboxCheck(AgyCase):
             raise OSError("'@slow' did not answer")
 
         monkeypatch.setattr(agy_sandbox_check, "_listener_uid", silent)
-        slow = [agy_sandbox_check._Sock(b"\0slow", None)]
+        slow = [agy_sandbox_check.Sock(b"\0slow", None)]
         with pytest.raises(OSError, match="did not answer"):
             agy_sandbox_check._check_reachable(None, slow)  # type: ignore[arg-type]
 
@@ -249,7 +249,7 @@ class TestAgySandboxCheck(AgyCase):
     ) -> None:
         monkeypatch.setattr(agy_sandbox_check.os, "getuid", lambda: 0)
         self._reach(monkeypatch)
-        socks = [agy_sandbox_check._Sock(b"\0/org/kernel/linux/storage/multipathd", 0)]
+        socks = [agy_sandbox_check.Sock(b"\0/org/kernel/linux/storage/multipathd", 0)]
         assert agy_sandbox_check._check_reachable(None, socks)  # type: ignore[arg-type]
 
     @LINUX_ONLY
@@ -274,7 +274,7 @@ class TestAgySandboxCheck(AgyCase):
 
         monkeypatch.setattr(agy_sandbox_check, "_x_admits", admits)
         self._reach(monkeypatch)
-        theirs = agy_sandbox_check._Sock(b"\0/tmp/.X11-unix/X7", os.getuid() + 12345)
+        theirs = agy_sandbox_check.Sock(b"\0/tmp/.X11-unix/X7", os.getuid() + 12345)
         reason = agy_sandbox_check._check_reachable(None, [theirs])  # type: ignore[arg-type]
         assert asked == [theirs.name] and reason and "X server :7" in reason
 
@@ -304,7 +304,7 @@ class TestAgySandboxCheck(AgyCase):
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as mine:
             mine.bind(name)
             mine.listen(1)
-            (listed,) = [s for s in agy_sandbox_check._unix_sockets() if s.name == name]
+            (listed,) = [s for s in agy_sandbox_check.unix_sockets() if s.name == name]
             assert listed.uid in (os.getuid(), None) and listed.accepts
 
     @staticmethod
@@ -360,8 +360,8 @@ class TestAgySandboxCheck(AgyCase):
             + self._diag(b"/var/tmp/theirs.sock", other)
             + self._done(),
         )
-        Sock = agy_sandbox_check._Sock
-        assert agy_sandbox_check._unix_sockets() == [
+        Sock = agy_sandbox_check.Sock
+        assert agy_sandbox_check.unix_sockets() == [
             Sock(b"\0/tmp/dbus-theirs", other, True),
             Sock(b"\0client", me, False),
             Sock(b"/var/tmp/theirs.sock", other, True),
@@ -387,7 +387,7 @@ class TestAgySandboxCheck(AgyCase):
         }[case]
         self._kernel_says(monkeypatch, reads)
         with pytest.raises(OSError):
-            agy_sandbox_check._unix_sockets()
+            agy_sandbox_check.unix_sockets()
 
     def test_a_socket_list_the_kernel_will_not_give_is_not_a_pass(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -396,7 +396,7 @@ class TestAgySandboxCheck(AgyCase):
         def refused() -> list[bytes]:
             raise OSError("the kernel would not list its sockets (sock_diag)")
 
-        monkeypatch.setattr(agy_sandbox_check, "_unix_sockets", refused)
+        monkeypatch.setattr(agy_sandbox_check, "unix_sockets", refused)
         reason = agy_sandbox_check.agy_reachable(["true"], tmp_path)
         assert reason and "sock_diag" in reason
 
@@ -418,14 +418,17 @@ class TestAgySandboxCheck(AgyCase):
     ) -> None:
         # The wrapper carries agy's environment; TimeoutExpired's message is the whole
         # command, and a proxy URL in it can hold a password.
-        wrap = ["env", "-i", "HTTPS_PROXY=http://user:hunter2@proxy:3128", "bwrap"]
+        # Built here, not written out: the diff scrubber rightly redacts a URL with a
+        # password in it, and this one is in the diff.
+        proxy = "http://user" + ":hunter2" + "@proxy:3128"
+        wrap = ["env", "-i", f"HTTPS_PROXY={proxy}", "bwrap"]
 
         def slow(box: object, paths: list[bytes]) -> list[bytes]:
             raise subprocess.TimeoutExpired([*wrap, "sh"], 30)
 
         monkeypatch.setattr(agy_sandbox_check, "_reachable", slow)
         monkeypatch.setattr(
-            agy_sandbox_check, "_unix_sockets", lambda: [self._mine(b"/x.sock")]
+            agy_sandbox_check, "unix_sockets", lambda: [self._mine(b"/x.sock")]
         )
         reason = agy_sandbox_check.agy_reachable(wrap, tmp_path)
         assert reason and "30s" in reason and "hunter2" not in reason
@@ -511,6 +514,40 @@ class TestAgySandboxCheck(AgyCase):
             agy_sandbox_check._check_capabilities({"caps": "CapEff:\t0000000000000000"})
             is None
         )
+
+    def test_a_listing_that_failed_is_not_an_empty_one(self, tmp_path: Path) -> None:
+        # A failed `ls`, or one the probe never reached, listed nothing, and read as a
+        # hidden directory.
+        box = agy_sandbox_check._Box(["bwrap", "--"], tmp_path)
+        root = [Path("/tmp")]
+        assert agy_sandbox_check._check_hidden({"ls 0": "", "ls 0?": "2"}, box, root)
+        assert agy_sandbox_check._check_hidden({}, box, root)
+        assert (
+            agy_sandbox_check._check_hidden({"ls 0": "", "ls 0?": "0"}, box, root)
+            is None
+        )
+
+    def test_a_probe_cut_short_is_not_a_pass(self, tmp_path: Path) -> None:
+        box = agy_sandbox_check._Box(["bwrap", "--"], tmp_path)
+        reason = agy_sandbox_check._check_runs(
+            {"agy": "", "_incomplete": "canary"}, box
+        )
+        assert reason and "canary" in reason
+
+    def test_strict_mode_counts_every_abstract_listener(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Another owner's listener is assumed to check who connects; where that is not
+        # good enough, the operator can say so.
+        monkeypatch.setattr(agy_sandbox_check.os, "getuid", lambda: 1000)
+        self._reach(monkeypatch)
+        root_daemon = [
+            agy_sandbox_check.Sock(b"\0/org/kernel/linux/storage/multipathd", 0)
+        ]
+        assert agy_sandbox_check._check_reachable(None, root_daemon) is None  # type: ignore[arg-type]
+        monkeypatch.setenv("MMCRA_AGY_STRICT_SOCKETS", "1")
+        reason = agy_sandbox_check._check_reachable(None, root_daemon)  # type: ignore[arg-type]
+        assert reason and "uid 0" in reason
 
     def test_the_repository_under_review_is_hidden(self, tmp_path: Path) -> None:
         # Outside a home (/srv, a CI checkout) it was readable whole, secrets and all.

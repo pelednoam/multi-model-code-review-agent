@@ -5,17 +5,20 @@ safe to use, agy's sandbox and what agy is sent, the review taken out of a revie
 output -- is the convergence loop's own code, called through here rather than copied
 into one-liners that drift from it. It runs as::
 
-    python3 -I -c 'import sys; sys.path.insert(0, sys.argv.pop(1));
+    python3 -I -c 'import sys, types; pkg = types.ModuleType("scripts");
+        pkg.__path__ = [sys.argv.pop(1) + "/scripts"]; sys.modules["scripts"] = pkg;
         from scripts.review_loop.runner_cli import main; sys.exit(main(sys.argv[1:]))'
         "$root" <command> [args...]
 
-``-I`` keeps PYTHONPATH and the user's site directory out; the checkout's own modules
-come first, which trusts it no further than running its scripts already does.
+``-I`` keeps PYTHONPATH, the user's site directory and the working directory out, and
+only the ``scripts`` package comes from the checkout: the checkout's root is not put on
+the path, so a ``json.py`` at its top cannot stand in for the standard library.
 """
 
 from __future__ import annotations
 
 import contextlib
+import inspect
 import json
 import sys
 from pathlib import Path
@@ -32,14 +35,11 @@ from .agy import (
     agy_unsandboxed,
 )
 from .backends import codex_is_confined, detect_backends
-from .config import env_flag
-from .results import _unwrap_envelope
+from .config import RESULT_SCHEMA, env_flag
+from .results import _unwrap_envelope, agy_answer, parse_review
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-#: What the runner requires of a review before keeping it.
-_REQUIRED = {"reviewer", "model", "findings", "overall_assessment"}
 
 
 def _codex_check() -> int:
@@ -101,36 +101,43 @@ def _agy_message(prompt_file: str) -> int:
 
 
 def _extract(raw: str, out: str, backend: str = "") -> int:
-    """Write the review in ``raw`` to ``out``, unwrapped as the loop unwraps it.
+    """Write the review in ``raw`` to ``out``, unwrapped and parsed as the loop does it.
 
-    agy's stream is read as such only when agy ran the slot, and once its result event
-    has given the review, nothing in that review is unwrapped again: a ``result`` key
-    the diff talked agy into adding does not replace the schema-checked object.
+    agy's stream is read as such only when agy ran the slot, and only a finished turn
+    counts (``results.agy_answer``). The review must carry the schema's required keys.
     """
     text = Path(raw).read_text(encoding="utf-8", errors="replace")
-    agy_ran = backend == "agy"
-    if agy_ran:
+    if backend == "agy":
         result = agy_result(text)
-        if result is not None and result.get("status") != "SUCCESS":
-            print(f"agy turn status: {result.get('status')} {result.get('error') or ''}",
-                  file=sys.stderr)  # fmt: skip
+        if result is None or result.get("status") != "SUCCESS":
+            why = (
+                "no result event"
+                if result is None
+                else (
+                    f"turn status {result.get('status')}: {result.get('error') or ''}"
+                )
+            )
+            print(f"agy gave no review ({why})", file=sys.stderr)
             return 1
-    text = _unwrap_envelope(text, agy_ran)
-    start, end = text.find("{"), text.rfind("}")
-    if start < 0 or end <= start:
+        text = agy_answer(result)
+    else:
+        text = _unwrap_envelope(text)
+    review = parse_review(text)
+    if review is None:
         print("no JSON object in the output", file=sys.stderr)
         return 1
-    try:
-        review = json.loads(text[start : end + 1])
-    except ValueError as exc:
-        print(f"not JSON: {exc}", file=sys.stderr)
-        return 1
-    missing = _REQUIRED - set(review) if isinstance(review, dict) else _REQUIRED
+    required = json.loads(RESULT_SCHEMA.read_text(encoding="utf-8"))["required"]
+    missing = sorted(set(required) - set(review))
     if missing:
-        print(f"Missing keys: {sorted(missing)}", file=sys.stderr)
+        print(f"Missing keys: {missing}", file=sys.stderr)
         return 1
     Path(out).write_text(json.dumps(review, indent=2), encoding="utf-8")
     return 0
+
+
+def _flag(name: str) -> int:
+    """Exit 0 if the environment variable ``name`` says yes (``config.env_flag``)."""
+    return 0 if env_flag(name) else 1
 
 
 def _placeholder(out: str, slot: str, why: str) -> int:
@@ -157,11 +164,19 @@ _COMMANDS: dict[str, Callable[..., int]] = {
     "agy-message": _agy_message,
     "extract": _extract,
     "placeholder": _placeholder,
+    "flag": _flag,
 }
 
 
 def main(argv: list[str]) -> int:
-    if not argv or argv[0] not in _COMMANDS:
+    """Run the command ``argv`` names; its exit status, or 2 for a usage error."""
+    command = _COMMANDS.get(argv[0]) if argv else None
+    if command is None:
         print(f"usage: runner_cli {{{','.join(_COMMANDS)}}} [args...]", file=sys.stderr)
         return 2
-    return _COMMANDS[argv[0]](*argv[1:])
+    try:
+        inspect.signature(command).bind(*argv[1:])
+    except TypeError as exc:
+        print(f"runner_cli {argv[0]}: {exc}", file=sys.stderr)
+        return 2
+    return command(*argv[1:])

@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .config import AGY_MODELS_TIMEOUT, RESULT_SCHEMA, env_flag
-from .proc import _run, signals_unwind
+from .proc import run, signals_unwind
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -64,10 +64,13 @@ AGY_EGRESS = "agy sends the diff and audit to Google (REVIEW_USE_AGY=0 to stop)"
 def agy_enabled() -> bool:
     """Whether the agy slot is switched on: by default, wherever agy is installed.
 
-    ``REVIEW_USE_AGY=0`` switches it off. A machine without agy, or where its sandbox
-    cannot be proven, falls through to the next backend for slot 3.
+    ``REVIEW_USE_AGY=0`` switches it off, and so does every other value that reads as
+    off -- ``false``, ``no``, ``off``, empty -- because the wrong reading of this one
+    sends the diff to a provider the user meant to keep it from. A machine without agy,
+    or where its sandbox cannot be proven, falls through to the next backend for slot 3.
     """
-    return os.environ.get("REVIEW_USE_AGY", "1") != "0"
+    value = os.environ.get("REVIEW_USE_AGY")
+    return value is None or value.strip().lower() not in ("0", "false", "no", "off", "")
 
 
 def agy_unsandboxed() -> bool:
@@ -84,7 +87,13 @@ def agy_unsandboxed() -> bool:
 
 
 def agy_model() -> str | None:
-    """The model agy runs: ``AGY_MODEL`` if set, else the best one this account lists.
+    """The model agy runs, or None if there is none to run (``agy_model_choice``)."""
+    return agy_model_choice()[0]
+
+
+def agy_model_choice() -> tuple[str | None, str]:
+    """The model agy runs -- ``AGY_MODEL`` if set, else the best one this account
+    lists -- and how it was chosen, in words.
 
     Not a hard-coded default. Which slugs exist depends on the Google plan behind the
     sign-in and changes with releases, and an unknown slug is an error rather than a
@@ -94,26 +103,26 @@ def agy_model() -> str | None:
     """
     explicit = os.environ.get("AGY_MODEL")
     if explicit:
-        return explicit
-    return _picked_agy_model() if shutil.which("agy") else None
+        return explicit, f"model {explicit} (AGY_MODEL)"
+    if not shutil.which("agy"):
+        return None, "agy is not installed"
+    return _picked_agy_model()
 
 
 @functools.cache
-def _picked_agy_model() -> str | None:
-    """Pick once per run, and say what was picked and from what."""
+def _picked_agy_model() -> tuple[str | None, str]:
+    """Pick once per run: the sandbox check and every round run the same model."""
     slugs = agy_models()
     pick = best_agy_model(slugs)
     if pick is None:
-        print(
-            f"  agy: AGY_MODEL is unset and none of the {len(slugs)} models in"
-            " `agy models` is a Gemini model; set AGY_MODEL to use one anyway"
+        return None, (
+            f"AGY_MODEL is unset and none of the {len(slugs)} models in `agy models`"
+            " is a Gemini model; set AGY_MODEL to use one anyway"
         )
-    else:
-        print(
-            f"  agy: AGY_MODEL is unset; picked {pick} (newest Gemini, highest effort,"
-            f" of {len(slugs)} in `agy models`)"
-        )
-    return pick
+    return pick, (
+        f"AGY_MODEL is unset; picked {pick} (newest Gemini, highest effort,"
+        f" of {len(slugs)} in `agy models`)"
+    )
 
 
 def agy_models() -> list[str]:
@@ -135,7 +144,7 @@ def agy_models() -> list[str]:
             if not agy_unsandboxed():
                 state = agy_seed_state(Path(st).resolve())
                 cmd = [*agy_sandbox(workspace, state), *cmd]
-            done = _run(
+            done = run(
                 cmd,
                 cwd=workspace,
                 stdin=subprocess.DEVNULL,
@@ -256,11 +265,14 @@ _AGY_STATE_SHARED = ("bin", "builtin")
 _AGY_STATE_COPIED = ("antigravity-oauth-token",)
 
 #: Sockets outside /run and /tmp that run code for whoever can connect -- docker's runs
-#: a container with the host filesystem mounted -- masked where they exist.
+#: a container with the host filesystem mounted -- masked where they exist. The check
+#: refuses any other socket left reachable (``_check_sockets``); these are the ones
+#: known to be common enough to mask rather than lose the slot over.
 _HOST_SOCKETS = (
     "/var/run/docker.sock",
     "/var/snap/lxd/common/lxd/unix.socket",
     "/var/lib/lxd/unix.socket",
+    "/var/lib/incus/unix.socket",
 )
 
 #: The only environment agy gets. The rest -- API keys, cloud tokens, socket addresses --
@@ -299,9 +311,31 @@ def _homes() -> list[Path]:
     They differ wherever HOME is pointed elsewhere -- CI, ``sudo -E``, a wrapper script,
     a nested agent -- and hiding only ``$HOME`` then leaves ``~/.ssh`` readable. Parents
     first, so a home inside the other is mounted on top of it, not under it.
+
+    Raises OSError when the account has no passwd entry (a container run under a bare
+    numeric UID): its own home is then unknown, so it cannot be hidden, and the sandbox
+    check fails rather than the run going on with a home it could not account for.
     """
-    homes = {Path.home(), Path(pwd.getpwuid(os.getuid()).pw_dir)}
+    try:
+        account = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except KeyError as exc:
+        raise OSError(
+            f"uid {os.getuid()} has no passwd entry; its home is unknown"
+        ) from exc
+    homes = {Path.home(), account}
     return sorted((h for h in homes if h != Path("/")), key=lambda h: len(h.parts))
+
+
+def _resolver_dir() -> Path | None:
+    """The directory under /run that DNS needs back, or None.
+
+    /etc/resolv.conf is usually a link into /run (systemd-resolved, NetworkManager),
+    which the sandbox replaces.
+    """
+    resolver = Path("/etc/resolv.conf").resolve().parent
+    if resolver.is_relative_to("/run") and resolver != Path("/run"):
+        return resolver
+    return None
 
 
 def agy_sandbox(workspace: Path, state: Path) -> list[str]:
@@ -335,12 +369,11 @@ def agy_sandbox_parts(workspace: Path, state: Path) -> tuple[list[str], list[str
       or mount disks; snapd's; the user's runtime directory with the session bus, whose
       systemd answers ``systemd-run --user``. Only the resolver's directory is put
       back, for DNS. /tmp holds tmux's server socket and X11's; ``_HOST_SOCKETS``
-      names the known ones elsewhere.
+      masks the known ones elsewhere, and the check refuses any other left reachable.
 
     Not closed, and said so in the README: the network, which agy needs to reach its
-    model -- and with it abstract-namespace sockets, localhost services and a cloud
-    metadata endpoint -- and sockets outside /run and /tmp that ``_HOST_SOCKETS`` does
-    not name. Headless agy refused the one terminal command it tried; whether its
+    model -- and with it abstract-namespace sockets other than a session bus,
+    localhost services and a cloud metadata endpoint. Headless agy refused the one terminal command it tried; whether its
     browser and MCP tools can reach the network unprompted has not been measured.
 
     The bash launcher in docs/ensemble-review.md builds its wrapper by calling this
@@ -360,9 +393,8 @@ def agy_sandbox_parts(workspace: Path, state: Path) -> tuple[list[str], list[str
         "--tmpfs", "/tmp",
         "--tmpfs", "/run",
     ]  # fmt: skip
-    # DNS: /etc/resolv.conf is usually a link into /run (systemd-resolved, NetworkManager).
-    resolver = Path("/etc/resolv.conf").resolve().parent
-    if resolver.is_relative_to("/run") and resolver != Path("/run"):
+    resolver = _resolver_dir()
+    if resolver is not None:
         wrap += ["--ro-bind", str(resolver), str(resolver)]
     for sock in _HOST_SOCKETS:
         if Path(sock).exists() and not Path(sock).resolve().is_relative_to("/run"):
@@ -401,7 +433,7 @@ class _Box:
 
     def sh(self, script: str, **kw: Any) -> str:
         """What ``script`` printed inside the sandbox."""
-        done = _run(
+        done = run(
             [*self.wrap, "sh", "-c", script], cwd=self.workspace, timeout=30, **kw
         )
         self.stderr = done.stderr or ""
@@ -411,9 +443,9 @@ class _Box:
         """What ``root`` shows inside beyond what the wrapper mounted there."""
         # Mount destinations only -- an environment value such as a PATH under HOME is
         # not a mount. Paths, not strings: HOME=/home/user/ is the same directory.
-        args = list(enumerate(self.wrap))
-        dests = [Path(self.wrap[i + 1]) for i, a in args if a == "--tmpfs"]
-        dests += [Path(self.wrap[i + 2]) for i, a in args if a.endswith("-bind")]
+        indexed = list(enumerate(self.wrap))
+        dests = [Path(self.wrap[i + 1]) for i, a in indexed if a == "--tmpfs"]
+        dests += [Path(self.wrap[i + 2]) for i, a in indexed if a.endswith("-bind")]
         mounted = {
             d.relative_to(root).parts[0]
             for d in dests
@@ -495,25 +527,41 @@ def _check_environment(box: _Box) -> str | None:
     return "bwrap sandbox passes the host environment through" if leak.strip() else None
 
 
-def _check_sockets(box: _Box) -> str | None:
-    paths = " ".join(
-        shlex.quote(s) for s in (f"/run/user/{os.getuid()}/bus", *_HOST_SOCKETS)
+def _check_sockets(box: _Box, unix: str) -> str | None:
+    """``unix`` is /proc/net/unix, which lists every socket on the host: the sandbox
+    shares the network namespace."""
+    # Every path socket the sandbox can still connect to, not a list of known ones: a
+    # list always lags what is installed. The resolver's directory is put back on
+    # purpose, for DNS.
+    paths = sorted(
+        {
+            f
+            for line in unix.splitlines()[1:]
+            for f in line.split()[7:8]
+            if f.startswith("/")
+        }
     )
-    reached = box.sh(f'for s in {paths}; do [ -S "$s" ] && echo "$s"; done').split()
-    if reached:
-        return f"bwrap sandbox can reach {reached[0]}"
+    quoted = " ".join(shlex.quote(p) for p in paths)
+    script = f'for s in {quoted}; do [ -S "$s" ] && [ -w "$s" ] && echo "$s"; done'
+    allowed = _resolver_dir()
+    for reached in box.sh(script).split("\n") if paths else []:
+        if reached and not (allowed and Path(reached).is_relative_to(allowed)):
+            return f"bwrap sandbox can reach {reached}"
     # Abstract sockets belong to the network namespace, which agy keeps to reach its
-    # model, so no mount hides them. A dbus-launch session bus starts any program it is
-    # asked to: refused. (An X server is named by ``_x_server_note``, not refused.)
-    if " @/tmp/dbus-" in box.sh("cat /proc/net/unix"):
-        return "bwrap sandbox can reach a session bus (@/tmp/dbus-*)"
+    # model, so no mount hides them. A session bus -- dbus-launch's under /tmp, IBus's
+    # under ~/.cache -- starts any program it is asked to: refused. (An X server is
+    # named by ``_x_server_note``, not refused.)
+    for line in unix.splitlines()[1:]:
+        name = (line.split()[7:8] or [""])[0]
+        if name.startswith("@") and "/dbus-" in name:
+            return f"bwrap sandbox can reach a session bus ({name})"
     return None
 
 
-def _x_server_note(box: _Box) -> str:
+def _x_server_note(unix: str) -> str:
     # Reachable only if its access control lets this user in without the cookie, which
     # the hidden home holds: named rather than refused, or no desktop could run agy.
-    if " @/tmp/.X11-unix/" in box.sh("cat /proc/net/unix"):
+    if " @/tmp/.X11-unix/" in unix:
         return "; an X server is reachable (@/tmp/.X11-unix), see the README"
     return ""
 
@@ -558,13 +606,16 @@ def agy_is_confined() -> tuple[bool, str]:
                 _check_hidden,
                 _check_processes,
                 _check_environment,
-                _check_sockets,
             )
             for check in checks:
                 failure = check(box)
                 if failure:
                     return False, failure
-            note = _x_server_note(box)
+            unix = box.sh("cat /proc/net/unix")
+            failure = _check_sockets(box, unix)
+            if failure:
+                return False, failure
+            note = _x_server_note(unix)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return False, f"agy sandbox check failed: {exc}"
     verified = "agy sandbox verified (read-only; home, /tmp, /run hidden; no env)"
@@ -595,10 +646,14 @@ def agy_result(stdout: str) -> dict[str, Any] | None:
     which carries ``status``, ``response``, ``error`` on failure, and
     ``structured_output`` when ``--json-schema`` was given.
     """
-    # split("\n"), not splitlines(): NDJSON separates on newlines only, and
-    # splitlines() also breaks on U+0085 and U+2028, which JSON strings may carry raw.
-    for line in reversed(stdout.split("\n")):
-        line = line.strip()
+    # From the end, a line at a time: the result is the last event, and the stream --
+    # every step_update -- can be large. On newlines only, not splitlines(): NDJSON
+    # separates on newlines, and JSON strings may carry U+0085 and U+2028 raw.
+    end = len(stdout)
+    while end > 0:
+        start = stdout.rfind("\n", 0, end) + 1
+        line = stdout[start:end].strip()
+        end = start - 1
         if not line.startswith("{"):
             continue
         try:

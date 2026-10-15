@@ -14,9 +14,6 @@ import uuid
 from pathlib import Path
 from typing import IO, TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from collections.abc import Iterator
-
 from .agy import (
     AGY_EGRESS,
     AGY_PREAMBLE,
@@ -34,9 +31,13 @@ from .config import (
     PROGRESS_INTERVAL,
     REPO_ROOT,
     RESULT_SCHEMA,
+    env_flag,
     reviewer_timeout,
 )
 from .proc import signals_unwind
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 ReviewerProc = tuple[int, "subprocess.Popen[str]", str, IO[str], IO[str]]
 
@@ -224,7 +225,8 @@ def _agy_workspace(repo: Path | None = None) -> Path | None:
 
 
 #: Scratch directories of the round in progress. agy's state copy holds its sign-in
-#: token, so they go when the round's reviewers are done, not when the loop is.
+#: token, so they go when the round's reviewers are done, not when the loop is -- and
+#: whatever a round leaves, the loop's exit takes.
 _ROUND_SCRATCH: list[Path] = []
 
 
@@ -232,7 +234,6 @@ def _scratch_dir(prefix: str) -> Path:
     """A temporary directory removed when this round ends, or failing that, the loop."""
     path = Path(tempfile.mkdtemp(prefix=prefix)).resolve()
     _ROUND_SCRATCH.append(path)
-    atexit.register(shutil.rmtree, path, ignore_errors=True)
     return path
 
 
@@ -240,6 +241,9 @@ def _release_scratch() -> None:
     """Remove the round's scratch directories."""
     while _ROUND_SCRATCH:
         shutil.rmtree(_ROUND_SCRATCH.pop(), ignore_errors=True)
+
+
+atexit.register(_release_scratch)
 
 
 def _codex_extra_args() -> list[str]:
@@ -329,7 +333,11 @@ def _choose_command(
             str(result_path),
             "-",
         ], None
-    if slot == 3 and backends.get("agy"):
+    # A project that pinned Bedrock did so to keep its code with providers it chose;
+    # if Hermes is unavailable, slot 3 must not fall to a Google default it never
+    # agreed to. There, agy runs only when asked for by name (REVIEW_USE_AGY=1).
+    agy_allowed = not prefer_hermes or env_flag("REVIEW_USE_AGY")
+    if slot == 3 and backends.get("agy") and agy_allowed:
         # Ahead of gemini: both are Google, and this one can be held to the schema.
         # backends["agy"] is only true once agy is switched on and its sandbox check
         # has passed, and agy_model() picks once per run, so every round runs the
@@ -387,49 +395,79 @@ def _launch_one(
     prefer_hermes: bool = False,
     repo: Path | None = None,
 ) -> ReviewerProc | None:
-    """Launch a single reviewer subprocess. Return tracking tuple or None.
-
-    If agy is chosen but cannot be set up, the slot falls through to its next
-    backend, as the routing tables say -- an empty slot 3 every round never converges.
-    """
-    lens, focus, rv, model_label = lens_args
-    prompt_path = round_dir / f"prompt-{slot}.txt"
-    workspace: Path | None = None
-    while True:
-        prompt = build_reviewer_prompt(
-            lens, focus, rv, model_label, diff, audit, context
-        )
-        prompt_path.write_text(prompt)
-        choice = _choose_command(slot, prompt_path, round_dir, backends, prefer_hermes)
-        if choice is None:
-            print(f"  R{slot}: SKIPPED (no backend)")
-            return None
-        cmd, label = choice
-        if label is not None:
-            prompt = build_reviewer_prompt(lens, focus, rv, label, diff, audit, context)
-        backend = cmd[0]  # before any wrapper: the CLI that answers, not env or bwrap
-        if backend != "agy":
-            break
-        prepared = _prepare_agy(slot, cmd, repo)
-        if prepared is not None:
-            cmd, workspace = prepared
-            # agy is told to call no tools; what it is sent is what the file records.
-            prompt = AGY_PREAMBLE + prompt
-            # On by default, so said whenever it runs: this is where the diff leaves.
-            print(f"  R{slot}: {AGY_EGRESS}")
-            break
-        backends = {**backends, "agy": False}
-    prompt_path.write_text(prompt)
-
+    """Launch a single reviewer subprocess. Return tracking tuple or None."""
+    picked = _pick_backend(
+        slot, lens_args, diff, audit, context, round_dir, backends, prefer_hermes, repo
+    )
+    if picked is None:
+        print(f"  R{slot}: SKIPPED (no backend)")
+        return None
+    cmd, backend, workspace, prompt = picked
+    # The record of what the reviewer was sent.
+    (round_dir / f"prompt-{slot}.txt").write_text(prompt)
     # Which backend answered, so its output is parsed as that backend's: a stream
     # that merely looks like agy's, from another reviewer, is not agy's verdict.
     (round_dir / f"backend-{slot}.txt").write_text(backend)
     fed = None
     if backend in _stdin_backends():
         fed = agy_message(prompt) if backend == "agy" else prompt
-    # Until the tuple is returned the caller cannot clean this reviewer up, so an
-    # interrupt in here -- SIGTERM is one -- unwinds through ``failed``. The output
-    # handles outlive this function on success; launch_reviewers closes them.
+    proc, out_f, err_f = _spawn(slot, cmd, backend, workspace, fed, round_dir)
+    return slot, proc, backend, out_f, err_f
+
+
+def _pick_backend(
+    slot: int,
+    lens_args: tuple[str, str, str, str],
+    diff: str,
+    audit: str,
+    context: str,
+    round_dir: Path,
+    backends: dict[str, bool],
+    prefer_hermes: bool,
+    repo: Path | None,
+) -> tuple[list[str], str, Path | None, str] | None:
+    """The command for ``slot``, the CLI that answers it, its working directory and
+    its prompt -- or None if no backend is available.
+
+    If agy is chosen but cannot be set up, the next backend is tried, as the routing
+    tables say: an empty slot 3 every round never converges.
+    """
+    lens, focus, rv, default_label = lens_args
+    prompt_path = round_dir / f"prompt-{slot}.txt"
+    while choice := _choose_command(
+        slot, prompt_path, round_dir, backends, prefer_hermes
+    ):
+        cmd, label = choice
+        prompt = build_reviewer_prompt(
+            lens, focus, rv, label or default_label, diff, audit, context
+        )
+        if cmd[0] != "agy":
+            return cmd, cmd[0], None, prompt
+        prepared = _prepare_agy(slot, cmd, repo)
+        if prepared is not None:
+            wrapped, workspace = prepared
+            # On by default, so said whenever it runs: this is where the diff leaves.
+            print(f"  R{slot}: {AGY_EGRESS}")
+            # Told to call no tools, and the prompt file records that it was.
+            return wrapped, "agy", workspace, AGY_PREAMBLE + prompt
+        backends = {**backends, "agy": False}
+    return None
+
+
+def _spawn(
+    slot: int,
+    cmd: list[str],
+    backend: str,
+    workspace: Path | None,
+    fed: str | None,
+    round_dir: Path,
+) -> tuple[subprocess.Popen[str], IO[str], IO[str]]:
+    """Start ``cmd`` with ``fed`` on its stdin, writing to the slot's output files.
+
+    Until this returns the caller cannot clean the reviewer up, so an interrupt in
+    here -- SIGTERM is one -- unwinds through ``failed``. The output handles outlive
+    this function on success; launch_reviewers closes them.
+    """
     with contextlib.ExitStack() as failed:
         out_f = failed.enter_context(_output(round_dir / f"raw-{slot}.txt"))
         err_f = failed.enter_context(_output(round_dir / f"stderr-{slot}.txt"))
@@ -450,7 +488,7 @@ def _launch_one(
         failed.callback(_stop, proc)
         print(f"  R{slot}: launched via {backend}")
         failed.pop_all()
-    return slot, proc, backend, out_f, err_f
+    return proc, out_f, err_f
 
 
 def _prepare_agy(
@@ -535,9 +573,10 @@ def launch_reviewers(
                     procs.append(tracked)
             _await_reviewers(procs, round_dir, diff.count("\n") + 1)
         finally:
+            # Every group, finished or not: a reviewer that exited can leave helpers
+            # running in its group, spending quota and writing into round_dir.
             for _, proc, _, out_f, err_f in procs:
-                if proc.poll() is None:
-                    _kill_group(proc)
+                _stop(proc)
                 out_f.close()
                 err_f.close()
             _release_scratch()
@@ -638,10 +677,11 @@ def _kill_group(proc: subprocess.Popen[str]) -> None:
     read. ``start_new_session`` at launch puts each reviewer in its own process
     group so the whole tree can be taken down together.
     """
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError):
-        proc.kill()
+    # The group by the reviewer's own pid -- start_new_session made it the group's
+    # leader -- since getpgid() fails once the leader has exited, and its helpers
+    # may not have.
+    with contextlib.suppress(OSError):
+        os.killpg(proc.pid, signal.SIGKILL)
 
 
 def _progress(

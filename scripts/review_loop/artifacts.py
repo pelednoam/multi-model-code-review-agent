@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import re
 import textwrap
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .agy import agy_result, ran_agy
 
@@ -116,55 +116,46 @@ def _explain_missing(round_dir: Path, slot: int) -> list[str]:
     was silently binned while carrying a correct finding about duplicated tests.
     Whatever it wrote goes in front of the operator either way.
     """
-    failed = _agy_failure(round_dir, slot)
+    raw = round_dir / f"raw-{slot}.txt"
+    text = ""
+    if raw.exists():
+        text = raw.read_text(encoding="utf-8", errors="replace").strip()
+    # Parsed once, and only when agy is the backend that wrote it.
+    agy = agy_result(text) if text and ran_agy(round_dir, slot) else None
+    failed = _agy_failure(agy)
     if failed:
         # Whatever it drafted first is not a review it gave: the turn did not finish.
         return [
             f"  FAILED     -> R{slot} (agy) did not finish its turn:",
             *[f"                {line}" for line in textwrap.wrap(failed, 74)],
-            f"                (in full: {round_dir / f'raw-{slot}.txt'})",
+            f"                (in full: {raw})",
         ]
-    said = _salvage(round_dir, slot)
+    said = _printable(_unwrapped(text, agy))
     if not said:
         return [f"  NO OUTPUT  -> R{slot} produced nothing; see stderr-{slot}.txt"]
     return [
         f"  NOT JSON   -> R{slot} answered in prose, so it has no findings the loop",
         "                can act on. It still said something -- read it:",
         *[f"                {line}" for line in textwrap.wrap(said, 74)],
-        f"                (in full: {round_dir / f'raw-{slot}.txt'})",
+        f"                (in full: {raw})",
     ]
 
 
-def _agy_failure(round_dir: Path, slot: int) -> str:
+def _agy_failure(agy: dict[str, Any] | None) -> str:
     """Why agy's turn failed -- its status and error -- or "" if it did not fail.
 
     A turn can fail after the model has written a whole review, as when the plan's
     quota runs out mid-turn; shown as a reply in prose, the draft hid the reason.
     """
-    raw = round_dir / f"raw-{slot}.txt"
-    if not ran_agy(round_dir, slot) or not raw.exists():
-        return ""
-    agy = agy_result(raw.read_text(encoding="utf-8", errors="replace"))
     if agy is None or agy.get("status") == "SUCCESS":
         return ""
     error = str(agy.get("error") or "no error given").strip()[:_SALVAGE_CHARS]
     return _printable(f"status {agy.get('status')}: {error}")
 
 
-def _salvage(round_dir: Path, slot: int) -> str:
-    """Whatever this reviewer wrote, unwrapped as far as it can be, safe to print."""
-    return _printable(_unwrapped(round_dir, slot))
-
-
-def _unwrapped(round_dir: Path, slot: int) -> str:
-    """Whatever this reviewer wrote, unwrapped as far as it can be."""
-    raw = round_dir / f"raw-{slot}.txt"
-    if not raw.exists():
-        return ""
-    text = raw.read_text(encoding="utf-8", errors="replace").strip()
-    if not text:
-        return ""
-    agy = agy_result(text) if ran_agy(round_dir, slot) else None
+def _unwrapped(text: str, agy: dict[str, Any] | None) -> str:
+    """Whatever a reviewer wrote (``text``; ``agy``, its result event if agy wrote
+    it), unwrapped as far as it can be."""
     if agy is not None:
         # A failed turn has no response but says why, which is the useful part. So
         # does one cut short by a refused tool call, which otherwise reads as silence.
@@ -183,7 +174,7 @@ def _unwrapped(round_dir: Path, slot: int) -> str:
         return str(said).strip()[:_SALVAGE_CHARS]
     try:
         wrapper = json.loads(text)
-    except (json.JSONDecodeError, ValueError):
+    except ValueError:
         return text[:_SALVAGE_CHARS]
     if isinstance(wrapper, dict) and isinstance(wrapper.get("result"), str):
         return str(wrapper["result"]).strip()[:_SALVAGE_CHARS]

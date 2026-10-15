@@ -6,8 +6,8 @@ import subprocess
 import sys
 from typing import TYPE_CHECKING
 
-from .proc import _run
 from .config import SCRIPTS_DIR, diff_pathspec, is_agent_repo
+from .proc import run
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -64,7 +64,7 @@ def collect_diff(round_dir: Path, repo: Path, base: str = DEFAULT_BASE) -> tuple
             was reviewed that never was.
     """
     if base != DEFAULT_BASE:
-        named = _run(["git", "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"], cwd=repo)
+        named = run(["git", "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"], cwd=repo)
         if named.returncode != 0:
             msg = f"--base {base!r} does not name a commit in this repository"
             raise RuntimeError(msg)
@@ -74,9 +74,9 @@ def collect_diff(round_dir: Path, repo: Path, base: str = DEFAULT_BASE) -> tuple
     # budget -- 60% of the diff on a fresh install -- reviewing the reviewer.
     pathspec = diff_pathspec(repo)
     untracked = _untracked(repo, pathspec)
-    git = _run(["git", "diff", "--merge-base", base, "--", *pathspec], cwd=repo)
+    git = run(["git", "diff", "--merge-base", base, "--", *pathspec], cwd=repo)
     if git.returncode != 0:
-        fallback = _run(["git", "diff", "HEAD~1", "--", *pathspec], cwd=repo)
+        fallback = run(["git", "diff", "HEAD~1", "--", *pathspec], cwd=repo)
         if fallback.returncode != 0:
             raise RuntimeError(
                 f"failed to collect diff: {git.stderr}\n{fallback.stderr}"
@@ -88,7 +88,7 @@ def collect_diff(round_dir: Path, repo: Path, base: str = DEFAULT_BASE) -> tuple
         # something else. And not when there are new files: those *are* the
         # change, and reviewing the last commit instead would review the
         # wrong thing without saying so.
-        git = _run(["git", "diff", "HEAD~1", "--", *pathspec], cwd=repo)
+        git = run(["git", "diff", "HEAD~1", "--", *pathspec], cwd=repo)
     diff_input = (git.stdout or "") + untracked
     # Every hop is pinned to UTF-8 with replacement. scrub_diff.py pins its own
     # streams because CI runs under LC_ALL=C, but that was the only hop that
@@ -146,7 +146,7 @@ def _untracked(repo: Path, pathspec: list[str]) -> str:
             one of them. A review that silently dropped a file is the failure
             this exists to end, so it does not get to happen quietly here.
     """
-    listed = _run(
+    listed = run(
         ["git", "ls-files", "--others", "--exclude-standard", "-z", "--", *pathspec],
         cwd=repo,
     )
@@ -154,7 +154,7 @@ def _untracked(repo: Path, pathspec: list[str]) -> str:
         raise RuntimeError(f"failed to list untracked files: {listed.stderr}")
     parts: list[str] = []
     for name in (one for one in listed.stdout.split("\0") if one):
-        added = _run(["git", "diff", "--no-index", "--", "/dev/null", name], cwd=repo)
+        added = run(["git", "diff", "--no-index", "--", "/dev/null", name], cwd=repo)
         # --no-index exits 1 when the two sides differ, which a new file
         # against /dev/null always does; anything else is git failing.
         if added.returncode not in (0, 1):
@@ -193,7 +193,7 @@ def run_preflight(round_dir: Path, repo: Path) -> Path:
     JSON wasn't produced at all.
     """
     audit_path = round_dir / "audit.json"
-    result = _run(
+    result = run(
         [
             sys.executable,
             str(_preflight_script(repo)),

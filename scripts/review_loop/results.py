@@ -30,23 +30,33 @@ def _try_load_existing_result(result_path: Path, slot: int) -> dict[str, Any] | 
     return validate_result(d, slot, EXPECTED_REVIEWERS)
 
 
+def agy_answer(result: dict[str, Any] | None) -> str:
+    """The review in agy's ``result`` event (``agy_result``), or "" if it gave none.
+
+    Only a finished turn is a review. ERROR, CANCELED, INTERRUPTED and WAITING can all
+    carry review-shaped output, and so can a stream with no result event at all --
+    read as plain text, a bare object in it passed as agy's verdict. Nothing in the
+    schema-checked ``structured_output`` is unwrapped further: a ``result`` key the
+    diff talked agy into adding does not replace it.
+    """
+    if result is None or result.get("status") != "SUCCESS":
+        return ""
+    if isinstance(result.get("structured_output"), dict):
+        return json.dumps(result["structured_output"])
+    return str(result.get("response") or "")
+
+
 def _unwrap_envelope(text: str, agy_ran: bool = False) -> str:
     """Take the review out of the envelope its CLI wrapped it in.
 
     ``claude -p --output-format json`` wraps it in ``{"result": "<text>"}``. agy's
     stream-json -- read as such only when ``agy_ran`` -- ends in a ``result`` event
     whose ``structured_output`` is the schema-checked object, with ``response`` --
-    free text -- as the fallback. Anything else is returned as-is.
+    free text -- as the fallback; anything short of a finished turn is "". Anything
+    else is returned as-is.
     """
-    agy = agy_result(text) if agy_ran else None
-    if agy is not None:
-        # ERROR, CANCELED, INTERRUPTED and WAITING can all carry review-shaped output.
-        # A turn that did not finish is not a review, however finished it looks.
-        if agy.get("status") != "SUCCESS":
-            return ""
-        if isinstance(agy.get("structured_output"), dict):
-            return json.dumps(agy["structured_output"])
-        return str(agy.get("response") or "")
+    if agy_ran:
+        return agy_answer(agy_result(text))
     try:
         wrapper = json.loads(text)
     except (json.JSONDecodeError, ValueError):
@@ -57,19 +67,30 @@ def _unwrap_envelope(text: str, agy_ran: bool = False) -> str:
     return text
 
 
+def parse_review(text: str) -> dict[str, Any] | None:
+    """The JSON object in ``text`` -- from its first ``{`` to its last ``}`` -- or None.
+
+    Unwrapped text still carries what the model put around its answer: a sentence
+    before it, a markdown fence. Shared with the full-mode runner (``runner_cli``).
+    """
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        review = json.loads(text[start : end + 1])
+    except ValueError:
+        return None
+    return review if isinstance(review, dict) else None
+
+
 def _extract_from_raw(round_dir: Path, slot: int) -> dict[str, Any] | None:
     """Parse raw-{slot}.txt as JSON, writing result-{slot}.json on success."""
     raw_path = round_dir / f"raw-{slot}.txt"
     if not raw_path.exists():
         return None
     text = _unwrap_envelope(raw_path.read_text(), ran_agy(round_dir, slot))
-    start = text.find("{")
-    end = text.rfind("}")
-    if start < 0 or end <= start:
-        return None
-    try:
-        d = json.loads(text[start : end + 1])
-    except (json.JSONDecodeError, ValueError):
+    d = parse_review(text)
+    if d is None:
         return None
     d = validate_result(d, slot, EXPECTED_REVIEWERS)
     if d is None:

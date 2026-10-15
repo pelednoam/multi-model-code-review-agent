@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
 from pathlib import Path
 
-from .agy import agy_enabled, agy_is_confined, agy_model, agy_unsandboxed
+from .agy import agy_enabled, agy_is_confined, agy_model_choice, agy_unsandboxed
 from .config import env_flag
-from .proc import _run
+from .proc import run
 
 
 # Codex is the only reviewer whose read-only-ness depends on the HOST, not just on a
@@ -45,7 +46,7 @@ def codex_is_confined() -> tuple[bool, str]:
         canary.write_text("original", encoding="utf-8")
 
         # 1. does the sandbox run anything at all?
-        ran = _run(["codex", "sandbox", "--", "sh", "-c", "echo SANDBOX_OK"], cwd=Path(tmp))
+        ran = run(["codex", "sandbox", "--", "sh", "-c", "echo SANDBOX_OK"], cwd=Path(tmp))
         if "SANDBOX_OK" not in (ran.stdout or ""):
             detail = ((ran.stderr or ran.stdout or "").strip().splitlines() or [""])[-1][:200]
             hint = ""
@@ -58,12 +59,14 @@ def codex_is_confined() -> tuple[bool, str]:
             return False, f"codex sandbox could not start: {detail}{hint}"
 
         # 2. can it read? a reviewer that cannot read is useless even if it is safe.
-        rd = _run(["codex", "sandbox", "--", "sh", "-c", f"cat {canary}"], cwd=Path(tmp))
+        # The path as an argument, never spliced into the script: a TMPDIR with a space
+        # in it split it in two, and a shell character in it would run.
+        rd = run(_codex_sh('cat -- "$1"', canary), cwd=Path(tmp))
         if "original" not in (rd.stdout or ""):
             return False, "codex sandbox could not read a file; a reviewer needs read access"
 
         # 3. the one that matters: is a write REFUSED?
-        _run(["codex", "sandbox", "--", "sh", "-c", f"echo changed > {canary}"], cwd=Path(tmp))
+        run(_codex_sh('echo changed > "$1"', canary), cwd=Path(tmp))
         if canary.read_text(encoding="utf-8").strip() != "original":
             return False, (
                 "codex sandbox ALLOWED a write -- it is not read-only on this host."
@@ -71,6 +74,11 @@ def codex_is_confined() -> tuple[bool, str]:
                 " past -s read-only). See docs/codex-sandbox.md."
             )
     return True, "codex sandbox verified read-only (runs, reads, refuses writes)"
+
+
+def _codex_sh(script: str, path: Path) -> list[str]:
+    """``script`` run by sh inside codex's sandbox, with ``path`` as its ``$1``."""
+    return ["codex", "sandbox", "--", "sh", "-c", script, "codex-check", str(path)]
 
 
 def detect_backends(verify_codex: bool = True) -> dict[str, bool]:
@@ -97,7 +105,7 @@ def detect_backends(verify_codex: bool = True) -> dict[str, bool]:
             print(f"  codex: DISABLED for review -- {reason}")
             found["codex"] = False
     if found["agy"] and not agy_enabled():
-        print("  agy: switched off (REVIEW_USE_AGY=0)")
+        print(f"  agy: switched off (REVIEW_USE_AGY={os.environ['REVIEW_USE_AGY']!r})")
         found["agy"] = False  # installed is not the same as in use
     if found["agy"]:
         # The sandbox first: picking a model runs agy, and a host that will drop agy
@@ -108,7 +116,8 @@ def detect_backends(verify_codex: bool = True) -> dict[str, bool]:
             ok, reason = agy_is_confined()
             print(f"  agy: {'' if ok else 'DISABLED for review -- '}{reason}")
             found["agy"] = ok
-    if found["agy"] and agy_model() is None:
-        print("  agy: DISABLED -- there is no model to run")
-        found["agy"] = False
+    if found["agy"]:
+        model, how = agy_model_choice()
+        print(f"  agy: {how}" if model else f"  agy: DISABLED -- {how}")
+        found["agy"] = model is not None
     return found

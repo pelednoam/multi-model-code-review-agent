@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from .proc import _run
+from .proc import run
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -12,8 +12,8 @@ if TYPE_CHECKING:
 
 def commit_and_push(round_num: int, n_fixes: int, repo: Path) -> bool:
     """Commit and push current changes."""
-    _run(["git", "add", "-A"], cwd=repo)
-    status = _run(["git", "status", "--short"], cwd=repo)
+    run(["git", "add", "-A"], cwd=repo)
+    status = run(["git", "status", "--short"], cwd=repo)
     if not status.stdout.strip():
         print(f"  Nothing to commit after round {round_num}")
         return True
@@ -22,11 +22,11 @@ def commit_and_push(round_num: int, n_fixes: int, repo: Path) -> bool:
         "Applied by merge agent (clean context).\n\n"
         "Co-Authored-By: review-loop <noreply@anthropic.com>"
     )
-    commit = _run(["git", "commit", "-m", msg], cwd=repo)
+    commit = run(["git", "commit", "-m", msg], cwd=repo)
     if commit.returncode != 0:
         print(f"  Commit failed: {commit.stderr}")
         return False
-    push = _run(["git", "push"], cwd=repo)
+    push = run(["git", "push"], cwd=repo)
     if push.returncode != 0:
         print(f"  Push failed: {push.stderr}")
         return False

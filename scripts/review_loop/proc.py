@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def _run(
+def run(
     cmd: list[str], cwd: Path | None = None, **kwargs: Any
 ) -> subprocess.CompletedProcess[str]:
     """Run a command with sensible defaults."""

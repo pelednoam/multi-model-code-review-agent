@@ -79,20 +79,20 @@ HAS_GEMINI=false; command -v gemini &>/dev/null && HAS_GEMINI=true
 # The convergence loop's own checks, through its one entry point for bash
 # (scripts/review_loop/runner_cli.py), so the two paths cannot disagree about what is safe to use.
 review_helper() {
-  python3 -I -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); from scripts.review_loop.runner_cli import main; sys.exit(main(sys.argv[1:]))' "$PWD" "$@"
+  python3 -I -c 'import sys, types; pkg = types.ModuleType("scripts"); pkg.__path__ = [sys.argv.pop(1) + "/scripts"]; sys.modules["scripts"] = pkg; from scripts.review_loop.runner_cli import main; sys.exit(main(sys.argv[1:]))' "$PWD" "$@"
 }
 
 # codex: only once its sandbox is shown to refuse a write (no model call). MMCRA_SKIP_CODEX_SANDBOX_CHECK=1
 # (or true/yes/on -- not 0) skips the check on a host that is already a sandbox.
 if $HAS_CODEX; then review_helper codex-check || HAS_CODEX=false; fi
 
-# agy (Antigravity CLI): on wherever it is installed; REVIEW_USE_AGY=0 switches it off. The model is
+# agy (Antigravity CLI): on wherever it is installed; REVIEW_USE_AGY=0 (or false/no/off) switches it off. The model is
 # AGY_MODEL if set, else the best Gemini model `agy models` lists for this sign-in (newest version,
 # then Pro/Argon over Flash over Lite, then highest effort) -- picked fresh each run, so a newer
 # model is used once the plan has it. Only true once the sandbox check has passed (no model call).
 # Status lines go to stderr; the model it settled on is the only thing on stdout.
 HAS_AGY=false
-if [ "${REVIEW_USE_AGY:-1}" != "0" ] && command -v agy &>/dev/null; then
+if command -v agy &>/dev/null; then
   AGY_MODEL="$(review_helper agy-detect)"
   [ -n "$AGY_MODEL" ] && HAS_AGY=true
 fi
@@ -126,12 +126,12 @@ Bedrock opt-in precedence (PREFER_HERMES=true), used for regulated codebases tha
 |---|---|---|---|
 | Security (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
 | Correctness | Hermes Haiku (Bedrock) | Codex CLI GPT-5.5 (free) | Claude CLI haiku (free) |
-| Readability | Hermes Sonnet (Bedrock) | agy (sandboxed), else Gemini CLI (in the loop: `REVIEW_USE_GEMINI=1`) | Claude CLI sonnet (free) |
+| Readability | Hermes Sonnet (Bedrock) | agy only with `REVIEW_USE_AGY=1` (a project that pinned Bedrock never falls to Google by default), else Gemini CLI (in the loop: `REVIEW_USE_GEMINI=1`) | Claude CLI sonnet (free) |
 | Spec-contract (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
 
 **Why local CLIs first by default**: free (uses existing subscriptions), reliable auth (each CLI manages its own OAuth), and for most projects (open-source, non-regulated) there's no real value to paid Bedrock routing.
 
-**Why Hermes/Bedrock matters when opted in**: data stays in your AWS account, consistent JSON via `-t file`, true toolset restriction. Worth the cost for FDA-path / HIPAA / compliance-sensitive codebases.
+**Why Hermes/Bedrock matters when opted in**: data stays in your AWS account, true toolset restriction (`-t file`). Worth the cost for FDA-path / HIPAA / compliance-sensitive codebases.
 
 **Maximum diversity** (all CLIs installed): Anthropic (Claude CLI) + OpenAI (Codex CLI) + Google (agy, or the Gemini CLI) = 3 provider families, at no cost beyond existing subscriptions.
 
@@ -384,7 +384,7 @@ Lens: injection vectors, auth gaps, unsafe deserialization, secrets, race condit
 
 Output: `$REVIEW_TMP/result-2.json`
 
-If Codex CLI is installed, this reviewer runs via `codex exec -o $REVIEW_TMP/result-2.json "prompt"`. The `-o` flag captures the last agent message as the result file. The prompt must end with: "Output ONLY the JSON result object, no other text." Otherwise falls back to Hermes+Haiku on Bedrock (whose answer is read from `stdout-2.txt`).
+If Codex CLI is installed and its sandbox check passes (`review_helper codex-check`), this reviewer runs via `codex exec -s read-only -c 'approvals_reviewer="user"' -o $REVIEW_TMP/result-2.json - < prompt-2.txt`: both safety flags pinned, the prompt on stdin. The `-o` flag captures the last agent message as the result file. The prompt must end with: "Output ONLY the JSON result object, no other text." Otherwise falls back to Hermes+Haiku on Bedrock (whose answer is read from `stdout-2.txt`).
 
 Lens: off-by-one, null paths, shape/dtype mismatches, contract violations, logic errors, missing test coverage. For numpy/torch: shape broadcasting, device placement, gradient flow.
 
@@ -441,6 +441,9 @@ cat > "$REVIEW_TMP/run-reviewers.sh" <<'RUNNER'
 # Written to a file rather than run inline so that `wait` sees the children it launched.
 set -uo pipefail
 : "${REVIEW_TMP:?REVIEW_TMP must be exported by the caller}"
+# Absolute: the agy job changes into its workspace before its redirections are opened, and a
+# relative REVIEW_TMP would then put its output inside a directory deleted after the run.
+REVIEW_TMP="$(cd "$REVIEW_TMP" && pwd -P)" || exit 1
 
 # What bash cannot do -- agy's sandbox and input, taking a review out of a reviewer's output -- is
 # the convergence loop's own code, called through one entry point (scripts/review_loop/runner_cli.py)
@@ -449,7 +452,7 @@ set -uo pipefail
 # loop from a trusted checkout of this agent with --repo pointing at the branch.
 REVIEW_ROOT="$PWD"
 review_helper() {
-  python3 -I -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); from scripts.review_loop.runner_cli import main; sys.exit(main(sys.argv[1:]))' "$REVIEW_ROOT" "$@"
+  python3 -I -c 'import sys, types; pkg = types.ModuleType("scripts"); pkg.__path__ = [sys.argv.pop(1) + "/scripts"]; sys.modules["scripts"] = pkg; from scripts.review_loop.runner_cli import main; sys.exit(main(sys.argv[1:]))' "$REVIEW_ROOT" "$@"
 }
 
 # JOB CONTROL IN A SCRIPT, deliberately. With `set -m` each background job gets its OWN process
@@ -462,8 +465,9 @@ set -m
 
 # What the runner kills and removes, it keeps in its own memory, never in a file: a reviewer can
 # write files in $REVIEW_TMP, and a planted pid-N of 1 would have the runner signal every process
-# the user owns. JOB_PID holds each reviewer's job, set by its launcher, which runs in this shell;
-# the pid-N files are written only for watching from another shell. AGY_SCRATCH lists agy's
+# the user owns. JOB_PID holds each reviewer's job, set by its launcher, which runs in this shell,
+# and JOB_BACKEND the CLI that decides how its output is read; the pid-N and backend-N.txt files
+# are written only for watching from another shell. AGY_SCRATCH lists agy's
 # scratch -- its workspace and a copy of its sign-in token -- which the job removes when agy exits;
 # a job killed by the watchdog or the sweep never gets there, and neither does one whose runner is
 # interrupted, so the runner removes it too: after the sweep, and on any exit. An interrupted runner
@@ -475,6 +479,7 @@ set -m
 # behind unreachable once timeout had exited. bwrap's sandbox dies with bwrap (--die-with-parent).
 # TERM first, then KILL for whatever ignored it.
 JOB_PID=()
+JOB_BACKEND=()   # which CLI ran each slot, for reading its output: agy's stream only from agy
 AGY_SCRATCH=()
 kill_jobs() {
   local num groups=()
@@ -509,7 +514,7 @@ ROUND_DEADLINE=$((REVIEWER_TIMEOUT + 90))
 # waiter - `wait` refuses a pid that is not a child of the shell calling it, so a sibling waiter
 # would fail instantly and record a bogus status for a reviewer that is still running.
 
-# Launch via Hermes (best isolation: -t file, consistent JSON output).
+# Launch via Hermes (best isolation: -t file; its JSON answer is read from stdout-N.txt).
 # Hermes -z takes prompt as argument (no stdin mode). This means:
 # - Subject to ARG_MAX for very large diffs (use Claude CLI instead)
 # - Prompt content visible in /proc/PID/cmdline to local users
@@ -524,6 +529,68 @@ launch_hermes() {
   JOB_PID[$num]=$!
   echo $! > "$REVIEW_TMP/pid-$num"
   echo "R$num: Hermes ($hermes_model) [Bedrock]"
+}
+
+# prepare_agy N PROMPT_FILE: what agy's launch needs, in AGY_*, or 1 -- saying why -- so the slot goes
+# to its next backend.
+# - The result schema inline, not as a path: the sandbox hides home and /tmp, where the file lives.
+#   Checked here, missing or not a schema: agy rejects a bad one only after launch, when the slot
+#   can no longer go anywhere else.
+# - An empty workspace outside the repository, and a directory for agy's state. Each is listed in
+#   AGY_SCRATCH the moment it exists, and the runner removes them whatever happens next: no return
+#   path has a cleanup of its own to forget. Resolved, because a relative TMPDIR names a different
+#   place once the job has cd'd.
+# - The wrapper in two parts, `env -i VAR=val...` and bwrap's, so that timeout runs between them:
+#   after env has execed it, its command line -- which any local user can read -- holds none of the
+#   values. The helper writes the first part's length, then both parts; just "0" from a host
+#   trusted to be the sandbox itself (MMCRA_SKIP_AGY_SANDBOX_CHECK).
+# - The preamble, into the prompt file itself, so the file is the record of what agy was sent. Last,
+#   after every way this launch can still fall through to another backend.
+AGY_SCHEMA="" AGY_WS="" AGY_STATE="" AGY_ENVP=() AGY_BWRAP=()
+prepare_agy() {
+  local num=$1 prompt_file=$2 wrap=()
+  AGY_SCHEMA="$(review_helper agy-schema "$REVIEW_ROOT/docs/ensemble_review_result_schema.json")" \
+    || { echo "R$num: SKIPPED (agy result schema unusable)"; return 1; }
+  AGY_WS="$(mktemp -d)" && [ -n "$AGY_WS" ] && AGY_SCRATCH+=("$AGY_WS") \
+    && AGY_WS="$(cd "$AGY_WS" && pwd -P)" \
+    || { echo "R$num: SKIPPED (no temporary directory for agy)"; return 1; }
+  case "$AGY_WS/" in
+    "$(cd "$REVIEW_ROOT" && pwd -P)"/*)
+      echo "R$num: SKIPPED (agy workspace $AGY_WS is inside the repo; check TMPDIR)"; return 1 ;;
+  esac
+  AGY_STATE="$(mktemp -d)" && [ -n "$AGY_STATE" ] && AGY_SCRATCH+=("$AGY_STATE") \
+    && AGY_STATE="$(cd "$AGY_STATE" && pwd -P)" \
+    || { echo "R$num: SKIPPED (no temporary directory for agy)"; return 1; }
+  mapfile -d '' -t wrap < <(review_helper agy-sandbox "$AGY_WS" "$AGY_STATE")
+  [ "${#wrap[@]}" -ge 1 ] || { echo "R$num: SKIPPED (could not build agy's sandbox)"; return 1; }
+  AGY_ENVP=("${wrap[@]:1:${wrap[0]}}")
+  AGY_BWRAP=("${wrap[@]:$((1 + wrap[0]))}")
+  review_helper agy-preamble "$prompt_file" \
+    || { echo "R$num: SKIPPED (could not prepare agy's prompt)"; return 1; }
+}
+
+# claude_deny TOOLS: the --disallowedTools arguments for a claude reviewer allowed TOOLS, in
+# CLAUDE_DENY. --allowedTools only skips the permission prompt; it does not confine. So every writing
+# tool TOOLS does not grant is denied, as the convergence loop does -- an override naming only
+# reading tools must not lift the deny list with it. Only the tool names count, not what is inside
+# a scope: `Bash(git log --grep Edit:*)` grants Bash, not Edit. An unbalanced spec grants nothing.
+CLAUDE_DENY=()
+claude_deny() {
+  local tools=$1 granted="" depth=0 i c tool denied=()
+  for ((i = 0; i < ${#tools}; i++)); do
+    c="${tools:i:1}"
+    case "$c" in
+      "(") depth=$((depth + 1)) ;;
+      ")") depth=$((depth - 1)) ;;
+      *) [ "$depth" -eq 0 ] && granted+="$c" ;;
+    esac
+  done
+  [ "$depth" -eq 0 ] || granted=""
+  for tool in Edit Write MultiEdit NotebookEdit Bash; do
+    case " ${granted//,/ } " in *" $tool "*) ;; *) denied+=("$tool") ;; esac
+  done
+  CLAUDE_DENY=()
+  [ "${#denied[@]}" -eq 0 ] || CLAUDE_DENY=(--disallowedTools "${denied[*]}")
 }
 
 # Launch via a coding agent CLI (free, stdin-based).
@@ -546,17 +613,9 @@ launch_cli() {
       # isolated git worktree so its edits cannot reach the working tree.
       local tools_var="REVIEWER_TOOLS_$num"
       local tools="${!tools_var:-Read Grep Glob}"
-      # --allowedTools only skips the permission prompt; it does not confine. So every writing tool
-      # the slot was not given on purpose (above) is denied, as the convergence loop does -- an
-      # override naming only reading tools must not lift the deny list with it.
-      local denied=() tool deny=()
-      for tool in Edit Write MultiEdit NotebookEdit Bash; do
-        # Named bare, or scoped (`Bash(git log:*)`): either way the slot was given it.
-        case " ${tools//,/ } " in *" $tool "*|*" $tool("*) ;; *) denied+=("$tool") ;; esac
-      done
-      [ "${#denied[@]}" -eq 0 ] || deny=(--disallowedTools "${denied[*]}")
+      claude_deny "$tools"
       { timeout --foreground -k 10 "$REVIEWER_TIMEOUT" claude -p --model "$model" \
-          --allowedTools "$tools" "${deny[@]}" \
+          --allowedTools "$tools" "${CLAUDE_DENY[@]}" \
           --output-format json < "$prompt_file" \
           1>"$REVIEW_TMP/claude-raw-$num.json" \
           2>"$REVIEW_TMP/stderr-$num.txt"
@@ -616,49 +675,18 @@ launch_cli() {
       # except an empty workspace OUTSIDE the repo, home hidden, a throwaway copy of agy's state,
       # no host processes or sockets. The prompt -- with the preamble telling it to call no tools
       # -- goes in as one stream-json line on stdin.
-      #
-      # The schema inline, not as a path: the sandbox hides home and /tmp, where the file lives.
-      # Checked first, missing or not a schema: agy rejects a bad one only after launch, when the
-      # slot can no longer go to the next backend.
-      local schema
-      schema="$(review_helper agy-schema "$REVIEW_ROOT/docs/ensemble_review_result_schema.json")" \
-        || { echo "R$num: SKIPPED (agy result schema unusable)"; return 1; }
-      # A failed mktemp leaves ws empty, `cd ""` succeeds, and agy would run in the repository.
-      # Resolved, because a relative TMPDIR names a different place once the job has cd'd.
-      local ws; ws="$(mktemp -d)" || return 1
-      [ -n "$ws" ] && [ -d "$ws" ] && ws="$(cd "$ws" && pwd -P)" || return 1
-      case "$ws/" in
-        "$(pwd -P)"/*) echo "R$num: SKIPPED (agy workspace $ws is inside the repo; check TMPDIR)"
-                       rm -rf "$ws"; return 1 ;;
-      esac
-      local state; state="$(mktemp -d)" && state="$(cd "$state" && pwd -P)" \
-        || { rm -rf "$ws"; return 1; }
-      # Listed for the runner, which removes them if this job is killed before it can.
-      AGY_SCRATCH+=("$ws" "$state")
-      # The wrapper in two parts, `env -i VAR=val...` and bwrap's, so that timeout runs between
-      # them: after env has execed it, its command line -- which any local user can read -- holds
-      # none of the values. The helper writes the first part's length, then both parts.
-      # (Just "0" from a host trusted to be the sandbox itself: MMCRA_SKIP_AGY_SANDBOX_CHECK.)
-      local wrap=() envp=() bwrap=()
-      mapfile -d '' -t wrap < <(review_helper agy-sandbox "$ws" "$state")
-      if [ "${#wrap[@]}" -lt 1 ]; then
-        echo "R$num: SKIPPED (could not build agy's sandbox)"; rm -rf "$ws" "$state"; return 1
-      fi
-      envp=("${wrap[@]:1:${wrap[0]}}"); bwrap=("${wrap[@]:$((1 + wrap[0]))}")
-      # The preamble goes into the prompt file itself, so the file is the record of what agy was
-      # sent. Last, after every way this launch can still fall through to another backend.
-      review_helper agy-preamble "$prompt_file" \
-        || { echo "R$num: SKIPPED (could not prepare agy's prompt)"; rm -rf "$ws" "$state"; return 1; }
-      echo agy > "$REVIEW_TMP/backend-$num"
-      { cd "$ws" && "${envp[@]}" timeout --foreground -k 10 "$REVIEWER_TIMEOUT" "${bwrap[@]}" agy \
+      prepare_agy "$num" "$prompt_file" || return 1
+      JOB_BACKEND[$num]=agy
+      echo agy > "$REVIEW_TMP/backend-$num.txt"
+      { cd "$AGY_WS" && "${AGY_ENVP[@]}" timeout --foreground -k 10 "$REVIEWER_TIMEOUT" "${AGY_BWRAP[@]}" agy \
           --sandbox --disable-slash-commands \
           --model "$AGY_MODEL" \
           --input-format stream-json --output-format stream-json \
-          --print-timeout 0 --json-schema "$schema" \
+          --print-timeout 0 --json-schema "$AGY_SCHEMA" \
           < <(review_helper agy-message "$prompt_file") \
           1>"$REVIEW_TMP/stdout-$num.txt" \
           2>"$REVIEW_TMP/stderr-$num.txt"
-        rc=$?; rm -rf "$ws" "$state"; echo "$rc" > "$REVIEW_TMP/done-$num"; } &
+        rc=$?; rm -rf "$AGY_WS" "$AGY_STATE"; echo "$rc" > "$REVIEW_TMP/done-$num"; } &
       # The done marker comes last: cleanup -- which removes the copy of agy's sign-in token --
       # is done by the time the watchdog sees this slot as finished.
       JOB_PID[$num]=$!
@@ -711,12 +739,15 @@ elif $HAS_HERMES; then
 fi
 
 # R3: Readability -- Google preferred (3rd provider for diversity): agy when installed and its
-# sandbox verified, else Gemini. When PREFER_HERMES is set, the Bedrock sonnet path runs first.
+# sandbox verified, else Gemini. When PREFER_HERMES is set, the Bedrock sonnet path runs first,
+# and agy only if asked for by name (REVIEW_USE_AGY=1): a project that pinned Bedrock to keep its
+# code with providers it chose must not fall to Google by default when Hermes is unavailable.
 # `${HAS_AGY:-false}`, not `$HAS_AGY`: an unset variable expands to an empty command, which
 # succeeds, and would route the slot to a backend nobody verified.
 if $PREFER_HERMES && $HAS_HERMES; then
   launch_hermes 3 us.anthropic.claude-sonnet-4-6-v1 "$REVIEW_TMP/prompt-3.txt"
-elif ${HAS_AGY:-false} && launch_cli 3 agy "$REVIEW_TMP/prompt-3.txt"; then
+elif ${HAS_AGY:-false} && { ! $PREFER_HERMES || review_helper flag REVIEW_USE_AGY; } \
+     && launch_cli 3 agy "$REVIEW_TMP/prompt-3.txt"; then
   :  # launched; if agy could not be set up, launch_cli returned 1 and the next backend runs
 elif $HAS_GEMINI; then
   launch_cli 3 gemini "$REVIEW_TMP/prompt-3.txt"
@@ -784,7 +815,7 @@ for num in 1 2 3 4; do
 
   # Try each possible output file (Claude raw wrapper, then stdout)
   for src in "$REVIEW_TMP/claude-raw-$num.json" "$REVIEW_TMP/stdout-$num.txt"; do
-    [ -f "$src" ] && extract_json "$src" "$result" "$(cat "$REVIEW_TMP/backend-$num" 2>/dev/null)" && break
+    [ -f "$src" ] && extract_json "$src" "$result" "${JOB_BACKEND[$num]:-}" && break
   done
 
   # If no result produced, write a synthetic error. The done-marker distinguishes the two very
@@ -1084,4 +1115,4 @@ concluding anything from a probe, and never suppress its output.
 
 - **Quick mode**: stays within Anthropic (Claude Code subagents).
 - **Full mode**: Hermes reviewers stay in your AWS. CLI reviewers go through their respective provider's infrastructure.
-- **For sensitive/FDA-path code**: use Hermes+Bedrock for all 4 reviewers (data-at-rest in your AWS account, consistent isolation via `-t file`).
+- **For sensitive/FDA-path code**: use Hermes+Bedrock for all 4 reviewers (data-at-rest in your AWS account, tools restricted with `-t file`).

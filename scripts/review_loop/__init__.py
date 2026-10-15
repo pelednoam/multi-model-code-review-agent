@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from .artifacts import describe_outputs, write_artifacts_key
 from .backends import detect_backends
-from .proc import _run
 from .config import (
     MERGE_TIMEOUT,
     REPO_ROOT,
@@ -33,8 +32,12 @@ from .findings import (
 from .gate import run_gate, run_tests
 from .git_ops import commit_and_push
 from .merge_agent import apply_fixes
+from .proc import run
 from .results import extract_results, missing_reviewers
 from .reviewers import build_reviewer_prompt, launch_reviewers
+
+#: The old name, which scripts/review_until_converged.py still imports.
+_run = run
 
 __all__ = [
     "MERGE_TIMEOUT",
@@ -47,6 +50,7 @@ __all__ = [
     "ScrubberFailedError",
     "SecretsDetectedError",
     "_run",
+    "run",
     "write_artifacts_key",
     "apply_fixes",
     "build_reviewer_prompt",

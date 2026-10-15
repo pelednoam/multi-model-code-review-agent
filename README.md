@@ -156,7 +156,7 @@ When opted in, the precedence flips for Anthropic reviewers:
 |---|---|---|---|
 | Security (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
 | Correctness | Hermes Haiku (Bedrock) | Codex CLI GPT-5.5 (free) | Claude CLI haiku (free) |
-| Readability | Hermes Sonnet (Bedrock) | agy (sandboxed), else Gemini CLI (in the loop: `REVIEW_USE_GEMINI=1`) | Claude CLI sonnet (free) |
+| Readability | Hermes Sonnet (Bedrock) | agy only with `REVIEW_USE_AGY=1` (a project that pinned Bedrock never falls to Google by default), else Gemini CLI (in the loop: `REVIEW_USE_GEMINI=1`) | Claude CLI sonnet (free) |
 | Spec-contract (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
 
 **With all CLIs installed** (claude + codex + agy or gemini): the full review
@@ -470,7 +470,9 @@ Anthropic reviewers. For cross-provider diversity, also install:
 - [Antigravity CLI](https://antigravity.google/docs/cli/headless/) (`agy`)
   for Google's frontier models, e.g. Gemini 4 Argon, in the readability
   slot. On by default wherever it is installed, ahead of the gemini CLI;
-  `REVIEW_USE_AGY=0` switches it off. Setup is install and sign in:
+  `REVIEW_USE_AGY=0` (or `false`, `no`, `off`) switches it off. A project
+  that pinned Bedrock (`.use-hermes`) gets agy only with `REVIEW_USE_AGY=1`.
+  Setup is install and sign in:
   ```bash
   curl -fsSL https://antigravity.google/cli/install.sh | bash
   agy                                   # once, interactively: Google sign-in
@@ -509,11 +511,13 @@ Anthropic reviewers. For cross-provider diversity, also install:
   Not closed, and worth knowing:
   - **The network**, which agy needs, and with it *abstract* sockets that
     live in the network namespace, not on disk. The startup check refuses
-    a session bus started by `dbus-launch` (`@/tmp/dbus-*`), and names an
+    a session bus there (`dbus-launch`'s, IBus's), and names an
     X server listening on `@/tmp/.X11-unix` without refusing it: one that
     lets your user in without the cookie (`xhost +si:localuser:...`) takes
-    keystrokes from inside. File sockets outside `/run` and `/tmp` stay
-    reachable unless masked by name (docker's and LXD's are).
+    keystrokes from inside. (File sockets are not left open: the check
+    refuses agy if any it can write to is reachable, other than the DNS
+    resolver's; docker's, LXD's and Incus's are masked so that they do not
+    cost the slot.)
   - **Anything reachable over the network from this host**: services on
     localhost (docker's TCP API, databases, notebooks) and, on a cloud VM
     or CI runner, the instance-metadata endpoint (`169.254.169.254`), which
@@ -542,7 +546,7 @@ Anthropic reviewers. For cross-provider diversity, also install:
   **Default-on means data egress.** Wherever agy is installed and signed
   in, the scrubbed diff and audit now also go to Google, and every round
   that sends them says so. Set `REVIEW_USE_AGY=0` where that is not
-  acceptable. Without `bwrap`, agy is skipped
+  acceptable; a project pinned to Bedrock is exempt unless it opts in. Without `bwrap`, agy is skipped
   (`MMCRA_SKIP_AGY_SANDBOX_CHECK=1`, or `true`/`yes`/`on`, runs it
   unwrapped, for a host that is already a sandbox; `0` or anything else
   keeps the sandbox). Its answer is held to the result

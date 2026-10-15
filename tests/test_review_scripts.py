@@ -29,6 +29,25 @@ SCRUB_SCRIPT = REPO_ROOT / "scripts" / "scrub_diff.py"
 PREFLIGHT_SCRIPT = REPO_ROOT / "scripts" / "review_preflight.py"
 VALIDATE_SCRIPT = REPO_ROOT / "scripts" / "validate_review_results.py"
 SCHEMA_PATH = REPO_ROOT / "docs" / "ensemble_review_result_schema.json"
+AGENT_DOC = REPO_ROOT / "docs" / "ensemble-review.md"
+
+
+def runner_script() -> str:
+    """The full-mode runner: the run-reviewers.sh heredoc in docs/ensemble-review.md."""
+    m = re.search(
+        r"cat > \"\$REVIEW_TMP/run-reviewers\.sh\" <<'RUNNER'\n(.*?)\nRUNNER\n",
+        AGENT_DOC.read_text(),
+        re.S,
+    )
+    assert m, "section 6 no longer defines a run-reviewers.sh heredoc"
+    return m.group(1)
+
+
+def shell_function(script: str, name: str) -> str:
+    """The definition of ``name`` in ``script``, from ``name() {`` to its closing brace."""
+    m = re.search(rf"^{re.escape(name)}\(\) \{{\n.*?^\}}\n", script, re.S | re.M)
+    assert m, f"the runner no longer defines {name}()"
+    return m.group(0)
 
 # Imported as well as run as a subprocess. Most of the scrubber's behaviour is
 # about a whole diff and is tested through its real entry point below; the
@@ -1967,23 +1986,11 @@ class TestRunnerScript:
     had happened. It cost two rounds on a downstream project before the cause was found.
     """
 
-    AGENT_DOC = REPO_ROOT / "docs" / "ensemble-review.md"
-
-    def _runner(self) -> str:
-        import re
-
-        doc = self.AGENT_DOC.read_text()
-        m = re.search(
-            r"cat > \"\$REVIEW_TMP/run-reviewers\.sh\" <<'RUNNER'\n(.*?)\nRUNNER\n",
-            doc,
-            re.S,
-        )
-        assert m, "section 6 no longer defines a run-reviewers.sh heredoc"
-        return m.group(1)
+    AGENT_DOC = AGENT_DOC
 
     def test_runner_is_valid_bash(self, tmp_path: Path) -> None:
         script = tmp_path / "run-reviewers.sh"
-        script.write_text(self._runner() + "\n")
+        script.write_text(runner_script() + "\n")
         result = subprocess.run(
             ["bash", "-n", str(script)], capture_output=True, text=True, timeout=10
         )
@@ -1992,7 +1999,7 @@ class TestRunnerScript:
     def test_launch_and_wait_live_in_the_same_script(self) -> None:
         # Both halves in one heredoc is the whole fix: `wait` and `kill -0` only work on children
         # of the shell that started them, and shell state does not survive between tool calls.
-        runner = self._runner()
+        runner = runner_script()
         assert "launch_cli" in runner and "launch_hermes" in runner
         assert "ROUND_DEADLINE" in runner
         assert "ROUND COMPLETE" in runner
@@ -2006,14 +2013,14 @@ class TestRunnerScript:
     def test_waiting_is_bounded(self) -> None:
         # A bare `wait` has no deadline of its own, so one wedged reviewer holds the round open
         # forever and the other three results are never reported.
-        runner = self._runner()
+        runner = runner_script()
         assert "\nwait\n" not in runner, (
             "bare `wait` is back: one wedged reviewer hangs the round"
         )
         assert "WATCHDOG" in runner
 
     def test_every_reviewer_records_a_pid_and_an_exit_status(self) -> None:
-        runner = self._runner()
+        runner = runner_script()
         # Every launcher (hermes, claude, codex, gemini, agy) recording both is what makes
         # progress observable from another shell.
         assert runner.count('echo $! > "$REVIEW_TMP/pid-$num"') == 5
@@ -2029,7 +2036,7 @@ class TestRunnerScript:
         assert "wait $!" not in runner.replace("sleep 5 & wait $!", "")
 
     def test_reviewers_are_killable_as_a_tree(self) -> None:
-        runner = self._runner()
+        runner = runner_script()
         # `set -m` gives each background job its own process group; without it a reviewer CLI's
         # helper processes survive the round, still burning provider quota and still writing into
         # $REVIEW_TMP after the report is written.
@@ -2044,7 +2051,7 @@ class TestRunnerScript:
     def test_what_is_killed_is_held_in_memory_not_read_from_a_file(self) -> None:
         # A reviewer can write in $REVIEW_TMP: a planted pid-N of 1 had the runner signal
         # every process the user owns.
-        runner = self._runner()
+        runner = runner_script()
         assert runner.count("JOB_PID[$num]=$!") == 5
         assert 'cat "$REVIEW_TMP/pid-' not in runner
         assert "pgrep" not in runner
@@ -2056,9 +2063,8 @@ class TestRunnerScript:
         # Plain timeout put itself in a process group of its own: a kill of the job's group
         # left the reviewer under it running, and a helper the reviewer left behind was out
         # of reach once timeout had exited.
-        runner = self._runner()
-        start = runner.index("kill_jobs() {")
-        kill_jobs = runner[start : runner.index("\n}\n", start) + 3]
+        runner = runner_script()
+        kill_jobs = shell_function(runner, "kill_jobs")
         then = "exit 0" if exits else "wait"
         script = tmp_path / "t.sh"
         script.write_text(
@@ -2084,43 +2090,43 @@ class TestRunnerScript:
     @pytest.mark.parametrize(
         ("tools", "denied"),
         [
-            # The default, and the same list given explicitly: everything that writes.
-            (None, "Edit Write MultiEdit NotebookEdit Bash"),
+            # The default list: everything that writes.
             ("Read Grep Glob", "Edit Write MultiEdit NotebookEdit Bash"),
             # Writing tools given on purpose come off the list, and only those.
             ("Read Grep Glob Bash Edit Write", "MultiEdit NotebookEdit"),
             ("Read,Bash", "Edit Write MultiEdit NotebookEdit"),
             ("Read Edit Write MultiEdit NotebookEdit Bash", None),
-            # A scoped grant names the tool too.
+            # A scoped grant names the tool too -- and only the tool, not its scope.
             ("Read Grep Bash(git log:*)", "Edit Write MultiEdit NotebookEdit"),
+            (
+                "Read Bash(git log --grep Edit --all:*)",
+                "Edit Write MultiEdit NotebookEdit",
+            ),
+            # Unbalanced: nothing is granted.
+            ("Read Edit Bash(git", "Edit Write MultiEdit NotebookEdit Bash"),
         ],
     )
     def test_an_override_lifts_only_the_tools_it_names(
-        self, tmp_path: Path, tools: str | None, denied: str | None
+        self, tmp_path: Path, tools: str, denied: str | None
     ) -> None:
         # Any REVIEWER_TOOLS_N used to drop the deny list whole, read-only lists included.
-        runner = self._runner()
-        start = runner.index('      local tools_var="REVIEWER_TOOLS_$num"')
-        end = runner.index('--disallowedTools "${denied[*]}")', start)
-        block = runner[start : runner.index("\n", end)]
+        runner = runner_script()
+        assert 'local tools="${!tools_var:-Read Grep Glob}"' in runner
+        assert '--allowedTools "$tools" "${CLAUDE_DENY[@]}"' in runner
         script = tmp_path / "t.sh"
         script.write_text(
-            "f() {\n  local num=1\n"
-            + block
-            + '\n  echo "${#deny[@]}|${deny[*]}"\n}\nf\n'
+            shell_function(runner, "claude_deny")
+            + 'claude_deny "$1"\necho "${#CLAUDE_DENY[@]}|${CLAUDE_DENY[*]}"\n'
         )
-        env = {k: v for k, v in os.environ.items() if k != "REVIEWER_TOOLS_1"}
-        if tools is not None:
-            env["REVIEWER_TOOLS_1"] = tools
         done = subprocess.run(
-            ["bash", str(script)], capture_output=True, text=True, env=env, timeout=10
+            ["bash", str(script), tools], capture_output=True, text=True, timeout=10
         )
         expected = "0|" if denied is None else f"2|--disallowedTools {denied}"
         assert done.stdout.strip() == expected, done.stderr
 
     def test_codex_is_pinned_and_checked_as_in_the_loop(self) -> None:
         # The doc said codex was sandboxed in full mode; the runner passed no flag.
-        runner = self._runner()
+        runner = runner_script()
         codex = runner[runner.index("    codex)") : runner.index("    gemini)")]
         assert "-s read-only -c 'approvals_reviewer=\"user\"'" in codex
         doc = self.AGENT_DOC.read_text()
@@ -2128,7 +2134,7 @@ class TestRunnerScript:
         assert "review_helper codex-check || HAS_CODEX=false" in detection
 
     def test_a_failed_slot_still_produces_a_result_with_a_true_reason(self) -> None:
-        runner = self._runner()
+        runner = runner_script()
         # Every slot must yield a result-N.json so the report can be honest about what is missing,
         # and the reason must distinguish the cases a reader would act on differently.
         assert "124|137" in runner, (
@@ -2185,13 +2191,45 @@ class TestCodexSandboxVerification:
         monkeypatch.setattr(backends.shutil, "which", lambda c: f"/usr/bin/{c}")
         monkeypatch.setattr(
             backends,
-            "_run",
+            "run",
             lambda *a, **k: SimpleNamespace(stdout="", stderr="bwrap: setting up uid map: Permission denied"),
         )
         ok, reason = backends.codex_is_confined()
         assert ok is False
         assert "could not start" in reason
         assert "user namespace" in reason  # points at the actual remedy
+
+
+class TestCodexCanaryPath:
+    """The canary's path reaches codex's sandbox as an argument, never as script text."""
+
+    def test_an_odd_temporary_path_is_one_path_and_never_code(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # TMPDIR="/tmp/review scratch" split the path in two and disabled a working
+        # codex; a shell character in it would have run.
+        odd = tmp_path / "review scratch $(touch pwned)"
+        odd.mkdir()
+        monkeypatch.setattr(backends.tempfile, "tempdir", str(odd))
+        monkeypatch.setattr(backends.shutil, "which", lambda c: f"/usr/bin/{c}")
+        seen: list[list[str]] = []
+
+        def through_sh(
+            cmd: list[str], **kw: object
+        ) -> subprocess.CompletedProcess[str]:
+            seen.append(cmd)
+            # What codex would run inside its sandbox, run here by a real shell.
+            inner = cmd[cmd.index("--") + 1 :]
+            return subprocess.run(inner, capture_output=True, text=True, check=False)
+
+        monkeypatch.setattr(backends, "run", through_sh)
+        ok, reason = backends.codex_is_confined()
+        # Outside a sandbox the write lands, so the check fails -- at the write, which
+        # means the read found the canary through the odd path.
+        assert not ok and "ALLOWED a write" in reason, reason
+        assert not any(p.name == "pwned" for p in tmp_path.rglob("pwned"))
+        for cmd in seen[1:]:
+            assert str(odd) not in cmd[cmd.index("-c") + 1]
 
 
 class TestReviewedFixtures:
@@ -2397,7 +2435,7 @@ class TestAMissingReviewerIsNotConvergence:
         assert "| 11 | **Incomplete** |" in readme
 
 
-class TestAgyReviewer:
+class _AgyCase:
     """agy, the Antigravity CLI, in slot 3.
 
     agy cannot make itself read-only -- measured, it wrote outside its workspace with
@@ -2461,7 +2499,177 @@ class TestAgyReviewer:
         assert choice is not None
         return choice[0]
 
-    # -- routing -----------------------------------------------------------------
+    def _launch(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> tuple[object, dict[str, object]]:
+        from scripts.review_loop import reviewers
+
+        seen: dict[str, object] = {}
+
+        class _Proc:
+            pid = 1
+
+            def __init__(self, cmd: list[str], **kw: object) -> None:
+                feed = kw["stdin"]
+                text = feed.read() if hasattr(feed, "read") else None
+                seen.update(kw, cmd=cmd, stdin=text)
+
+        monkeypatch.setattr(reviewers.subprocess, "Popen", _Proc)
+        tracked = reviewers._launch_one(
+            3, reviewers._LENSES[2], "+DIFF-MARKER", "{}", "ctx", tmp_path, self.BACKENDS
+        )
+        if tracked is not None:
+            tracked[3].close()
+            tracked[4].close()
+        return tracked, seen
+
+    @pytest.fixture
+    def scratch_made(self, monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+        """Each launch makes one scratch directory, as agy's does, and records it."""
+        from scripts.review_loop import reviewers
+
+        made: list[Path] = []
+
+        def launch(*a: object, **k: object) -> None:
+            made.append(reviewers._scratch_dir("mmcra-test-"))
+
+        monkeypatch.setattr(reviewers, "_launch_one", launch)
+        return made
+
+    def _launch_stub(
+        self, monkeypatch: pytest.MonkeyPatch, cmd: list[str]
+    ) -> list[subprocess.Popen[str]]:
+        """Launch slot 1 as ``cmd``, a real process; return what was started."""
+        from scripts.review_loop import reviewers
+
+        started: list[subprocess.Popen[str]] = []
+        real = subprocess.Popen
+
+        def popen(*a: object, **k: object) -> subprocess.Popen[str]:
+            started.append(real(*a, **k))  # type: ignore[call-overload]
+            return started[-1]
+
+        monkeypatch.setattr(reviewers, "_choose_command", lambda *a: (cmd, None))
+        monkeypatch.setattr(reviewers.subprocess, "Popen", popen)
+        return started
+
+    @staticmethod
+    def _prepare_agy(
+        tmp_path: Path, root: Path = REPO_ROOT, writable: bool = True, **env: str
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, list[str]]]:
+        """Run the runner's prepare_agy for real; its AGY_* results, one list each."""
+        runner = runner_script()
+        prompt = tmp_path / "prompt-3.txt"
+        prompt.write_text("Review this.\n", encoding="utf-8")
+        if not writable:
+            prompt.chmod(0o444)
+        script = tmp_path / "t.sh"
+        script.write_text(
+            'REVIEW_ROOT="$1"\nAGY_SCRATCH=()\n'
+            + 'AGY_SCHEMA="" AGY_WS="" AGY_STATE="" AGY_ENVP=() AGY_BWRAP=()\n'
+            + shell_function(runner, "review_helper")
+            + shell_function(runner, "prepare_agy")
+            + 'prepare_agy 3 "$2"; rc=$?\n'
+            + 'printf "\\0"\n'
+            + "for v in AGY_SCRATCH AGY_ENVP AGY_BWRAP; do\n"
+            + '  declare -n a=$v; printf "%s\\0" "@$v" "${a[@]}"; unset -n a\n'
+            + "done\n"
+            + "exit $rc\n"
+        )
+        home = tmp_path / "home"
+        home.mkdir(exist_ok=True)
+        done = subprocess.run(
+            ["bash", str(script), str(root), str(prompt)],
+            capture_output=True, text=True, timeout=60,
+            env={**os.environ, "HOME": str(home), "TMPDIR": str(tmp_path), **env},
+        )  # fmt: skip
+        parts: dict[str, list[str]] = {}
+        for item in done.stdout.split("\0"):
+            if item.startswith("@AGY_"):
+                key = item[1:]
+                parts[key] = []
+            elif item and parts:
+                parts[key].append(item)
+        return done, parts
+
+    @staticmethod
+    def _raw(round_dir: Path) -> Path:
+        """Slot 3's raw output file, recorded as agy's -- as _launch_one records it."""
+        (round_dir / "backend-3.txt").write_text("agy")
+        return round_dir / "raw-3.txt"
+
+    @staticmethod
+    def _stream(result: dict[str, object]) -> str:
+        return "\n".join(
+            json.dumps(event)
+            for event in (
+                {"event": "init", "cwd": "/tmp/mmcra-agy-x", "permission_mode": "plan"},
+                {"event": "step_update", "state": "DONE", "text_delta": "{ not it"},
+                {"event": "result", "result": result},
+            )
+        )
+
+    def _review(self) -> dict[str, object]:
+        return {
+            "reviewer": "readability_performance",
+            "model": self.MODEL,
+            "findings": [{"severity": "warning", "issue": "dead code"}],
+            "overall_assessment": "One dead branch.",
+        }
+
+    @staticmethod
+    def _bwrap_works() -> bool:
+        """Real-sandbox tests need bwrap that runs, and agy (the check starts it)."""
+        if shutil.which("bwrap") is None or shutil.which("agy") is None:
+            return False
+        done = subprocess.run(
+            ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "true"],
+            capture_output=True,
+            check=False,
+        )
+        return done.returncode == 0
+
+    @staticmethod
+    def _unconfined(cmd: list[str], **kw: object) -> subprocess.CompletedProcess[str]:
+        # A "sandbox" that runs the command with the wrapper stripped: no confinement.
+        # agy need not be installed for this: its start-up step is answered here.
+        bare = cmd[cmd.index("--") + 1 :]
+        if "agy --version" in bare[-1]:
+            return subprocess.CompletedProcess(bare, 0, "AGY_OK\n", "")
+        return subprocess.run(bare, capture_output=True, text=True, check=False)
+
+    class _Reach:
+        """A box in which exactly ``reachable`` answers the socket probe."""
+
+        def __init__(self, reachable: str) -> None:
+            self.reachable = reachable
+
+        def sh(self, script: str) -> str:
+            return self.reachable + "\n" if self.reachable in script else ""
+
+    UNIX = (
+        "Num RefCount Protocol Flags Type St Inode Path\n"
+        "0: 00000002 00000000 00010000 0001 01 1 /var/lib/incus/unix.socket\n"
+        "0: 00000002 00000000 00010000 0001 01 2 /run/systemd/resolve/io.systemd.Resolve\n"
+    )
+
+    def _detect(
+        self, monkeypatch: pytest.MonkeyPatch, verdict: tuple[bool, str] | None
+    ) -> dict[str, bool]:
+        monkeypatch.setenv("MMCRA_SKIP_CODEX_SANDBOX_CHECK", "1")
+        monkeypatch.setattr(agy.shutil, "which", lambda c: f"/usr/bin/{c}")
+
+        def check() -> tuple[bool, str]:
+            if verdict is None:
+                raise AssertionError("the agy check ran when it should not have")
+            return verdict
+
+        monkeypatch.setattr(backends, "agy_is_confined", check)
+        return backends.detect_backends()
+
+
+class TestAgyRouting(_AgyCase):
+    """Which backend slot 3 gets, and which model agy runs."""
 
     @pytest.mark.usefixtures("on")
     def test_slot_3_runs_agy_when_switched_on(self, tmp_path: Path) -> None:
@@ -2580,9 +2788,9 @@ class TestAgyReviewer:
         ("listed", "best"),
         [
             # This machine today.
-            (LISTED, "gemini-3.8-flash-high"),
+            (_AgyCase.LISTED, "gemini-3.8-flash-high"),
             # The day the plan includes Argon: a newer version beats a higher effort.
-            ([*LISTED, "gemini-4-argon"], "gemini-4-argon"),
+            ([*_AgyCase.LISTED, "gemini-4-argon"], "gemini-4-argon"),
             # Same version: Pro above Flash above Lite, whatever the effort.
             (
                 ["gemini-3.8-flash-lite-high", "gemini-3.8-flash-low", "gemini-3.8-pro-low"],
@@ -2625,7 +2833,7 @@ class TestAgyReviewer:
             seen.update(cmd=cmd, cwd=kw.get("cwd"))
             return SimpleNamespace(stdout=out, stderr="")
 
-        monkeypatch.setattr(agy, "_run", run)
+        monkeypatch.setattr(agy, "run", run)
         assert agy.agy_models() == self.LISTED
         # Listing runs agy too: under the wrapper, in an empty directory of its own.
         cmd = seen["cmd"]
@@ -2640,7 +2848,7 @@ class TestAgyReviewer:
         def hang(cmd: list[str], **kw: object) -> None:
             raise subprocess.TimeoutExpired(cmd, 1)
 
-        monkeypatch.setattr(agy, "_run", hang)
+        monkeypatch.setattr(agy, "run", hang)
         assert agy.agy_models() == []
 
     @pytest.mark.usefixtures("on")
@@ -2652,6 +2860,40 @@ class TestAgyReviewer:
     def test_bedrock_opt_in_still_takes_slot_3(self, tmp_path: Path) -> None:
         assert self._cmd(tmp_path, prefer_hermes=True)[0] == "hermes"
 
+    @pytest.mark.parametrize("asked", [None, "1"], ids=["default", "by-name"])
+    def test_a_bedrock_project_without_hermes_gets_agy_only_by_name(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, asked: str | None
+    ) -> None:
+        # Pinned to Bedrock to keep the code with providers it chose; with Hermes
+        # unavailable, slot 3 fell to agy -- a new provider -- by default.
+        from scripts.review_loop.reviewers import _choose_command
+
+        monkeypatch.setenv("AGY_MODEL", self.MODEL)
+        monkeypatch.delenv("REVIEW_USE_GEMINI", raising=False)
+        if asked is None:
+            monkeypatch.delenv("REVIEW_USE_AGY", raising=False)
+        else:
+            monkeypatch.setenv("REVIEW_USE_AGY", asked)
+        found = {**self.BACKENDS, "hermes": False}
+        choice = _choose_command(3, tmp_path / "p.txt", tmp_path, found, True)
+        assert choice is not None
+        assert choice[0][0] == ("agy" if asked else "claude")
+
+    @pytest.mark.parametrize(
+        ("value", "on"),
+        [(None, True), ("1", True), ("yes", True),
+         ("0", False), ("false", False), ("No", False), (" off ", False), ("", False)],
+    )  # fmt: skip
+    def test_every_value_that_reads_as_off_is_off(
+        self, monkeypatch: pytest.MonkeyPatch, value: str | None, on: bool
+    ) -> None:
+        # Only "0" switched it off; REVIEW_USE_AGY=false sent the diff to Google.
+        if value is None:
+            monkeypatch.delenv("REVIEW_USE_AGY", raising=False)
+        else:
+            monkeypatch.setenv("REVIEW_USE_AGY", value)
+        assert agy.agy_enabled() is on
+
     @pytest.mark.usefixtures("on")
     def test_an_unverified_agy_is_not_used(self, tmp_path: Path) -> None:
         # detect_backends sets agy False when the canary fails; that must stick.
@@ -2662,7 +2904,9 @@ class TestAgyReviewer:
         )
         assert choice is not None and choice[0][0] != "agy"
 
-    # -- the command -------------------------------------------------------------
+
+class TestAgyCommand(_AgyCase):
+    """The agy invocation: its pinned flags, schema and input."""
 
     @pytest.mark.usefixtures("on")
     def test_the_safety_flags_are_pinned(self, tmp_path: Path) -> None:
@@ -2697,31 +2941,9 @@ class TestAgyReviewer:
         cmd = self._cmd(tmp_path)
         assert cmd[cmd.index("--print-timeout") + 1] == "0"
 
-    # -- the launch --------------------------------------------------------------
 
-    def _launch(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> tuple[object, dict[str, object]]:
-        from scripts.review_loop import reviewers
-
-        seen: dict[str, object] = {}
-
-        class _Proc:
-            pid = 1
-
-            def __init__(self, cmd: list[str], **kw: object) -> None:
-                feed = kw["stdin"]
-                text = feed.read() if hasattr(feed, "read") else None
-                seen.update(kw, cmd=cmd, stdin=text)
-
-        monkeypatch.setattr(reviewers.subprocess, "Popen", _Proc)
-        tracked = reviewers._launch_one(
-            3, reviewers._LENSES[2], "+DIFF-MARKER", "{}", "ctx", tmp_path, self.BACKENDS
-        )
-        if tracked is not None:
-            tracked[3].close()
-            tracked[4].close()
-        return tracked, seen
+class TestAgyLaunch(_AgyCase):
+    """Starting agy: its workspace, its sandbox, its scratch and its cleanup."""
 
     @pytest.mark.usefixtures("on")
     def test_launch_is_sandboxed_outside_the_repo(
@@ -2756,19 +2978,6 @@ class TestAgyReviewer:
         # The prompt file is the record of what agy was actually sent.
         assert (tmp_path / "prompt-3.txt").read_text() == content
 
-    @pytest.fixture
-    def scratch_made(self, monkeypatch: pytest.MonkeyPatch) -> list[Path]:
-        """Each launch makes one scratch directory, as agy's does, and records it."""
-        from scripts.review_loop import reviewers
-
-        made: list[Path] = []
-
-        def launch(*a: object, **k: object) -> None:
-            made.append(reviewers._scratch_dir("mmcra-test-"))
-
-        monkeypatch.setattr(reviewers, "_launch_one", launch)
-        return made
-
     def test_scratch_goes_when_the_round_ends(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, scratch_made: list[Path]
     ) -> None:
@@ -2792,22 +3001,46 @@ class TestAgyReviewer:
             reviewers.launch_reviewers(tmp_path, "diff", "{}", "", {})
         assert scratch_made and not any(p.exists() for p in scratch_made)
 
-    def _launch_stub(
-        self, monkeypatch: pytest.MonkeyPatch, cmd: list[str]
-    ) -> list[subprocess.Popen[str]]:
-        """Launch slot 1 as ``cmd``, a real process; return what was started."""
+    def test_a_finished_reviewers_helpers_are_killed_with_it(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # The round's cleanup killed only reviewers still running; one that had exited
+        # left its helper running in its group, spending quota and writing round_dir.
         from scripts.review_loop import reviewers
 
-        started: list[subprocess.Popen[str]] = []
-        real = subprocess.Popen
+        cmd = ["sh", "-c", "sleep 300 & echo $! > helper; exit 0"]
+        tracked: list[reviewers.ReviewerProc] = []
 
-        def popen(*a: object, **k: object) -> subprocess.Popen[str]:
-            started.append(real(*a, **k))  # type: ignore[call-overload]
-            return started[-1]
+        def launch(slot: int, *a: object, **k: object) -> reviewers.ReviewerProc | None:
+            if slot != 1:
+                return None
+            proc, out_f, err_f = reviewers._spawn(
+                1, cmd, "sh", tmp_path, None, tmp_path
+            )
+            tracked.append((1, proc, "sh", out_f, err_f))
+            return tracked[-1]
 
-        monkeypatch.setattr(reviewers, "_choose_command", lambda *a: (cmd, None))
-        monkeypatch.setattr(reviewers.subprocess, "Popen", popen)
-        return started
+        monkeypatch.setattr(reviewers, "_launch_one", launch)
+        monkeypatch.setattr(
+            reviewers, "_await_reviewers", lambda procs, *a: procs[0][1].wait()
+        )
+        reviewers.launch_reviewers(tmp_path, "diff", "{}", "", {})
+        helper = int((tmp_path / "helper").read_text())
+        time.sleep(0.2)
+        stat = Path(f"/proc/{helper}/stat")
+        assert not stat.exists() or stat.read_text().split()[2] == "Z"
+
+    def test_scratch_has_one_exit_hook_not_one_per_directory(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from scripts.review_loop import reviewers
+
+        def registered(*a: object, **k: object) -> None:
+            raise AssertionError("an exit hook per scratch directory")
+
+        monkeypatch.setattr(reviewers.atexit, "register", registered)
+        reviewers._scratch_dir("mmcra-test-")
+        reviewers._release_scratch()
 
     def test_an_interrupted_launch_kills_its_reviewer(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -2874,12 +3107,12 @@ class TestAgyReviewer:
             "from scripts.review_loop import agy\n"
             "agy.tempfile.tempdir = sys.argv[2]\n"
             "agy._canary_parent = lambda: sys.argv[2]\n"
-            # Nothing real runs (_run is replaced), so bwrap need not be installed.
+            # Nothing real runs (run is replaced), so bwrap need not be installed.
             "agy.shutil.which = lambda c: '/usr/bin/' + c\n"
             "def killed(*a, **k):\n"
             f"    os.kill(os.getpid(), signal.{sig})\n"
             "    time.sleep(30)\n"
-            "agy._run = killed\n"
+            "agy.run = killed\n"
             f"agy.{helper}()\n"
         )
         env = {**os.environ, "HOME": str(home)}
@@ -2903,7 +3136,7 @@ class TestAgyReviewer:
 
         monkeypatch.setattr(agy.shutil, "which", lambda c: f"/usr/bin/{c}")
         monkeypatch.setattr(agy, "agy_seed_state", seeded)
-        monkeypatch.setattr(agy, "_run", nothing_runs)
+        monkeypatch.setattr(agy, "run", nothing_runs)
         ok, reason = agy.agy_is_confined()
         assert not ok and "could not start" in reason
 
@@ -2921,50 +3154,52 @@ class TestAgyReviewer:
         self._launch(monkeypatch, tmp_path)
         assert AGY_EGRESS in capsys.readouterr().out
         # And the full-mode runner says the same thing.
-        assert AGY_EGRESS in TestRunnerScript()._runner()
+        assert AGY_EGRESS in runner_script()
 
     def test_the_runner_keeps_values_off_timeouts_command_line(
         self, tmp_path: Path
     ) -> None:
         # timeout ran ahead of `env -i`, holding every allowlisted value -- a proxy URL
         # with a password -- in a command line any local user can read.
-        runner = TestRunnerScript()._runner()
-        start = runner.index("review_helper() {")
-        helper = runner[start : runner.index("\n}\n", start) + 3]
-        start = runner.index("      mapfile -d '' -t wrap")
-        block = runner[start : runner.index("\n", runner.index("envp=(", start))]
-        home = tmp_path / "home"
-        home.mkdir()
-        script = tmp_path / "t.sh"
-        script.write_text(
-            "REVIEW_ROOT=$1\n"
-            + helper
-            + "f() {\n  local ws=$1 state=$2 num=3 wrap=() envp=() bwrap=()\n"
-            + block
-            + '\n  printf "%s\\n" "${envp[@]}" ---- "${bwrap[@]}"\n}\nf "$2" "$3"\n'
-        )
-        (tmp_path / "ws").mkdir()
-        (tmp_path / "st").mkdir()
         proxy = "http://u:secret@proxy:1"
-        env = {**os.environ, "HOME": str(home), "HTTPS_PROXY": proxy}
-        done = subprocess.run(
-            ["bash", str(script), str(REPO_ROOT), str(tmp_path / "ws"), str(tmp_path / "st")],
-            capture_output=True, text=True, env=env, timeout=30,
-        )  # fmt: skip
-        envp, bwrap = done.stdout.split("----\n")
-        assert envp.split("\n")[1] == "-i", done.stderr
-        assert f"HTTPS_PROXY={proxy}" in envp
-        assert "secret" not in bwrap and bwrap.split("\n")[0].endswith("bwrap")
+        done, parts = self._prepare_agy(tmp_path, HTTPS_PROXY=proxy)
+        assert done.returncode == 0, done.stdout + done.stderr
+        assert parts["AGY_ENVP"][1] == "-i"
+        assert f"HTTPS_PROXY={proxy}" in parts["AGY_ENVP"]
+        assert parts["AGY_BWRAP"][0].endswith("bwrap")
+        assert not any("secret" in a for a in parts["AGY_BWRAP"])
         # And timeout goes between them.
-        launch = '"${envp[@]}" timeout --foreground -k 10 "$REVIEWER_TIMEOUT" "${bwrap[@]}" agy'
-        assert launch in runner
+        launch = (
+            '"${AGY_ENVP[@]}" timeout --foreground -k 10 "$REVIEWER_TIMEOUT"'
+            ' "${AGY_BWRAP[@]}" agy'
+        )
+        assert launch in runner_script()
+        # The preamble went into the prompt file, and both scratch directories are listed.
+        assert (tmp_path / "prompt-3.txt").read_text().startswith(agy.AGY_PREAMBLE)
+        assert len(parts["AGY_SCRATCH"]) == 2
 
-    def test_an_unusable_schema_hands_the_slot_on(self) -> None:
-        runner = TestRunnerScript()._runner()
-        launcher = runner[runner.index("    agy)") :]
-        assert "review_helper agy-schema" in launcher
-        skipped = 'echo "R$num: SKIPPED (agy result schema unusable)"; return 1'
-        assert skipped in launcher
+    def test_an_unusable_schema_hands_the_slot_on(self, tmp_path: Path) -> None:
+        # A root whose code is this checkout's but whose schema is not a schema.
+        root = tmp_path / "root"
+        (root / "docs").mkdir(parents=True)
+        (root / "scripts").symlink_to(REPO_ROOT / "scripts")
+        (root / "docs" / "ensemble_review_result_schema.json").write_text('{"type": 7}')
+        done, parts = self._prepare_agy(tmp_path, root=root)
+        assert done.returncode == 1
+        assert "SKIPPED (agy result schema unusable)" in done.stdout
+        assert parts["AGY_SCRATCH"] == []  # nothing made, nothing left behind
+
+    def test_scratch_is_listed_the_moment_it_exists(self, tmp_path: Path) -> None:
+        # A launch that fails after making its directories leaves them to the runner,
+        # which removes whatever AGY_SCRATCH lists: no failure path cleans up alone.
+        root = tmp_path / "root"
+        (root / "docs").mkdir(parents=True)
+        (root / "scripts").symlink_to(REPO_ROOT / "scripts")
+        shutil.copy(SCHEMA_PATH, root / "docs" / "ensemble_review_result_schema.json")
+        done, parts = self._prepare_agy(tmp_path, root=root, writable=False)
+        assert done.returncode == 1, done.stdout
+        assert "could not prepare agy's prompt" in done.stdout
+        assert len(parts["AGY_SCRATCH"]) == 2
 
     @pytest.mark.usefixtures("on")
     def test_a_host_that_is_already_a_sandbox_runs_agy_bare(
@@ -3036,32 +3271,9 @@ class TestAgyReviewer:
         monkeypatch.setenv("MMCRA_SKIP_AGY_SANDBOX_CHECK", value)
         assert agy_unsandboxed() is False
 
-    # -- reading its answer ------------------------------------------------------
 
-    @staticmethod
-    def _raw(round_dir: Path) -> Path:
-        """Slot 3's raw output file, recorded as agy's -- as _launch_one records it."""
-        (round_dir / "backend-3.txt").write_text("agy")
-        return round_dir / "raw-3.txt"
-
-    @staticmethod
-    def _stream(result: dict[str, object]) -> str:
-        return "\n".join(
-            json.dumps(event)
-            for event in (
-                {"event": "init", "cwd": "/tmp/mmcra-agy-x", "permission_mode": "plan"},
-                {"event": "step_update", "state": "DONE", "text_delta": "{ not it"},
-                {"event": "result", "result": result},
-            )
-        )
-
-    def _review(self) -> dict[str, object]:
-        return {
-            "reviewer": "readability_performance",
-            "model": self.MODEL,
-            "findings": [{"severity": "warning", "issue": "dead code"}],
-            "overall_assessment": "One dead branch.",
-        }
+class TestAgyOutput(_AgyCase):
+    """Reading agy's stream: only a finished turn is a review."""
 
     def test_structured_output_is_the_result(self, tmp_path: Path) -> None:
         from scripts.review_loop.results import extract_results
@@ -3154,25 +3366,22 @@ class TestAgyReviewer:
         (tmp_path / "backend-3.txt").write_text("agy")
         assert extract_results(tmp_path)[2] is not None
 
+    def test_a_stream_with_no_result_event_is_no_review(self) -> None:
+        # Without a result event, the stream was read as plain text, and a bare object
+        # in it passed as agy's verdict.
+        from scripts.review_loop.results import _unwrap_envelope
+
+        assert _unwrap_envelope(json.dumps(self._review()), agy_ran=True) == ""
+
     def test_claude_envelopes_are_unaffected(self) -> None:
         from scripts.review_loop.results import _unwrap_envelope
 
         claude = json.dumps({"type": "result", "result": '{"a": 1}'})
         assert _unwrap_envelope(claude) == '{"a": 1}'
 
-    # -- the sandbox check -------------------------------------------------------
 
-    @staticmethod
-    def _bwrap_works() -> bool:
-        """Real-sandbox tests need bwrap that runs, and agy (the check starts it)."""
-        if shutil.which("bwrap") is None or shutil.which("agy") is None:
-            return False
-        done = subprocess.run(
-            ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "true"],
-            capture_output=True,
-            check=False,
-        )
-        return done.returncode == 0
+class TestAgySandboxCheck(_AgyCase):
+    """The startup check that proves the wrapper, with no model call."""
 
     def test_the_real_sandbox_passes(self) -> None:
         """Not a mock: the wrapper agy runs under, against the real filesystem."""
@@ -3224,20 +3433,11 @@ class TestAgyReviewer:
         ok, reason = agy.agy_is_confined()
         assert not ok and "/var/tmp" in reason
 
-    @staticmethod
-    def _unconfined(cmd: list[str], **kw: object) -> subprocess.CompletedProcess[str]:
-        # A "sandbox" that runs the command with the wrapper stripped: no confinement.
-        # agy need not be installed for this: its start-up step is answered here.
-        bare = cmd[cmd.index("--") + 1 :]
-        if "agy --version" in bare[-1]:
-            return subprocess.CompletedProcess(bare, 0, "AGY_OK\n", "")
-        return subprocess.run(bare, capture_output=True, text=True, check=False)
-
     def test_a_sandbox_that_lets_writes_through_fails(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(agy.shutil, "which", lambda c: f"/usr/bin/{c}")
-        monkeypatch.setattr(agy, "_run", self._unconfined)
+        monkeypatch.setattr(agy, "run", self._unconfined)
         ok, reason = agy.agy_is_confined()
         assert not ok and "ALLOWED a write" in reason
 
@@ -3248,13 +3448,50 @@ class TestAgyReviewer:
         monkeypatch.setattr(agy.shutil, "which", lambda c: f"/usr/bin/{c}")
         monkeypatch.setattr(
             agy,
-            "_run",
+            "run",
             lambda *a, **k: SimpleNamespace(
                 stdout="", stderr="bwrap: setting up uid map: Permission denied"
             ),
         )
         ok, reason = agy.agy_is_confined()
         assert not ok and "could not start" in reason and "namespaces" in reason
+
+    def test_an_account_with_no_passwd_entry_disables_only_agy(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A container under a bare numeric UID: getpwuid raised out of detection, and
+        # no reviewer started at all.
+        def unknown(uid: int) -> object:
+            raise KeyError(uid)
+
+        monkeypatch.setattr(agy.pwd, "getpwuid", unknown)
+        monkeypatch.setattr(agy.shutil, "which", lambda c: f"/usr/bin/{c}")
+        ok, reason = agy.agy_is_confined()
+        assert not ok and "passwd" in reason
+        monkeypatch.setenv("REVIEW_USE_AGY", "1")
+        monkeypatch.setenv("MMCRA_SKIP_CODEX_SANDBOX_CHECK", "1")
+        monkeypatch.delenv("MMCRA_SKIP_AGY_SANDBOX_CHECK", raising=False)
+        found = backends.detect_backends()
+        assert found["agy"] is False and found["claude"] is True
+
+    def test_any_reachable_socket_is_refused_not_only_named_ones(self) -> None:
+        # A list of known sockets lags what is installed: Incus's was not on it.
+        box = self._Reach("/var/lib/incus/unix.socket")
+        reason = agy._check_sockets(box, self.UNIX)  # type: ignore[arg-type]
+        assert reason and "/var/lib/incus/unix.socket" in reason
+
+    def test_the_resolvers_socket_is_put_back_on_purpose(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(agy, "_resolver_dir", lambda: Path("/run/systemd/resolve"))
+        box = self._Reach("/run/systemd/resolve/io.systemd.Resolve")
+        assert agy._check_sockets(box, self.UNIX) is None  # type: ignore[arg-type]
+
+    def test_any_abstract_session_bus_is_refused(self) -> None:
+        # Not only dbus-launch's under /tmp: IBus keeps one under ~/.cache.
+        unix = self.UNIX + "0: 2 0 10000 0001 01 3 @/home/u/.cache/ibus/dbus-AbCd\n"
+        reason = agy._check_sockets(self._Reach("nothing"), unix)  # type: ignore[arg-type]
+        assert reason and "session bus" in reason
 
     def test_no_bwrap_is_not_a_pass(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(agy.shutil, "which", lambda c: None)
@@ -3272,7 +3509,7 @@ class TestAgyReviewer:
             raise failure
 
         monkeypatch.setattr(agy.shutil, "which", lambda c: f"/usr/bin/{c}")
-        monkeypatch.setattr(agy, "_run", boom)
+        monkeypatch.setattr(agy, "run", boom)
         ok, reason = agy.agy_is_confined()
         assert not ok and "check failed" in reason
 
@@ -3286,7 +3523,7 @@ class TestAgyReviewer:
             return SimpleNamespace(stdout="", stderr="")
 
         monkeypatch.setattr(agy.shutil, "which", lambda c: f"/usr/bin/{c}")
-        monkeypatch.setattr(agy, "_run", record)
+        monkeypatch.setattr(agy, "run", record)
         agy.agy_is_confined()
         (first,) = calls  # it stops at "could not start"
         wrap = first[: first.index("--") + 1]
@@ -3295,21 +3532,9 @@ class TestAgyReviewer:
         workspace = Path(wrap[last_bind + 1])
         assert wrap == agy.agy_sandbox(workspace, state)
 
-    # -- detection ---------------------------------------------------------------
 
-    def _detect(
-        self, monkeypatch: pytest.MonkeyPatch, verdict: tuple[bool, str] | None
-    ) -> dict[str, bool]:
-        monkeypatch.setenv("MMCRA_SKIP_CODEX_SANDBOX_CHECK", "1")
-        monkeypatch.setattr(agy.shutil, "which", lambda c: f"/usr/bin/{c}")
-
-        def check() -> tuple[bool, str]:
-            if verdict is None:
-                raise AssertionError("the agy check ran when it should not have")
-            return verdict
-
-        monkeypatch.setattr(backends, "agy_is_confined", check)
-        return backends.detect_backends()
+class TestAgyDetection(_AgyCase):
+    """Whether agy is used at all, decided once at startup."""
 
     @pytest.mark.usefixtures("on")
     def test_an_unconfined_agy_is_dropped(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3384,41 +3609,57 @@ class TestAgyReviewer:
             if tmp_path.is_relative_to(account):
                 assert hidden.index(account) < hidden.index(tmp_path)
 
-    # -- the full-mode runner ----------------------------------------------------
+
+class TestAgyRunner(_AgyCase):
+    """The bash runner's agy launcher, which must not be the weaker path."""
 
     def test_the_bash_launcher_matches_the_python_one(self) -> None:
         """The doc is the program for full mode; it must not be the weaker path."""
         from scripts.review_loop.agy import AGY_SAFETY_ARGS
 
-        runner = TestRunnerScript()._runner()
+        runner = runner_script()
         for flag in AGY_SAFETY_ARGS:
             assert flag in runner
         assert "--print-timeout 0" in runner
         # One copy of the sandbox, the schema and the preamble: the runner calls the
         # loop's own code through runner_cli, not one-liners of its own.
-        assert 'review_helper agy-sandbox "$ws" "$state")' in runner
-        assert "mapfile -d '' -t wrap < <(" in runner
-        assert "review_helper agy-schema" in runner
+        prepare = shell_function(runner, "prepare_agy")
+        assert 'review_helper agy-sandbox "$AGY_WS" "$AGY_STATE"' in prepare
+        assert "review_helper agy-schema" in prepare
         # The preamble written into the prompt file, which then goes in as one line.
-        assert 'review_helper agy-preamble "$prompt_file"' in runner
+        assert 'review_helper agy-preamble "$prompt_file"' in prepare
         assert 'review_helper agy-message "$prompt_file"' in runner
         assert runner.count("python3") == 1  # review_helper's own definition
-        # Its output parsed as agy's only because agy ran it; its scratch listed.
-        assert 'echo agy > "$REVIEW_TMP/backend-$num"' in runner
-        # Listed in the runner's own shell, not in a file a reviewer could write.
-        assert 'AGY_SCRATCH+=("$ws" "$state")' in runner
+        assert 'prepare_agy "$num" "$prompt_file" || return 1' in runner
+        # Its output parsed as agy's only because agy ran it -- as the runner itself
+        # recorded, not as a file a reviewer could rewrite says.
+        assert "JOB_BACKEND[$num]=agy" in runner
+        assert 'extract_json "$src" "$result" "${JOB_BACKEND[$num]:-}"' in runner
+        assert 'echo agy > "$REVIEW_TMP/backend-$num.txt"' in runner  # for watching
+        assert 'cat "$REVIEW_TMP/backend-' not in runner
+        # Scratch listed in the runner's own shell, not in a file a reviewer could write.
+        assert 'AGY_SCRATCH+=("$AGY_WS")' in prepare
+        assert 'AGY_SCRATCH+=("$AGY_STATE")' in prepare
         assert "scratch-" not in runner
         assert "trap finish_round EXIT" in runner
         # A failed mktemp must not fall back to running agy in the repository.
-        assert 'ws="$(mktemp -d)" || return 1' in runner
-        assert 'rm -rf "$ws" "$state"' in runner
+        assert 'AGY_WS="$(mktemp -d)" && [ -n "$AGY_WS" ]' in prepare
+        assert 'rm -rf "$AGY_WS" "$AGY_STATE"' in runner
+        # Absolute, or the job's cd into the workspace sends its output there.
+        assert 'REVIEW_TMP="$(cd "$REVIEW_TMP" && pwd -P)" || exit 1' in runner
+
+    def test_a_bedrock_project_gets_agy_only_by_name_in_the_runner(self) -> None:
+        runner = runner_script()
+        gate = "{ ! $PREFER_HERMES || review_helper flag REVIEW_USE_AGY; }"
+        assert f"elif ${{HAS_AGY:-false}} && {gate}" in runner
 
 
 class TestRunnerCli:
     """scripts/review_loop/runner_cli.py: the loop's own code, as the bash runner calls it."""
 
     HELPER = (
-        "import sys; sys.path.insert(0, sys.argv.pop(1));"
+        'import sys, types; pkg = types.ModuleType("scripts");'
+        ' pkg.__path__ = [sys.argv.pop(1) + "/scripts"]; sys.modules["scripts"] = pkg;'
         " from scripts.review_loop.runner_cli import main; sys.exit(main(sys.argv[1:]))"
     )
 
@@ -3432,7 +3673,34 @@ class TestRunnerCli:
         )  # fmt: skip
 
     def test_the_runner_calls_it_the_same_way(self) -> None:
-        assert self.HELPER in TestRunnerScript()._runner()
+        # Both copies: the detection snippet's and the runner's.
+        assert AGENT_DOC.read_text().count(self.HELPER) == 2
+        assert self.HELPER in runner_script()
+
+    def test_the_checkout_root_does_not_shadow_the_stdlib(self, tmp_path: Path) -> None:
+        # With the root put first on sys.path, a json.py at its top replaced the
+        # standard library's for every import the helper made.
+        root = tmp_path / "root"
+        root.mkdir()
+        (root / "scripts").symlink_to(REPO_ROOT / "scripts")
+        (root / "json.py").write_text("raise SystemExit('shadowed')\n")
+        done = subprocess.run(
+            [sys.executable, "-I", "-c", self.HELPER, str(root), "flag", "NOPE"],
+            capture_output=True, text=True, timeout=60, cwd=root,
+        )  # fmt: skip
+        assert done.returncode == 1 and "shadowed" not in done.stderr, done.stderr
+
+    def test_a_wrong_number_of_arguments_is_a_usage_error(self) -> None:
+        assert self._cli("extract").returncode == 2
+        assert self._cli("no-such-command").returncode == 2
+
+    def test_a_bare_object_is_not_agys_review(self, tmp_path: Path) -> None:
+        # No result event at all: read as plain text, a bare object passed as agy's.
+        raw = tmp_path / "stdout-3.txt"
+        raw.write_text(json.dumps(self.REVIEW), encoding="utf-8")
+        out = tmp_path / "result-3.json"
+        done = self._cli("extract", str(raw), str(out), "agy")
+        assert done.returncode == 1 and "no result event" in done.stderr
 
     @staticmethod
     def _agy_stream(tmp_path: Path, **result: object) -> Path:

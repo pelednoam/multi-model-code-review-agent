@@ -161,8 +161,11 @@ class TestAgyOutput(AgyCase):
     def test_a_stream_with_no_result_event_is_no_review(self) -> None:
         # Without a result event, the stream was read as plain text, and a bare object
         # in it passed as agy's verdict.
-        assert unwrap_envelope(json.dumps(self._review()), agy_ran=True) == ""
+        assert unwrap_envelope(json.dumps(self._review()), "agy") == ""
 
     def test_claude_envelopes_are_unaffected(self) -> None:
         claude = json.dumps({"type": "result", "result": '{"a": 1}'})
-        assert unwrap_envelope(claude) == '{"a": 1}'
+        assert unwrap_envelope(claude, "claude") == '{"a": 1}'
+        # Read as claude's, another CLI's answer shaped like the envelope had the
+        # envelope's string taken for its review.
+        assert unwrap_envelope(claude, "codex") == claude

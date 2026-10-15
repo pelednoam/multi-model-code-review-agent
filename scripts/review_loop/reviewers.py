@@ -175,6 +175,10 @@ def _claude_cmd(slot: int) -> list[str]:
         # commands no deny list covers; measured, a project SessionStart hook ran.
         "--setting-sources",
         "user",
+        # Not whatever mode the user's settings choose -- bypassPermissions runs
+        # anything -- but only what is allowed, with no one there to ask.
+        "--permission-mode",
+        "dontAsk",
         "--output-format",
         "json",
     ]
@@ -217,7 +221,7 @@ def _agy_cmd(model: str) -> list[str]:
     return agy_command(model, "--json-schema", agy_schema(RESULT_SCHEMA))
 
 
-def _outside_workspace(repo: Path | None = None) -> Path | None:
+def _empty_workspace_outside_repo(repo: Path | None = None) -> Path | None:
     """An empty directory for agy or gemini to run in, outside the repository -- or
     None.
 
@@ -231,7 +235,7 @@ def _outside_workspace(repo: Path | None = None) -> Path | None:
     leaves nothing to wander through.
     """
     try:
-        path = _scratch_dir("mmcra-agy-")
+        path = _scratch_dir("mmcra-ws-")
     except OSError:
         return None
     under_review = repo if repo is not None else Path.cwd()
@@ -382,7 +386,7 @@ def _choose_command(
     # if Hermes is unavailable, slot 3 must not fall to a Google default it never
     # agreed to. There, agy runs only when asked for by name (REVIEW_USE_AGY=1).
     agy_allowed = not prefer_hermes or env_flag("REVIEW_USE_AGY")
-    if slot == 3 and backends.get("agy") and agy_allowed:
+    if slot == 3 and backends["agy"] and agy_allowed:
         # Ahead of gemini: both are Google, and this one can be held to the schema.
         # backends["agy"] is only true once agy is switched on and its sandbox check
         # has passed, and agy_model_choice()[0] picks once per run, so every round runs the
@@ -526,7 +530,7 @@ def _pick_backend(slot: int, round_: _Round) -> _Picked | None:
             # chosen by the change being reviewed -- it would load (--skip-trust):
             # an empty directory of its own, checked to be outside it. Its prompt
             # carries the diff and the audit.
-            workspace = _outside_workspace(round_.repo)
+            workspace = _empty_workspace_outside_repo(round_.repo)
             if workspace is not None:
                 return _Picked(cmd, "gemini", label, workspace)
             print(f"  R{slot}: gemini has no workspace outside the repo (see TMPDIR)")
@@ -586,7 +590,7 @@ def _prepare_agy(
     slot: int, cmd: list[str], repo: Path | None
 ) -> tuple[list[str], Path] | None:
     """agy's command inside its sandbox, and its workspace -- or None, saying why."""
-    workspace = _outside_workspace(repo)
+    workspace = _empty_workspace_outside_repo(repo)
     if workspace is None:
         print(f"  R{slot}: agy has no workspace outside the repo (see TMPDIR)")
         return None

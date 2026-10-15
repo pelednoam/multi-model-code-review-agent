@@ -15,8 +15,9 @@ installed in the current project. The required files are:
 - `scripts/scrub_diff.py`
 - `scripts/review_preflight.py`
 - `scripts/validate_review_results.py`
-- `scripts/review_loop/` (every full-mode slot needs it: the runner's backend checks, its output
-  extraction and agy's sandbox all come from it, through `runner_entry.py`)
+- `scripts/review_loop/runner_entry.py`, and the rest of `scripts/review_loop/` (every full-mode
+  slot needs it: the runner's backend checks, its output extraction and agy's sandbox all come
+  from it, through `runner_entry.py`; an install from before it has the directory without it)
 - `docs/ensemble_review_result_schema.json`
 
 If any are missing, **do not try to install them yourself**. Writing
@@ -90,12 +91,16 @@ if [ -f ".use-hermes" ]; then PREFER_HERMES=true; fi
 review_helper() {
   python3 -I "$PWD/scripts/review_loop/runner_entry.py" "$@"
 }
+# The switches the checks read, exported first: one set in this shell but not exported -- say
+# REVIEW_USE_AGY=0 -- is not seen by the helper, and agy would be detected anyway.
+export AGY_MODEL REVIEW_USE_AGY REVIEW_USE_GEMINI MMCRA_SKIP_AGY_SANDBOX_CHECK \
+  MMCRA_SKIP_CODEX_SANDBOX_CHECK
 
 # codex: only once its sandbox is shown to refuse a write (no model call). MMCRA_SKIP_CODEX_SANDBOX_CHECK=1
 # (or true/yes/on -- not 0) skips the check on a host that is already a sandbox.
 if $HAS_CODEX; then review_helper codex-check || HAS_CODEX=false; fi
 
-# agy (Antigravity CLI): on wherever it is installed; REVIEW_USE_AGY=0 (or false/no/off, or empty) switches it off. The model is
+# agy (Antigravity CLI): on wherever it is installed; REVIEW_USE_AGY set to anything but 1/true/yes/on switches it off. The model is
 # AGY_MODEL if set, else the best Gemini model `agy models` lists for this sign-in (newest version,
 # then Pro/Argon over Flash over Lite, then highest effort) -- picked fresh each run, so a newer
 # model is used once the plan has it. Only true once the sandbox check has passed (no model call).
@@ -143,7 +148,7 @@ Bedrock opt-in precedence (PREFER_HERMES=true), used for regulated codebases tha
 
 | CLI | Non-interactive | Read-only | Input | Output |
 |---|---|---|---|---|
-| `claude` | `-p` | `--allowedTools "Read Grep Glob"` **plus** `--disallowedTools "Edit Write MultiEdit NotebookEdit Bash WebFetch WebSearch"`, `--strict-mcp-config` (no MCP servers) and `--setting-sources user` (no project hooks) -- `--allowedTools` alone only skips the permission prompt, it does *not* confine the agent | stdin (`< prompt.txt`) | `--output-format json` wraps in `{"result":"..."}` |
+| `claude` | `-p` | `--allowedTools "Read Grep Glob"` **plus** `--disallowedTools "Edit Write MultiEdit NotebookEdit Bash WebFetch WebSearch"`, `--strict-mcp-config` (no MCP servers), `--setting-sources user` (no project hooks) and `--permission-mode dontAsk` -- `--allowedTools` alone only skips the permission prompt, it does *not* confine the agent | stdin (`< prompt.txt`) | `--output-format json` wraps in `{"result":"..."}` |
 | `codex` | `codex exec` **plus `-s read-only` and `-c approvals_reviewer="user"`** (in both the convergence loop and this runner) -- both are pinned by the tool and neither is optional: no sandbox flag was passed at all before, and `-s read-only` on its own is silently overridden by a global `approvals_reviewer = "auto_review"` (see docs/codex-sandbox.md). Codex is also canary-tested at launch and its slot is DROPPED if the sandbox does not actually refuse a write (optional `-m <model> -c model_reasoning_effort=<level>` -- override via `CODEX_MODEL`, `CODEX_REASONING_EFFORT`; `=high` is the "GPT-5.5 Pro" equivalent) | verified read-only, not assumed | stdin (file) | `-o <file>` writes last message |
 | `gemini` | `-p` | `--model <m> --approval-mode plan --skip-trust` (default `<m>` is `gemini-2.5-flash` for free-tier compatibility; override via `GEMINI_MODEL`) | stdin (file) | stdout (text, may have fences) |
 | `agy` | `--input-format stream-json --output-format stream-json` (no `-p`: the prompt is one JSON line on stdin, because a single argument is capped at 128 KB) **plus `--sandbox --disable-slash-commands`**, pinned. On by default where installed; `REVIEW_USE_AGY=0` switches it off. Model: `AGY_MODEL` if set, else the best Gemini model `agy models` lists, picked each run. agy has no deny list and was measured writing outside its workspace, so it runs under **bubblewrap** (see docs/agy-sandbox.md), verified at startup without a model call and again before each launch; the slot goes to its next backend if that fails. The prompt opens with a no-tools preamble: a refused tool call ends agy's turn with no answer | bubblewrap read-only filesystem, verified; `--sandbox --disable-slash-commands` (no `--mode=plan`: it is a slash command, so a no-op once expansion is off) | stdin (one stream-json line) | stream-json; the last `result` event carries `structured_output` (enforced by `--json-schema`) |
@@ -419,7 +424,7 @@ Lens: code vs signed artifacts, manifest drift, feature count mismatches, fallba
 **Launching and waiting must happen inside a SINGLE shell, and that shell must not be a
 foreground Bash tool call.**
 
-Each reviewer is wrapped in `timeout 600`, so a full round takes up to ten minutes. A foreground
+Each reviewer runs under `timeout --foreground -k 10 "$REVIEWER_TIMEOUT"` (600 seconds by default), and the watchdog gives up at REVIEWER_TIMEOUT+90, so a full round takes up to about eleven and a half minutes. A foreground
 Bash tool call defaults to a 120 second timeout and is capped at 600 seconds. So a naive
 "launch with `&`, then `wait`" in one foreground call is killed at two minutes, while the
 backgrounded reviewers survive detached and keep writing output. The orchestrator is then left in
@@ -465,8 +470,12 @@ if [ -z "${MMCRA_OWN_SESSION:-}" ] && command -v setsid >/dev/null 2>&1; then
   setsid bash "$0" "$@" &
   inner=$!
   trap 'kill -TERM "$inner" 2>/dev/null' INT TERM HUP QUIT
-  status=0
-  while kill -0 "$inner" 2>/dev/null; do wait "$inner"; status=$?; done
+  # Waited for at least once, to collect its status even if it has already exited; again while
+  # it lives, since a forwarded signal ends a wait early.
+  while :; do
+    wait "$inner"; status=$?
+    kill -0 "$inner" 2>/dev/null || break
+  done
   exit "$status"
 fi
 # Absolute: the agy job changes into its workspace before its redirections are opened, and a
@@ -482,11 +491,14 @@ REVIEW_ROOT="$PWD"
 # A private copy of that code and the result schema, taken before any reviewer starts: a reviewer
 # with a file tool (hermes -t file --yolo) can write the checkout, and the runner goes on running
 # this code -- extraction among it -- after the reviewers have.
+# Links followed (-L): copied as links, a module could still be read from the checkout.
 HELPER_ROOT="$(mktemp -d)" && HELPER_ROOT="$(cd "$HELPER_ROOT" && pwd -P)" \
   && mkdir -p "$HELPER_ROOT/scripts" "$HELPER_ROOT/docs" \
-  && cp -R "$REVIEW_ROOT/scripts/review_loop" "$HELPER_ROOT/scripts/" \
-  && cp "$REVIEW_ROOT/docs/ensemble_review_result_schema.json" "$HELPER_ROOT/docs/" \
-  || { echo "ERROR: could not copy the runner's helpers"; exit 1; }
+  && cp -RL "$REVIEW_ROOT/scripts/review_loop" "$HELPER_ROOT/scripts/" \
+  && cp -L "$REVIEW_ROOT/docs/ensemble_review_result_schema.json" "$HELPER_ROOT/docs/" \
+  || { echo "ERROR: could not copy the runner's helpers"; rm -rf -- "${HELPER_ROOT:-}"; exit 1; }
+# Removed by finish_round from the moment it is set as the EXIT trap; until then, by this.
+trap 'rm -rf -- "${HELPER_ROOT:-}" "${OUT_DIR:-}"' EXIT
 review_helper() {
   python3 -I "$HELPER_ROOT/scripts/review_loop/runner_entry.py" "$@"
 }
@@ -538,8 +550,9 @@ publish_outputs() {
 # write files in $REVIEW_TMP, and a planted pid-N of 1 would have the runner signal every process
 # the user owns. JOB_PID holds each reviewer's job, set by its launcher, which runs in this shell,
 # and JOB_BACKEND the CLI that decides how its output is read; the pid-N and backend-N.txt files
-# are written only for watching from another shell. AGY_SCRATCH lists agy's
-# scratch -- its workspace and a copy of its sign-in token -- which the job removes when agy exits;
+# are written only for watching from another shell. SCRATCH lists the scratch directories --
+# agy's workspace and a copy of its sign-in token, gemini's workspace -- which the agy job removes
+# when agy exits;
 # a job killed by the watchdog or the sweep never gets there, and neither does one whose runner is
 # interrupted, so the runner removes it too: after the sweep, and on any exit. An interrupted runner
 # also takes down the reviewers it started rather than leaving them running.
@@ -550,10 +563,10 @@ publish_outputs() {
 # behind unreachable once timeout had exited. bwrap's sandbox dies with bwrap (--die-with-parent).
 # TERM first, then KILL for whatever ignored it.
 JOB_PID=()
-JOB_BACKEND=()   # which CLI ran each slot, for reading its output: agy's stream only from agy
+JOB_BACKEND=()   # which CLI ran each slot, which decides how its output is read (unwrap_envelope)
 JOB_OUT=()       # the one file each slot's CLI writes its answer to, the only one read for it
 JOB_PROVIDER=()  # whose model answers each slot, for the diversity count
-AGY_SCRATCH=()
+SCRATCH=()
 kill_jobs() {
   local sig
   for sig in TERM KILL; do
@@ -614,7 +627,7 @@ fi
 finish_round() {
   trap '' INT TERM HUP QUIT
   kill_jobs 1 2 3 4
-  remove_agy_scratch
+  remove_scratch
   rm -rf -- "$HELPER_ROOT"
   [ -n "${OUT_DIR:-}" ] || return 0
   # Once: a second try after a failed one would remove the copies the warning points to.
@@ -625,14 +638,14 @@ finish_round() {
     echo "WARNING: the reviewers' outputs could not be copied into $REVIEW_TMP; kept in $OUT_DIR"
   fi
 }
-# remove_agy_scratch: agy's scratch gone, or named: one left behind may hold a copy of its sign-in
+# remove_scratch: agy's scratch gone, or named: one left behind may hold a copy of its sign-in
 # token, and an rm that failed said nothing. Made writable first, in case agy made it read-only.
-remove_agy_scratch() {
-  [ "${#AGY_SCRATCH[@]}" -eq 0 ] && return 0
-  chmod -R u+rwx -- "${AGY_SCRATCH[@]}" 2>/dev/null
-  rm -rf -- "${AGY_SCRATCH[@]}"
+remove_scratch() {
+  [ "${#SCRATCH[@]}" -eq 0 ] && return 0
+  chmod -R u+rwx -- "${SCRATCH[@]}" 2>/dev/null
+  rm -rf -- "${SCRATCH[@]}"
   local dir
-  for dir in "${AGY_SCRATCH[@]}"; do
+  for dir in "${SCRATCH[@]}"; do
     [ -e "$dir" ] && echo "WARNING: could not remove $dir (agy's scratch); remove it by hand"
   done
   return 0
@@ -673,6 +686,7 @@ launch_hermes() {
     mark_done "$num" $?; } &
   JOB_PID[$num]=$!
   JOB_OUT[$num]="$REVIEW_TMP/stdout-$num.txt"
+  JOB_BACKEND[$num]=hermes
   JOB_PROVIDER[$num]=anthropic
   echo $! > "$REVIEW_TMP/pid-$num"
   echo "R$num: Hermes ($hermes_model) [Bedrock]"
@@ -684,7 +698,7 @@ launch_hermes() {
 #   Checked here, missing or not a schema: agy rejects a bad one only after launch, when the slot
 #   can no longer go anywhere else.
 # - An empty workspace outside the repository, and a directory for agy's state. Each is listed in
-#   AGY_SCRATCH the moment it exists, and the runner removes them whatever happens next: no return
+#   SCRATCH the moment it exists, and the runner removes them whatever happens next: no return
 #   path has a cleanup of its own to forget. Resolved, because a relative TMPDIR names a different
 #   place once the job has cd'd.
 # - The wrapper in two parts, `env -i VAR=val...` and bwrap's, so that timeout runs between them:
@@ -696,11 +710,11 @@ launch_hermes() {
 #   after every way this launch can still fall through to another backend, and in one step: the
 #   prompt file is changed only once the input line is written.
 AGY_SCHEMA="" AGY_WS="" AGY_STATE="" AGY_IN="" AGY_ENVP=() AGY_BWRAP=()
-# agy_scratch VAR: a new temporary directory, listed in AGY_SCRATCH, resolved, into VAR.
-agy_scratch() {
+# make_scratch VAR: a new temporary directory, listed in SCRATCH, resolved, into VAR.
+make_scratch() {
   local dir
   dir="$(mktemp -d)" && [ -n "$dir" ] || return 1
-  AGY_SCRATCH+=("$dir")
+  SCRATCH+=("$dir")
   dir="$(cd "$dir" && pwd -P)" || return 1
   printf -v "$1" %s "$dir"
 }
@@ -708,7 +722,7 @@ prepare_agy() {
   local num=$1 prompt_file=$2 wrap=()
   AGY_SCHEMA="$(review_helper agy-schema "$HELPER_ROOT/docs/ensemble_review_result_schema.json")" \
     || { echo "R$num: SKIPPED (agy result schema unusable)"; return 1; }
-  { agy_scratch AGY_WS && agy_scratch AGY_STATE; } \
+  { make_scratch AGY_WS && make_scratch AGY_STATE; } \
     || { echo "R$num: SKIPPED (no temporary directory for agy)"; return 1; }
   case "$AGY_WS/" in
     "$(cd "$REVIEW_ROOT" && pwd -P)"/*)
@@ -769,16 +783,18 @@ launch_cli() {
       # --strict-mcp-config with no --mcp-config: none of the user's MCP servers, each a tool the
       # deny list does not name. --setting-sources user: not the project's settings, whose hooks,
       # apiKeyHelper and env -- chosen by the repository under review -- run commands no deny
-      # list covers.
+      # list covers. --permission-mode dontAsk: only what is allowed, whatever mode the user's
+      # settings choose (bypassPermissions would run anything).
       { timeout --foreground -k 10 "$REVIEWER_TIMEOUT" claude -p --model "$model" \
           --allowedTools "$tools" "${CLAUDE_DENY[@]}" \
-          --strict-mcp-config --setting-sources user \
+          --strict-mcp-config --setting-sources user --permission-mode dontAsk \
           --output-format json < "$prompt_file" \
           1>"$OUT_DIR/claude-raw-$num.json" \
           2>"$OUT_DIR/stderr-$num.txt"
         mark_done "$num" $?; } &
       JOB_PID[$num]=$!
       JOB_OUT[$num]="$REVIEW_TMP/claude-raw-$num.json"
+      JOB_BACKEND[$num]=claude
       JOB_PROVIDER[$num]=anthropic
       echo $! > "$REVIEW_TMP/pid-$num"
       echo "R$num: Claude CLI ($model, tools: $tools) [Claude subscription]"
@@ -804,6 +820,7 @@ launch_cli() {
         mark_done "$num" $?; } &
       JOB_PID[$num]=$!
       JOB_OUT[$num]="$REVIEW_TMP/codex-out-$num.txt"
+      JOB_BACKEND[$num]=codex
       JOB_PROVIDER[$num]=openai
       echo $! > "$REVIEW_TMP/pid-$num"
       local label="${CODEX_MODEL:-gpt-5.5}"
@@ -818,13 +835,15 @@ launch_cli() {
       # you have paid quota.
       # In an empty directory of its own, not the repository under review, whose
       # .gemini/settings.json -- chosen by the change being reviewed -- it would load.
-      case "$OUT_DIR/" in
+      # Its own, not inside OUT_DIR, where the other slots' outputs are.
+      local gemini_ws
+      make_scratch gemini_ws || { echo "R$num: SKIPPED (no directory for gemini)"; return 1; }
+      case "$gemini_ws/" in
         "$(cd "$REVIEW_ROOT" && pwd -P)"/*)
-          echo "R$num: SKIPPED (gemini's directory $OUT_DIR is inside the repo; check TMPDIR)"
+          echo "R$num: SKIPPED (gemini's directory $gemini_ws is inside the repo; check TMPDIR)"
           return 1 ;;
       esac
-      mkdir -p "$OUT_DIR/ws-$num" || { echo "R$num: SKIPPED (no directory for gemini)"; return 1; }
-      { cd "$OUT_DIR/ws-$num" && timeout --foreground -k 10 "$REVIEWER_TIMEOUT" gemini \
+      { cd "$gemini_ws" && timeout --foreground -k 10 "$REVIEWER_TIMEOUT" gemini \
           --model "${GEMINI_MODEL:-gemini-2.5-flash}" \
           --approval-mode plan --skip-trust \
           < "$prompt_file" \
@@ -833,6 +852,7 @@ launch_cli() {
         mark_done "$num" $?; } &
       JOB_PID[$num]=$!
       JOB_OUT[$num]="$REVIEW_TMP/stdout-$num.txt"
+      JOB_BACKEND[$num]=gemini
       JOB_PROVIDER[$num]=google
       echo $! > "$REVIEW_TMP/pid-$num"
       echo "R$num: Gemini CLI (${GEMINI_MODEL:-gemini-2.5-flash}) [Google AI Studio free tier]"
@@ -852,7 +872,7 @@ launch_cli() {
       # Every descriptor the runner holds beyond 0-2 closed first: bwrap would hand each into
       # the sandbox, where the check -- which runs from Python, with them closed -- never saw it.
       { for fd in /proc/$BASHPID/fd/*; do
-          fd=${fd##*/}; [ "$fd" -gt 2 ] && eval "exec $fd>&-"
+          fd=${fd##*/}; [[ $fd =~ ^[0-9]+$ ]] && [ "$fd" -gt 2 ] && eval "exec $fd>&-"
         done 2>/dev/null
         cd "$AGY_WS" && "${AGY_ENVP[@]}" timeout --foreground -k 10 "$REVIEWER_TIMEOUT" "${AGY_BWRAP[@]}" agy \
           --sandbox --disable-slash-commands \
@@ -894,8 +914,8 @@ fi
 # R1: Security (Opus) -- local CLI by default (free), Hermes only when opted in
 if $PREFER_HERMES && $HAS_HERMES; then
   launch_hermes 1 us.anthropic.claude-opus-4-6-v1 "$REVIEW_TMP/prompt-1.txt"
-elif $HAS_CLAUDE; then
-  launch_cli 1 claude-opus "$REVIEW_TMP/prompt-1.txt"
+elif $HAS_CLAUDE && launch_cli 1 claude-opus "$REVIEW_TMP/prompt-1.txt"; then
+  :  # launched; if claude could not be set up, Hermes is next, as the routing tables say
 elif $HAS_HERMES; then
   launch_hermes 1 us.anthropic.claude-opus-4-6-v1 "$REVIEW_TMP/prompt-1.txt"
 fi
@@ -906,8 +926,8 @@ if $PREFER_HERMES && $HAS_HERMES; then
   launch_hermes 2 us.anthropic.claude-haiku-4-5-20251001-v1:0 "$REVIEW_TMP/prompt-2.txt"
 elif $HAS_CODEX; then
   launch_cli 2 codex "$REVIEW_TMP/prompt-2.txt"
-elif $HAS_CLAUDE; then
-  launch_cli 2 claude-haiku "$REVIEW_TMP/prompt-2.txt"
+elif $HAS_CLAUDE && launch_cli 2 claude-haiku "$REVIEW_TMP/prompt-2.txt"; then
+  :  # launched; if claude could not be set up, Hermes is next
 elif $HAS_HERMES; then
   launch_hermes 2 us.anthropic.claude-haiku-4-5-20251001-v1:0 "$REVIEW_TMP/prompt-2.txt"
 fi
@@ -928,8 +948,8 @@ elif ${HAS_AGY:-false} && { ! $PREFER_HERMES || review_helper flag REVIEW_USE_AG
 elif $HAS_GEMINI && review_helper flag REVIEW_USE_GEMINI \
      && launch_cli 3 gemini "$REVIEW_TMP/prompt-3.txt"; then
   :  # launched; if gemini could not be set up, the next backend runs, as for agy
-elif $HAS_CLAUDE; then
-  launch_cli 3 claude-sonnet "$REVIEW_TMP/prompt-3.txt"
+elif $HAS_CLAUDE && launch_cli 3 claude-sonnet "$REVIEW_TMP/prompt-3.txt"; then
+  :  # launched; if claude could not be set up, Hermes is next
 elif $HAS_HERMES; then
   launch_hermes 3 us.anthropic.claude-sonnet-4-6-v1 "$REVIEW_TMP/prompt-3.txt"
 fi
@@ -937,8 +957,8 @@ fi
 # R4: Spec-contract (Opus) -- local CLI by default (free), Hermes only when opted in
 if $PREFER_HERMES && $HAS_HERMES; then
   launch_hermes 4 us.anthropic.claude-opus-4-6-v1 "$REVIEW_TMP/prompt-4.txt"
-elif $HAS_CLAUDE; then
-  launch_cli 4 claude-opus "$REVIEW_TMP/prompt-4.txt"
+elif $HAS_CLAUDE && launch_cli 4 claude-opus "$REVIEW_TMP/prompt-4.txt"; then
+  :  # launched; if claude could not be set up, Hermes is next, as the routing tables say
 elif $HAS_HERMES; then
   launch_hermes 4 us.anthropic.claude-opus-4-6-v1 "$REVIEW_TMP/prompt-4.txt"
 fi
@@ -985,7 +1005,7 @@ echo "All reviewer slots resolved after $((SECONDS - round_start))s"
 # group, helpers included, so one group kill per slot collects them. Harmless when it is gone.
 kill_jobs 1 2 3 4
 # Now, not at exit: a killed agy job never reached its own cleanup of the token copy.
-remove_agy_scratch
+remove_scratch
 # Every reviewer is stopped: nothing is left to write what is copied.
 publish_outputs || echo "WARNING: could not copy the reviewers' outputs into $REVIEW_TMP"
 
@@ -1078,7 +1098,7 @@ done
 tail -1 "$REVIEW_TMP/round.log" 2>/dev/null
 ```
 
-A reviewer is wrapped in `timeout 600`, so a round can outlast one 570 second wait. If the output
+Each reviewer runs under `timeout --foreground -k 10 "$REVIEWER_TIMEOUT"` (600 seconds by default), and the watchdog gives up at REVIEWER_TIMEOUT+90, so a round can outlast one 570 second wait. If the output
 still says "still running", call the SAME block again - do not relaunch the runner, and do not treat
 a second wait as a sign anything is wrong.
 
@@ -1093,7 +1113,7 @@ Report what the status lines say rather than guessing. "Three of four are still 
 thing to tell a waiting human; silence is not.
 
 
-**Tool restriction**: Hermes uses `-t file --yolo`: the file toolset, which can write -- the data stays in your AWS account, but writes are not prevented, only reported by the convergence loop's tamper check -- full mode does not check. Claude CLI: `--allowedTools "Read Grep Glob"` plus `--disallowedTools` for every tool that writes, runs a command or reaches the network, `--strict-mcp-config` (no MCP servers) and `--setting-sources user` (no project hooks), since `--allowedTools` alone does not confine (a slot given writing tools on purpose with `REVIEWER_TOOLS_N` has only those taken off the deny list). Codex: both paths pin `-s read-only` and `approvals_reviewer="user"` and canary-test them before use. Gemini uses `--approval-mode plan` (read-only). agy runs under bubblewrap, verified before use (what it closes and what it does not: docs/agy-sandbox.md), plus `--sandbox --disable-slash-commands`. Extraction errors logged to `$REVIEW_TMP/extract-result-N.err`.
+**Tool restriction**: Hermes uses `-t file --yolo`: the file toolset, which can write -- the data stays in your AWS account, but writes are not prevented, only reported by the convergence loop's tamper check -- full mode does not check. Claude CLI: `--allowedTools "Read Grep Glob"` plus `--disallowedTools` for every tool that writes, runs a command or reaches the network, `--strict-mcp-config` (no MCP servers), `--setting-sources user` (no project hooks) and `--permission-mode dontAsk`, since `--allowedTools` alone does not confine (a slot given writing tools on purpose with `REVIEWER_TOOLS_N` has only those taken off the deny list). Codex: both paths pin `-s read-only` and `approvals_reviewer="user"` and canary-test them before use. Gemini uses `--approval-mode plan` (read-only). agy runs under bubblewrap, verified before use (what it closes and what it does not: docs/agy-sandbox.md), plus `--sandbox --disable-slash-commands`. Extraction errors logged to `$REVIEW_TMP/extract-result-N.err`.
 
 ## 7. Collect and validate results
 

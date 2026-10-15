@@ -2132,17 +2132,17 @@ class TestRunnerScript:
         (locked / "inner").chmod(0o500)
         script = tmp_path / "t.sh"
         script.write_text(
-            f"AGY_SCRATCH=({shlex.quote(str(locked))})\n"
-            + shell_function(runner, "remove_agy_scratch")
-            + "remove_agy_scratch\n"
-            + 'rm() { :; }\nmkdir -p "${AGY_SCRATCH[0]}"\nremove_agy_scratch\n'
+            f"SCRATCH=({shlex.quote(str(locked))})\n"
+            + shell_function(runner, "remove_scratch")
+            + "remove_scratch\n"
+            + 'rm() { :; }\nmkdir -p "${SCRATCH[0]}"\nremove_scratch\n'
         )
         done = subprocess.run(
             ["bash", str(script)], capture_output=True, text=True, timeout=30
         )
         # Made writable and removed; then, with rm made to fail, named.
         assert done.stdout.count("WARNING: could not remove") == 1, done.stdout
-        assert "  remove_agy_scratch\n" in shell_function(runner, "finish_round")
+        assert "  remove_scratch\n" in shell_function(runner, "finish_round")
 
     @pytest.mark.parametrize("check", ["pgrep", "proc"])
     def test_the_cleanup_kills_from_inside_its_trap(
@@ -2175,7 +2175,7 @@ class TestRunnerScript:
         runner = runner_script()
         script = tmp_path / "t.sh"
         script.write_text(
-            "AGY_SCRATCH=()\n"
+            "SCRATCH=()\n"
             # Stands in for the real sweep, with a second TERM arriving halfway.
             + "kill_jobs() { kill -TERM $$; sleep 0.3; echo CLEANED; }\n"
             + shell_function(runner, "finish_round")
@@ -2289,8 +2289,8 @@ class TestRunnerScript:
         script = tmp_path / "t.sh"
         script.write_text(
             f"REVIEW_TMP={shlex.quote(str(tmp))}\nOUT_DIR={shlex.quote(str(out))}\n"
-            "AGY_SCRATCH=()\nkill_jobs() { :; }\n"
-            + shell_function(runner, "remove_agy_scratch")
+            "SCRATCH=()\nkill_jobs() { :; }\n"
+            + shell_function(runner, "remove_scratch")
             + flags
             + shell_function(runner, "publish_outputs")
             + shell_function(runner, "finish_round")
@@ -2401,7 +2401,8 @@ class TestRunnerScript:
         runner = runner_script()
         assert 'local tools="${!tools_var:-Read Grep Glob}"' in runner
         assert '--allowedTools "$tools" "${CLAUDE_DENY[@]}" \\\n' in runner
-        assert "--strict-mcp-config --setting-sources user \\\n" in runner
+        flags = "--strict-mcp-config --setting-sources user --permission-mode dontAsk"
+        assert flags + " \\\n" in runner
         script = tmp_path / "t.sh"
         script.write_text(
             f"HELPER_ROOT={shlex.quote(str(REPO_ROOT))}\n"
@@ -2435,6 +2436,8 @@ class TestRunnerScript:
         assert "--strict-mcp-config" in cmd
         # Nor the project's settings: measured, a project SessionStart hook ran.
         assert cmd[cmd.index("--setting-sources") + 1] == "user"
+        # Nor the mode the user's settings choose: bypassPermissions runs anything.
+        assert cmd[cmd.index("--permission-mode") + 1] == "dontAsk"
         denied = cmd[cmd.index("--disallowedTools") + 1].split()
         assert {"Bash", "Write", "WebFetch", "WebSearch"} <= set(denied)
 

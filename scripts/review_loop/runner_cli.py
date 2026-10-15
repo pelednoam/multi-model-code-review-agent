@@ -151,7 +151,7 @@ def _extract(raw: str, out: str, slot: str, backend: str = "") -> int:
             return 1
         text = agy_answer(result)
     else:
-        text = unwrap_envelope(text)
+        text = unwrap_envelope(text, backend)
     review = validate_result(parse_review(text), int(slot), EXPECTED_REVIEWERS)
     if review is None:
         print("no review in the output: no JSON object with the required keys and a"

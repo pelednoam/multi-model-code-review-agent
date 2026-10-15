@@ -129,17 +129,21 @@ def agy_answer(result: dict[str, Any] | None) -> str:
     return str(result.get("response") or "")
 
 
-def unwrap_envelope(text: str, agy_ran: bool = False) -> str:
-    """Take the review out of the envelope its CLI wrapped it in.
+def unwrap_envelope(text: str, backend: str) -> str:
+    """Take the review out of the envelope ``backend``, the CLI that wrote it,
+    wrapped it in.
 
     ``claude -p --output-format json`` wraps it in ``{"result": "<text>"}``. agy's
-    stream-json -- read as such only when ``agy_ran`` -- ends in a ``result`` event
-    whose ``structured_output`` is the schema-checked object, with ``response`` --
-    free text -- as the fallback; anything short of a finished turn is "". Anything
-    else is returned as-is.
+    stream-json ends in a ``result`` event whose ``structured_output`` is the
+    schema-checked object, with ``response`` -- free text -- as the fallback;
+    anything short of a finished turn is "". Every other CLI's is its answer as it
+    stands: read as claude's, a codex answer shaped ``{"result": "..."}`` had that
+    string taken for its review.
     """
-    if agy_ran:
+    if backend == "agy":
         return agy_answer(agy_result(text))
+    if backend != "claude":
+        return text
     try:
         wrapper = json.loads(text)
     except ValueError:
@@ -176,7 +180,7 @@ def _extract_from(
         raw = output.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
-    text = unwrap_envelope(raw, backend == "agy")
+    text = unwrap_envelope(raw, backend)
     d = parse_review(text)
     if d is None:
         return None

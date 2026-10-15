@@ -68,7 +68,7 @@ review missed.
 | Artifact/manifest audit | no | yes | yes | yes |
 | Coverage-gap detection | no | yes | yes | yes |
 | Per-reviewer attribution | no | 2 lenses | 4 lenses | 4 lenses |
-| Write isolation | no | no | `--disallowedTools`; codex and agy sandboxed | none: `-t file --yolo` can write; only the convergence loop's tamper check reports it (full mode does not check) |
+| Write isolation | no | no | `--disallowedTools`; codex and agy sandboxed | none for hermes (see the backends table) |
 | Structured JSON schema | no | no | yes | yes |
 | Review packet persistence | no | no | yes | yes |
 | Cross-provider models | no | no | with Codex + agy/Gemini | any provider |
@@ -447,7 +447,9 @@ behavior instead of specified behavior.
 **Quick mode** (free): just Claude Code. No additional setup.
 
 **Full mode**: at least `claude` or `hermes` must be installed for
-Anthropic reviewers. For cross-provider diversity, also install:
+Anthropic reviewers, and bash 4.4 or later for its runner (it checks, and
+exits otherwise). macOS ships bash 3.2 as `/bin/bash`: `brew install bash`, and
+run the runner with that one. For cross-provider diversity, also install:
 - [Codex CLI](https://github.com/openai/codex) for GPT-5.5
   (uses ChatGPT subscription, no API credits). The pipeline uses
   whatever model + reasoning effort your `~/.codex/config.toml` has
@@ -473,8 +475,9 @@ Anthropic reviewers. For cross-provider diversity, also install:
 - [Antigravity CLI](https://antigravity.google/docs/cli/headless/) (`agy`)
   for Google's frontier models, e.g. Gemini 4 Argon, in the readability
   slot. On by default wherever it is installed, ahead of the gemini CLI;
-  `REVIEW_USE_AGY=0` (or `false`, `no`, `off`, or empty) switches it off. A project
-  that pinned Bedrock (`.use-hermes`) gets agy only with `REVIEW_USE_AGY=1`.
+  `REVIEW_USE_AGY` set to anything but `1`/`true`/`yes`/`on` switches it off. A project
+  that pinned Bedrock (`.use-hermes`, `--prefer-hermes`, or a "bedrock review"
+  request) gets agy only with `REVIEW_USE_AGY=1`.
   Setup is install and sign in:
   ```bash
   curl -fsSL https://antigravity.google/cli/install.sh | bash

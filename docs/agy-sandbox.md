@@ -72,8 +72,9 @@ Before each launch, what the sandbox can reach is checked again: a loop runs for
 half an hour, and a bus, socket or X server can appear after startup. The slot goes
 to its next backend if anything fails.
 
-A project pinned to Bedrock (`.use-hermes`) does not run agy at all, the check
-included, unless `REVIEW_USE_AGY=1`.
+A run opted in to Bedrock -- `.use-hermes` in the project, `--prefer-hermes`, or a
+"hermes"/"bedrock review" request in full mode -- does not run agy at all, the
+check included, unless `REVIEW_USE_AGY=1`.
 
 ## What it does not close
 
@@ -127,9 +128,9 @@ next backend.
 
 ## Switches
 
-- `REVIEW_USE_AGY=0` (or `false`, `no`, `off`, or set but empty): do not use agy.
-  It is on by default wherever it is installed, and then sends the scrubbed diff and
-  audit to Google. Every round that does so says so.
+- `REVIEW_USE_AGY` set to anything but `1`, `true`, `yes` or `on` (`0`, empty, a
+  typo): do not use agy. It is on by default wherever it is installed, and then sends
+  the scrubbed diff and audit to Google. Every round that does so says so.
 - `REVIEW_USE_AGY=1`: use agy even in a project pinned to Bedrock.
 - `MMCRA_SKIP_AGY_SANDBOX_CHECK=1` (or `true`, `yes`, `on`): run agy without the
   wrapper, on a host that is already a sandbox. `0`, or any other value, keeps the

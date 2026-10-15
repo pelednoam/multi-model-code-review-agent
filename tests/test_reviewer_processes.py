@@ -17,7 +17,8 @@ from scripts.review_loop import reviewers
 
 
 class TestReviewerProcesses(AgyCase):
-    """A reviewer's process: launched, waited for, stopped -- once, not per subclass."""
+    """A reviewer's process: launched, waited for, stopped. On AgyCase for its helpers
+    and fixtures; a class of its own so that these run once."""
 
     @pytest.mark.usefixtures("on")
     def test_what_appeared_since_startup_is_checked_before_each_launch(

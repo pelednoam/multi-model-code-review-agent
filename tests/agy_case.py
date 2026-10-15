@@ -151,7 +151,7 @@ class AgyCase:
         script = tmp_path / "t.sh"
         script.write_text(
             'REVIEW_ROOT="$1"\nHELPER_ROOT="$1"\nOUT_DIR="$(dirname "$2")"\n'
-            + "AGY_SCRATCH=()\n"
+            + "SCRATCH=()\n"
             + 'AGY_SCHEMA="" AGY_WS="" AGY_STATE="" AGY_ENVP=() AGY_BWRAP=()\n'
             + real
             + "review_helper() {\n"
@@ -162,11 +162,11 @@ class AgyCase:
             + "  esac\n"
             + '  real_review_helper "$@"\n'
             + "}\n"
-            + shell_function(runner, "agy_scratch")
+            + shell_function(runner, "make_scratch")
             + shell_function(runner, "prepare_agy")
             + 'prepare_agy 3 "$2"; rc=$?\n'
             + 'printf "\\0"\n'
-            + "for v in AGY_SCRATCH AGY_ENVP AGY_BWRAP; do\n"
+            + "for v in SCRATCH AGY_ENVP AGY_BWRAP; do\n"
             + '  declare -n a=$v; printf "%s\\0" "@$v" "${a[@]}"; unset -n a\n'
             + "done\n"
             + "exit $rc\n"
@@ -180,7 +180,7 @@ class AgyCase:
         )  # fmt: skip
         parts: dict[str, list[str]] = {}
         for item in done.stdout.split("\0"):
-            if item.startswith("@AGY_"):
+            if item in ("@SCRATCH", "@AGY_ENVP", "@AGY_BWRAP"):
                 key = item[1:]
                 parts[key] = []
             elif item and parts:

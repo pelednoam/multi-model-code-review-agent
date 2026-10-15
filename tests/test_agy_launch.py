@@ -292,7 +292,7 @@ class TestAgyLaunch(AgyCase):
         assert launch in runner_script()
         # The preamble went into the prompt file, and both scratch directories are listed.
         assert (tmp_path / "prompt-3.txt").read_text().startswith(agy.AGY_PREAMBLE)
-        assert len(parts["AGY_SCRATCH"]) == 2
+        assert len(parts["SCRATCH"]) == 2
 
     def test_an_unusable_schema_hands_the_slot_on(self, tmp_path: Path) -> None:
         # A root whose code is this checkout's but whose schema is not a schema.
@@ -303,11 +303,11 @@ class TestAgyLaunch(AgyCase):
         done, parts = self._run_prepare_agy(tmp_path, root=root)
         assert done.returncode == 1
         assert "SKIPPED (agy result schema unusable)" in done.stdout
-        assert parts["AGY_SCRATCH"] == []  # nothing made, nothing left behind
+        assert parts["SCRATCH"] == []  # nothing made, nothing left behind
 
     def test_scratch_is_listed_the_moment_it_exists(self, tmp_path: Path) -> None:
         # A launch that fails after making its directories leaves them to the runner,
-        # which removes whatever AGY_SCRATCH lists: no failure path cleans up alone.
+        # which removes whatever SCRATCH lists: no failure path cleans up alone.
         root = tmp_path / "root"
         (root / "docs").mkdir(parents=True)
         (root / "scripts").symlink_to(REPO_ROOT / "scripts")
@@ -315,7 +315,7 @@ class TestAgyLaunch(AgyCase):
         done, parts = self._run_prepare_agy(tmp_path, root=root, writable=False)
         assert done.returncode == 1, done.stdout
         assert "could not prepare agy's prompt" in done.stdout
-        assert len(parts["AGY_SCRATCH"]) == 2
+        assert len(parts["SCRATCH"]) == 2
 
     @pytest.mark.usefixtures("on")
     def test_a_host_that_is_already_a_sandbox_runs_agy_bare(
@@ -348,8 +348,10 @@ class TestAgyLaunch(AgyCase):
         target = tmp_path / "target"
         (target / ".tmp").mkdir(parents=True)
         monkeypatch.setattr(reviewers.tempfile, "tempdir", str(target / ".tmp"))
-        assert reviewers._outside_workspace(target) is None
-        assert reviewers._outside_workspace(tmp_path / "elsewhere") is not None
+        assert reviewers._empty_workspace_outside_repo(target) is None
+        assert (
+            reviewers._empty_workspace_outside_repo(tmp_path / "elsewhere") is not None
+        )
 
     def test_a_loop_started_from_root_still_gets_a_workspace(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -357,10 +359,10 @@ class TestAgyLaunch(AgyCase):
         # The cwd counted even with --repo given: from /, every workspace was inside it.
         monkeypatch.chdir("/")
         monkeypatch.setattr(reviewers.tempfile, "tempdir", str(tmp_path))
-        assert reviewers._outside_workspace(tmp_path / "repo") is not None
+        assert reviewers._empty_workspace_outside_repo(tmp_path / "repo") is not None
         # Without --repo, the cwd is the repository, and is still kept out.
         monkeypatch.chdir(tmp_path)
-        assert reviewers._outside_workspace() is None
+        assert reviewers._empty_workspace_outside_repo() is None
 
     def test_the_check_passes_with_a_trailing_slash_home_and_a_spaced_tmpdir(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -381,7 +383,9 @@ class TestAgyLaunch(AgyCase):
     ) -> None:
         monkeypatch.setenv("REVIEW_USE_AGY", "1")
         monkeypatch.setenv("AGY_MODEL", self.MODEL)
-        monkeypatch.setattr(reviewers, "_outside_workspace", lambda repo=None: None)
+        monkeypatch.setattr(
+            reviewers, "_empty_workspace_outside_repo", lambda repo=None: None
+        )
         _, seen = self._launch(monkeypatch, tmp_path)
         cmd = seen["cmd"]
         assert isinstance(cmd, list) and cmd[0] == "claude"

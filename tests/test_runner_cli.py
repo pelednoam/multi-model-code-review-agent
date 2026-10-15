@@ -36,7 +36,7 @@ class TestRunnerCli:
         assert doc.count('python3 -I "$PWD/' + self.ENTRY + '" "$@"') == 1
         # The runner's from a private copy taken before any reviewer starts.
         assert 'python3 -I "$HELPER_ROOT/' + self.ENTRY + '" "$@"' in runner_script()
-        assert 'cp -R "$REVIEW_ROOT/scripts/review_loop" "$HELPER_ROOT/scripts/"' in (
+        assert 'cp -RL "$REVIEW_ROOT/scripts/review_loop" "$HELPER_ROOT/scripts/"' in (
             runner_script()
         )
 
@@ -108,7 +108,7 @@ class TestRunnerCli:
         raw = tmp_path / "claude-raw-1.json"
         raw.write_text(json.dumps({"result": "Here:\n" + json.dumps(self.REVIEW)}))
         out = tmp_path / "result-1.json"
-        assert self._cli("extract", str(raw), str(out), "1").returncode == 0
+        assert self._cli("extract", str(raw), str(out), "1", "claude").returncode == 0
         # The reviewer is named by the slot, as the loop names it, not by the model.
         assert json.loads(out.read_text()) == {**self.REVIEW, "reviewer": "security"}
 
@@ -124,7 +124,9 @@ class TestRunnerCli:
                     {"result": json.dumps({**self.REVIEW, "findings": findings})}
                 )
             )
-            assert self._cli("extract", str(raw), str(out), "1").returncode == 1
+            assert (
+                self._cli("extract", str(raw), str(out), "1", "claude").returncode == 1
+            )
             assert not out.exists()
 
     def test_a_broken_schema_does_not_cost_the_other_reviewers(
@@ -142,7 +144,12 @@ class TestRunnerCli:
         raw = tmp_path / "claude-raw-1.json"
         raw.write_text(json.dumps({"result": json.dumps(self.REVIEW)}))
         out = tmp_path / "result-1.json"
-        assert self._cli("extract", str(raw), str(out), "1", root=root).returncode == 0
+        assert (
+            self._cli(
+                "extract", str(raw), str(out), "1", "claude", root=root
+            ).returncode
+            == 0
+        )
 
     def test_agys_error_reaches_the_err_file_without_terminal_escapes(
         self, tmp_path: Path
@@ -257,6 +264,15 @@ class TestRunnerCli:
 
         with pytest.raises(ValueError, match="not a usable result schema"):
             _check_schema_shape(schema, tmp_path / "s.json")
+
+    def test_a_valid_schema_without_the_shape_fails_with_jsonschema_too(
+        self, tmp_path: Path
+    ) -> None:
+        # A valid JSON Schema can still lack what a result needs; with jsonschema
+        # installed, the shape went unchecked.
+        schema = tmp_path / "s.json"
+        schema.write_text(json.dumps({"type": "object", "required": ["findings"]}))
+        assert self._cli("agy-schema", str(schema)).returncode == 1
 
     def test_the_real_schema_is_usable(self) -> None:
         done = self._cli("agy-schema", str(SCHEMA_PATH))

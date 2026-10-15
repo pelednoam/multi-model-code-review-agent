@@ -234,8 +234,10 @@ class TestAgyRouting(AgyCase):
 
     @pytest.mark.parametrize(
         ("value", "on"),
-        [(None, True), ("1", True), ("yes", True),
-         ("0", False), ("false", False), ("No", False), (" off ", False), ("", False)],
+        [(None, True), ("1", True), ("yes", True), ("ON", True),
+         ("0", False), ("false", False), ("No", False), (" off ", False), ("", False),
+         # A typo was read as on, and sent the diff to Google.
+         ("of", False), ("disabled", False)],
     )  # fmt: skip
     def test_every_value_that_reads_as_off_is_off(
         self, monkeypatch: pytest.MonkeyPatch, value: str | None, on: bool

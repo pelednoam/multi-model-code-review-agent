@@ -41,6 +41,14 @@ class _Box:
         self.wrap = wrap
         self.workspace = workspace
         self.stderr = ""
+        # Mount destinations only -- an environment value such as a PATH under HOME is
+        # not a mount. Paths, not strings: HOME=/home/user/ is the same directory.
+        # --tmpfs DEST, and --bind/--ro-bind SRC DEST: the only mounts it makes.
+        self.mounts = [
+            Path(wrap[i + (1 if arg == "--tmpfs" else 2)])
+            for i, arg in enumerate(wrap)
+            if arg == "--tmpfs" or arg.endswith("-bind")
+        ]
 
     def sh(self, script: str, **kw: Any) -> str:
         """What ``script`` printed inside the sandbox."""
@@ -56,18 +64,9 @@ class _Box:
 
     def mounted_under(self, root: Path) -> set[str]:
         """The names directly under ``root`` that the wrapper mounted there."""
-        # Mount destinations only -- an environment value such as a PATH under HOME is
-        # not a mount. Paths, not strings: HOME=/home/user/ is the same directory.
-        # --tmpfs DEST, and --bind/--ro-bind SRC DEST: the only mounts it makes.
-        dests = []
-        for i, arg in enumerate(self.wrap):
-            if arg == "--tmpfs":
-                dests.append(Path(self.wrap[i + 1]))
-            elif arg.endswith("-bind"):
-                dests.append(Path(self.wrap[i + 2]))
         return {
             d.relative_to(root).parts[0]
-            for d in dests
+            for d in self.mounts
             if d.is_relative_to(root) and d != root
         }
 

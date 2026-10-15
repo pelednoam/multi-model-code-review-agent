@@ -58,13 +58,13 @@ AGY_EGRESS = "agy sends the diff and audit to Google (REVIEW_USE_AGY=0 to stop)"
 def agy_enabled() -> bool:
     """Whether the agy slot is switched on: by default, wherever agy is installed.
 
-    ``REVIEW_USE_AGY=0`` switches it off, and so does every other value that reads as
-    off -- ``false``, ``no``, ``off``, empty -- because the wrong reading of this one
-    sends the diff to a provider the user meant to keep it from. A machine without agy,
-    or where its sandbox cannot be proven, falls through to the next backend for slot 3.
+    Unset, or a yes (``1``, ``true``, ``yes``, ``on``): on. Anything else is off --
+    ``0``, ``false``, ``no``, ``off``, empty, and a value it does not know, such as a
+    typo -- because the wrong reading of this one sends the diff to a provider the
+    user meant to keep it from. A machine without agy, or where its sandbox cannot be
+    proven, falls through to the next backend for slot 3.
     """
-    value = os.environ.get("REVIEW_USE_AGY")
-    return value is None or value.strip().lower() not in ("0", "false", "no", "off", "")
+    return "REVIEW_USE_AGY" not in os.environ or env_flag("REVIEW_USE_AGY")
 
 
 def agy_unsandboxed() -> bool:
@@ -224,11 +224,13 @@ def agy_schema(path: Path = RESULT_SCHEMA) -> str:
     only after launch, when the slot can no longer go to another backend.
     """
     schema = json.loads(path.read_text(encoding="utf-8"))
+    # The shape it needs, always; jsonschema, where it is installed, checks the rest.
+    _check_schema_shape(schema, path)
     try:
         from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
         from jsonschema.exceptions import SchemaError  # type: ignore[import-untyped]
     except ImportError:  # the loop runs without it; validate_review_results does not
-        _check_schema_shape(schema, path)
+        pass
     else:
         try:
             Draft202012Validator.check_schema(schema)
@@ -238,10 +240,10 @@ def agy_schema(path: Path = RESULT_SCHEMA) -> str:
 
 
 def _check_schema_shape(schema: object, path: Path) -> None:
-    """The structure a result schema needs, where jsonschema is not there to check
-    all of it: an object schema whose properties are schemas, requiring only keys it
-    has. A type check alone let a schema with broken parts through, for agy to
-    reject only after launch."""
+    """The structure a result schema needs: an object schema whose properties are
+    schemas, requiring only keys it has. A valid JSON Schema can still lack it, and
+    without jsonschema a type check alone let a schema with broken parts through, for
+    agy to reject only after launch."""
 
     def fail(why: str) -> ValueError:
         return ValueError(f"{path} is not a usable result schema: {why}")

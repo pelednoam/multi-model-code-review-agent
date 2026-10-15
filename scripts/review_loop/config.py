@@ -65,6 +65,7 @@ VENDORED_PATHS: tuple[str, ...] = (
     # changed, and is 100 lines of budget spent on the agent's own manual.
     # The drift test caught it the moment the installer learned to copy it.
     "docs/codex-sandbox.md",
+    "docs/agy-sandbox.md",
     "docs/ensemble_review_result_schema.json",
     "scripts/scrub_diff.py",
     "scripts/review_preflight.py",

@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, TYPE_CHECKING
 
@@ -20,6 +21,7 @@ from .agy import (
     agy_command,
     agy_message,
     agy_model,
+    agy_reachable,
     agy_sandbox,
     agy_schema,
     agy_seed_state,
@@ -384,73 +386,77 @@ def _stdin_backends() -> tuple[str, ...]:
     return ("codex", "gemini", "claude", "agy")
 
 
+@dataclass(frozen=True)
+class _Round:
+    """What every reviewer in a round is launched with."""
+
+    diff: str
+    audit: str
+    context: str
+    round_dir: Path
+    backends: dict[str, bool]
+    prefer_hermes: bool = False
+    #: The repository under review, which no reviewer's writable directory may be in.
+    repo: Path | None = None
+
+
 def _launch_one(
-    slot: int,
-    lens_args: tuple[str, str, str, str],
-    diff: str,
-    audit: str,
-    context: str,
-    round_dir: Path,
-    backends: dict[str, bool],
-    prefer_hermes: bool = False,
-    repo: Path | None = None,
+    slot: int, lens_args: tuple[str, str, str, str], round_: _Round
 ) -> ReviewerProc | None:
     """Launch a single reviewer subprocess. Return tracking tuple or None."""
-    picked = _pick_backend(
-        slot, lens_args, diff, audit, context, round_dir, backends, prefer_hermes, repo
-    )
+    picked = _pick_backend(slot, round_)
     if picked is None:
         print(f"  R{slot}: SKIPPED (no backend)")
         return None
-    cmd, backend, workspace, prompt = picked
+    cmd, backend, label, workspace = picked
+    lens, focus, rv, default_label = lens_args
+    model = label or default_label
+    prompt = build_reviewer_prompt(
+        lens, focus, rv, model, round_.diff, round_.audit, round_.context
+    )
+    if backend == "agy":
+        # Told to call no tools; the prompt file records that it was.
+        prompt = AGY_PREAMBLE + prompt
+        # On by default, so said whenever it runs: this is where the diff leaves.
+        print(f"  R{slot}: {AGY_EGRESS}")
     # The record of what the reviewer was sent.
-    (round_dir / f"prompt-{slot}.txt").write_text(prompt)
+    (round_.round_dir / f"prompt-{slot}.txt").write_text(prompt)
     # Which backend answered, so its output is parsed as that backend's: a stream
     # that merely looks like agy's, from another reviewer, is not agy's verdict.
-    (round_dir / f"backend-{slot}.txt").write_text(backend)
+    (round_.round_dir / f"backend-{slot}.txt").write_text(backend)
     fed = None
     if backend in _stdin_backends():
         fed = agy_message(prompt) if backend == "agy" else prompt
-    proc, out_f, err_f = _spawn(slot, cmd, backend, workspace, fed, round_dir)
+    proc, out_f, err_f = _spawn(slot, cmd, backend, workspace, fed, round_.round_dir)
     return slot, proc, backend, out_f, err_f
 
 
 def _pick_backend(
-    slot: int,
-    lens_args: tuple[str, str, str, str],
-    diff: str,
-    audit: str,
-    context: str,
-    round_dir: Path,
-    backends: dict[str, bool],
-    prefer_hermes: bool,
-    repo: Path | None,
-) -> tuple[list[str], str, Path | None, str] | None:
-    """The command for ``slot``, the CLI that answers it, its working directory and
-    its prompt -- or None if no backend is available.
+    slot: int, round_: _Round
+) -> tuple[list[str], str, str | None, Path | None] | None:
+    """The command for ``slot``, the CLI that answers it, the model the prompt should
+    name (None for the lens's own), and its working directory -- or None if no
+    backend is available.
 
-    If agy is chosen but cannot be set up, the next backend is tried, as the routing
-    tables say: an empty slot 3 every round never converges.
+    If agy is chosen but cannot be set up, the slot gets the backend it would have had
+    without agy, as the routing tables say: an empty slot 3 every round never
+    converges. The prompt is built once the backend is settled, not per attempt.
     """
-    lens, focus, rv, default_label = lens_args
-    prompt_path = round_dir / f"prompt-{slot}.txt"
-    while choice := _choose_command(
-        slot, prompt_path, round_dir, backends, prefer_hermes
-    ):
-        cmd, label = choice
-        prompt = build_reviewer_prompt(
-            lens, focus, rv, label or default_label, diff, audit, context
+    prompt_path = round_.round_dir / f"prompt-{slot}.txt"
+    first, without_agy = round_.backends, {**round_.backends, "agy": False}
+    for backends in (first, without_agy):
+        choice = _choose_command(
+            slot, prompt_path, round_.round_dir, backends, round_.prefer_hermes
         )
+        if choice is None:
+            return None
+        cmd, label = choice
         if cmd[0] != "agy":
-            return cmd, cmd[0], None, prompt
-        prepared = _prepare_agy(slot, cmd, repo)
+            return cmd, cmd[0], label, None
+        prepared = _prepare_agy(slot, cmd, round_.repo)
         if prepared is not None:
             wrapped, workspace = prepared
-            # On by default, so said whenever it runs: this is where the diff leaves.
-            print(f"  R{slot}: {AGY_EGRESS}")
-            # Told to call no tools, and the prompt file records that it was.
-            return wrapped, "agy", workspace, AGY_PREAMBLE + prompt
-        backends = {**backends, "agy": False}
+            return wrapped, "agy", label, workspace
     return None
 
 
@@ -465,8 +471,9 @@ def _spawn(
     """Start ``cmd`` with ``fed`` on its stdin, writing to the slot's output files.
 
     Until this returns the caller cannot clean the reviewer up, so an interrupt in
-    here -- SIGTERM is one -- unwinds through ``failed``. The output handles outlive
-    this function on success; launch_reviewers closes them.
+    here -- SIGTERM is one -- unwinds through ``failed``, which stops the reviewer
+    from the moment it exists: closing its input is in here too. The output handles
+    outlive this function on success; launch_reviewers closes them.
     """
     with contextlib.ExitStack() as failed:
         out_f = failed.enter_context(_output(round_dir / f"raw-{slot}.txt"))
@@ -485,7 +492,7 @@ def _spawn(
                 # started rather than orphaning them to finish unread.
                 start_new_session=True,
             )
-        failed.callback(_stop, proc)
+            failed.callback(_stop, proc)
         print(f"  R{slot}: launched via {backend}")
         failed.pop_all()
     return proc, out_f, err_f
@@ -503,10 +510,17 @@ def _prepare_agy(
         return cmd, workspace
     try:
         state = agy_seed_state(_scratch_dir("mmcra-agy-state-"))
+        sandbox = agy_sandbox(workspace, state)
     except OSError as exc:
-        print(f"  R{slot}: could not prepare agy's state ({exc})")
+        print(f"  R{slot}: could not prepare agy's sandbox ({exc})")
         return None
-    return [*agy_sandbox(workspace, state), *cmd], workspace
+    # The startup check described the host as it was then; what has appeared since
+    # -- a session bus, a socket, an X server -- is checked again here.
+    failure = agy_reachable(sandbox, workspace)
+    if failure:
+        print(f"  R{slot}: agy not launched -- {failure}")
+        return None
+    return [*sandbox, *cmd], workspace
 
 
 def _output(path: Path) -> IO[str]:
@@ -532,11 +546,30 @@ def _feed(text: str | None) -> Iterator[IO[str] | None]:
 
 
 def _stop(proc: subprocess.Popen[str]) -> None:
-    """Kill a reviewer and wait for it, but not forever: a process stuck in the kernel
-    ignores even SIGKILL, and shutdown must not hang on it."""
+    """Kill a reviewer and its group, then reap it -- waiting, but not forever: a
+    process stuck in the kernel ignores even SIGKILL, and shutdown must not hang."""
     _kill_group(proc)
     with contextlib.suppress(subprocess.TimeoutExpired):
         proc.wait(timeout=10)
+
+
+def _exit_status(proc: subprocess.Popen[str]) -> int | None:
+    """The reviewer's exit status once it has exited -- without reaping it.
+
+    Reaped, its pid, which is also its process group's number, is free for the system
+    to hand to someone else's new session -- a shell, an ssh login -- and the group
+    kill at the end of the round would reach that. Left a zombie until ``_stop``, the
+    number stays this run's, and so does everything the kill can reach.
+    """
+    if proc.returncode is not None:
+        return proc.returncode
+    try:
+        info = os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+    except ChildProcessError:
+        return proc.poll()
+    if info is None:
+        return None
+    return info.si_status if info.si_code == os.CLD_EXITED else -info.si_status
 
 
 def launch_reviewers(
@@ -560,21 +593,21 @@ def launch_reviewers(
     wrong as often as it is right.
     """
     procs: list[ReviewerProc] = []
+    round_ = _Round(diff, audit, context, round_dir, backends, prefer_hermes, repo)
     # A plain SIGTERM or SIGHUP would skip the finally below, leaving the reviewers
     # running and agy's token copy on disk.
     with signals_unwind():
         try:
             for i, lens_args in enumerate(_LENSES, 1):
-                tracked = _launch_one(
-                    i, lens_args, diff, audit, context, round_dir, backends,
-                    prefer_hermes, repo,
-                )  # fmt: skip
+                tracked = _launch_one(i, lens_args, round_)
                 if tracked is not None:
                     procs.append(tracked)
             _await_reviewers(procs, round_dir, diff.count("\n") + 1)
         finally:
             # Every group, finished or not: a reviewer that exited can leave helpers
-            # running in its group, spending quota and writing into round_dir.
+            # running in its group, spending quota and writing into round_dir. Each
+            # leader is still unreaped (``_exit_status``), so each number is still
+            # this run's group.
             for _, proc, _, out_f, err_f in procs:
                 _stop(proc)
                 out_f.close()
@@ -603,7 +636,7 @@ def _await_reviewers(procs: list[ReviewerProc], round_dir: Path, n_lines: int) -
     while pending:
         for slot, tracked in list(pending.items()):
             _, proc, backend, out_f, err_f = tracked
-            rc = proc.poll()
+            rc = _exit_status(proc)
             if rc is None:
                 continue
             out_f.close()
@@ -679,7 +712,10 @@ def _kill_group(proc: subprocess.Popen[str]) -> None:
     """
     # The group by the reviewer's own pid -- start_new_session made it the group's
     # leader -- since getpgid() fails once the leader has exited, and its helpers
-    # may not have.
+    # may not have. Only while the leader is unreaped: after that the number may
+    # already belong to someone else (``_exit_status``).
+    if proc.returncode is not None:
+        return
     with contextlib.suppress(OSError):
         os.killpg(proc.pid, signal.SIGKILL)
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import TYPE_CHECKING, Any
 
 from .agy import agy_result, ran_agy
@@ -30,16 +31,41 @@ def _try_load_existing_result(result_path: Path, slot: int) -> dict[str, Any] | 
     return validate_result(d, slot, EXPECTED_REVIEWERS)
 
 
+#: Terminal control characters, which a reply decoded from JSON can carry raw: an
+#: escape sequence can rewrite or hide the lines above it, retitle the window, or on
+#: some terminals write the clipboard. A reviewer's text is shaped by the diff it read.
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def printable(text: str) -> str:
+    """``text`` with its control characters made visible as ``?``, safe to print."""
+    return _CONTROL.sub("?", text)
+
+
+def agy_failure(result: dict[str, Any] | None) -> str | None:
+    """Why agy's ``result`` event (``agy_result``) holds no review, or None if it does.
+
+    Only a finished turn is a review. ERROR, CANCELED, INTERRUPTED and WAITING can all
+    carry review-shaped output -- a quota can run out after a whole review is drafted
+    -- and so can a stream with no result event at all.
+    """
+    if result is None:
+        return "no result event"
+    if result.get("status") != "SUCCESS":
+        error = str(result.get("error") or "no error given").strip()
+        return printable(f"status {result.get('status')}: {error}")
+    return None
+
+
 def agy_answer(result: dict[str, Any] | None) -> str:
     """The review in agy's ``result`` event (``agy_result``), or "" if it gave none.
 
-    Only a finished turn is a review. ERROR, CANCELED, INTERRUPTED and WAITING can all
-    carry review-shaped output, and so can a stream with no result event at all --
-    read as plain text, a bare object in it passed as agy's verdict. Nothing in the
-    schema-checked ``structured_output`` is unwrapped further: a ``result`` key the
+    "" for anything short of a finished turn (``agy_failure``): read as plain text, a
+    bare object in a stream with no result event passed as agy's verdict. Nothing in
+    the schema-checked ``structured_output`` is unwrapped further: a ``result`` key the
     diff talked agy into adding does not replace it.
     """
-    if result is None or result.get("status") != "SUCCESS":
+    if result is None or agy_failure(result):
         return ""
     if isinstance(result.get("structured_output"), dict):
         return json.dumps(result["structured_output"])
@@ -59,7 +85,7 @@ def _unwrap_envelope(text: str, agy_ran: bool = False) -> str:
         return agy_answer(agy_result(text))
     try:
         wrapper = json.loads(text)
-    except (json.JSONDecodeError, ValueError):
+    except ValueError:
         return text
     if isinstance(wrapper, dict) and isinstance(wrapper.get("result"), str):
         result: str = wrapper["result"]

@@ -15,7 +15,8 @@ installed in the current project. The required files are:
 - `scripts/scrub_diff.py`
 - `scripts/review_preflight.py`
 - `scripts/validate_review_results.py`
-- `scripts/review_loop/` (the agy reviewer's model pick and sandbox come from it)
+- `scripts/review_loop/` (every full-mode slot needs it: the runner's backend checks, its output
+  extraction and agy's sandbox all come from it, through `runner_entry.py`)
 - `docs/ensemble_review_result_schema.json`
 
 If any are missing, **do not try to install them yourself**. Writing
@@ -76,10 +77,17 @@ HAS_CLAUDE=false; command -v claude &>/dev/null && HAS_CLAUDE=true
 HAS_CODEX=false;  command -v codex  &>/dev/null && HAS_CODEX=true
 HAS_GEMINI=false; command -v gemini &>/dev/null && HAS_GEMINI=true
 
+# Bedrock opt-in: set when the user verbally asked for hermes/bedrock,
+# OR when the project pinned it via .use-hermes.
+PREFER_HERMES=false
+if [ -f ".use-hermes" ]; then PREFER_HERMES=true; fi
+# Also set PREFER_HERMES=true if the user's request matched
+# "hermes review" / "bedrock review" / "isolated review".
+
 # The convergence loop's own checks, through its one entry point for bash
 # (scripts/review_loop/runner_cli.py), so the two paths cannot disagree about what is safe to use.
 review_helper() {
-  python3 -I -c 'import sys, types; pkg = types.ModuleType("scripts"); pkg.__path__ = [sys.argv.pop(1) + "/scripts"]; sys.modules["scripts"] = pkg; from scripts.review_loop.runner_cli import main; sys.exit(main(sys.argv[1:]))' "$PWD" "$@"
+  python3 -I "$PWD/scripts/review_loop/runner_entry.py" "$@"
 }
 
 # codex: only once its sandbox is shown to refuse a write (no model call). MMCRA_SKIP_CODEX_SANDBOX_CHECK=1
@@ -90,19 +98,14 @@ if $HAS_CODEX; then review_helper codex-check || HAS_CODEX=false; fi
 # AGY_MODEL if set, else the best Gemini model `agy models` lists for this sign-in (newest version,
 # then Pro/Argon over Flash over Lite, then highest effort) -- picked fresh each run, so a newer
 # model is used once the plan has it. Only true once the sandbox check has passed (no model call).
-# Status lines go to stderr; the model it settled on is the only thing on stdout.
+# A project pinned to Bedrock does not run agy at all -- not even this check -- unless
+# REVIEW_USE_AGY=1. Status lines go to stderr; the model it settled on is the only thing on stdout.
 HAS_AGY=false
 if command -v agy &>/dev/null; then
-  AGY_MODEL="$(review_helper agy-detect)"
+  AGY_MODEL="$(review_helper agy-detect "$PREFER_HERMES")"
   [ -n "$AGY_MODEL" ] && HAS_AGY=true
 fi
 
-# Bedrock opt-in: set when the user verbally asked for hermes/bedrock,
-# OR when the project pinned it via .use-hermes.
-PREFER_HERMES=false
-if [ -f ".use-hermes" ]; then PREFER_HERMES=true; fi
-# Also set PREFER_HERMES=true if the user's request matched
-# "hermes review" / "bedrock review" / "isolated review".
 ```
 
 **Priority order for each reviewer -- local CLIs first (free), Hermes only when opted in:**
@@ -126,7 +129,7 @@ Bedrock opt-in precedence (PREFER_HERMES=true), used for regulated codebases tha
 |---|---|---|---|
 | Security (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
 | Correctness | Hermes Haiku (Bedrock) | Codex CLI GPT-5.5 (free) | Claude CLI haiku (free) |
-| Readability | Hermes Sonnet (Bedrock) | agy only with `REVIEW_USE_AGY=1` (a project that pinned Bedrock never falls to Google by default), else Gemini CLI (in the loop: `REVIEW_USE_GEMINI=1`) | Claude CLI sonnet (free) |
+| Readability | Hermes Sonnet (Bedrock) | agy only with `REVIEW_USE_AGY=1`, else Gemini CLI only with `REVIEW_USE_GEMINI=1` (a project that pinned Bedrock never falls to Google by default) | Claude CLI sonnet (free) |
 | Spec-contract (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
 
 **Why local CLIs first by default**: free (uses existing subscriptions), reliable auth (each CLI manages its own OAuth), and for most projects (open-source, non-regulated) there's no real value to paid Bedrock routing.
@@ -142,7 +145,7 @@ Bedrock opt-in precedence (PREFER_HERMES=true), used for regulated codebases tha
 | `claude` | `-p` | `--allowedTools "Read Grep Glob"` **plus** `--disallowedTools "Edit Write MultiEdit NotebookEdit Bash"` -- `--allowedTools` alone only skips the permission prompt, it does *not* confine the agent | stdin (`< prompt.txt`) | `--output-format json` wraps in `{"result":"..."}` |
 | `codex` | `codex exec` **plus `-s read-only` and `-c approvals_reviewer="user"`** (in both the convergence loop and this runner) -- both are pinned by the tool and neither is optional: no sandbox flag was passed at all before, and `-s read-only` on its own is silently overridden by a global `approvals_reviewer = "auto_review"` (see docs/codex-sandbox.md). Codex is also canary-tested at launch and its slot is DROPPED if the sandbox does not actually refuse a write (optional `-m <model> -c model_reasoning_effort=<level>` -- override via `CODEX_MODEL`, `CODEX_REASONING_EFFORT`; `=high` is the "GPT-5.5 Pro" equivalent) | verified read-only, not assumed | stdin (pipe) | `-o <file>` writes last message |
 | `gemini` | `-p` | `--model <m> --approval-mode plan --skip-trust` (default `<m>` is `gemini-2.5-flash` for free-tier compatibility; override via `GEMINI_MODEL`) | stdin (pipe) | stdout (text, may have fences) |
-| `agy` | `--input-format stream-json --output-format stream-json` (no `-p`: the prompt is one JSON line on stdin, because a single argument is capped at 128 KB) **plus `--sandbox --disable-slash-commands`**, pinned. On by default where installed; `REVIEW_USE_AGY=0` switches it off. Model: `AGY_MODEL` if set, else the best Gemini model `agy models` lists, picked each run. agy has no deny list and was measured writing outside its workspace, so it runs under **bubblewrap with the filesystem read-only** except an empty temp workspace outside the repo and its state dir; the sandbox is verified at launch without a model call and the slot is DROPPED if it lets a write through. The prompt opens with a no-tools preamble: a refused tool call ends agy's turn with no answer | bubblewrap read-only filesystem, verified; `--sandbox --disable-slash-commands` (no `--mode=plan`: it is a slash command, so a no-op once expansion is off) | stdin (one stream-json line) | stream-json; the last `result` event carries `structured_output` (enforced by `--json-schema`) |
+| `agy` | `--input-format stream-json --output-format stream-json` (no `-p`: the prompt is one JSON line on stdin, because a single argument is capped at 128 KB) **plus `--sandbox --disable-slash-commands`**, pinned. On by default where installed; `REVIEW_USE_AGY=0` switches it off. Model: `AGY_MODEL` if set, else the best Gemini model `agy models` lists, picked each run. agy has no deny list and was measured writing outside its workspace, so it runs under **bubblewrap** (see [agy-sandbox.md](agy-sandbox.md)), verified at startup without a model call and again before each launch; the slot goes to its next backend if that fails. The prompt opens with a no-tools preamble: a refused tool call ends agy's turn with no answer | bubblewrap read-only filesystem, verified; `--sandbox --disable-slash-commands` (no `--mode=plan`: it is a slash command, so a no-op once expansion is off) | stdin (one stream-json line) | stream-json; the last `result` event carries `structured_output` (enforced by `--json-schema`) |
 | `hermes` | `-z --yolo` | `-t file` | `-z` flag (has ARG_MAX risk for large prompts) | stdout (the answer text; the prompt asks for the JSON in the reply, not in a file) |
 
 ### Retrieving the reviewers' output
@@ -452,7 +455,7 @@ REVIEW_TMP="$(cd "$REVIEW_TMP" && pwd -P)" || exit 1
 # loop from a trusted checkout of this agent with --repo pointing at the branch.
 REVIEW_ROOT="$PWD"
 review_helper() {
-  python3 -I -c 'import sys, types; pkg = types.ModuleType("scripts"); pkg.__path__ = [sys.argv.pop(1) + "/scripts"]; sys.modules["scripts"] = pkg; from scripts.review_loop.runner_cli import main; sys.exit(main(sys.argv[1:]))' "$REVIEW_ROOT" "$@"
+  python3 -I "$REVIEW_ROOT/scripts/review_loop/runner_entry.py" "$@"
 }
 
 # JOB CONTROL IN A SCRIPT, deliberately. With `set -m` each background job gets its OWN process
@@ -482,13 +485,21 @@ JOB_PID=()
 JOB_BACKEND=()   # which CLI ran each slot, for reading its output: agy's stream only from agy
 AGY_SCRATCH=()
 kill_jobs() {
-  local num groups=()
-  for num in "$@"; do [ -n "${JOB_PID[$num]:-}" ] && groups+=("-${JOB_PID[$num]}"); done
-  [ "${#groups[@]}" -gt 0 ] || return 0
-  kill -TERM -- "${groups[@]}" 2>/dev/null
-  sleep 1
-  kill -KILL -- "${groups[@]}" 2>/dev/null
+  local sig
+  for sig in TERM KILL; do
+    [ "$sig" = KILL ] && sleep 1
+    local num groups=()
+    for num in "$@"; do live_group "${JOB_PID[$num]:-}" && groups+=("-${JOB_PID[$num]}"); done
+    [ "${#groups[@]}" -eq 0 ] || kill -"$sig" -- "${groups[@]}" 2>/dev/null
+  done
   return 0
+}
+# live_group PGID: whether the group still has a member in this runner's session. bash reaps a
+# finished job at once, and once its group has emptied, the number is free for the system to give
+# to someone else's new session -- a shell, an ssh login -- which a kill of it would reach. A group
+# of this run's always has its members in this run's session.
+live_group() {
+  [ -n "$1" ] && pgrep -s 0 -g "$1" >/dev/null
 }
 finish_round() {
   kill_jobs 1 2 3 4
@@ -565,6 +576,11 @@ prepare_agy() {
   [ "${#wrap[@]}" -ge 1 ] || { echo "R$num: SKIPPED (could not build agy's sandbox)"; return 1; }
   AGY_ENVP=("${wrap[@]:1:${wrap[0]}}")
   AGY_BWRAP=("${wrap[@]:$((1 + wrap[0]))}")
+  # The startup check described the host as it was then; what has appeared since -- a session
+  # bus, a socket, an X server -- is checked again here.
+  local why
+  why="$(review_helper agy-reachable "$AGY_WS" "$AGY_STATE")" \
+    || { echo "R$num: SKIPPED (agy not launched -- $why)"; return 1; }
   review_helper agy-preamble "$prompt_file" \
     || { echo "R$num: SKIPPED (could not prepare agy's prompt)"; return 1; }
 }
@@ -686,9 +702,10 @@ launch_cli() {
           < <(review_helper agy-message "$prompt_file") \
           1>"$REVIEW_TMP/stdout-$num.txt" \
           2>"$REVIEW_TMP/stderr-$num.txt"
+        # agy's status held while its scratch -- with the copy of its sign-in token -- is
+        # removed, and the done marker written last: by the time the watchdog sees this slot
+        # finished, the copy is gone.
         rc=$?; rm -rf "$AGY_WS" "$AGY_STATE"; echo "$rc" > "$REVIEW_TMP/done-$num"; } &
-      # The done marker comes last: cleanup -- which removes the copy of agy's sign-in token --
-      # is done by the time the watchdog sees this slot as finished.
       JOB_PID[$num]=$!
       echo $! > "$REVIEW_TMP/pid-$num"
       echo "R$num: Antigravity CLI ($AGY_MODEL) [subscription]"
@@ -740,8 +757,9 @@ fi
 
 # R3: Readability -- Google preferred (3rd provider for diversity): agy when installed and its
 # sandbox verified, else Gemini. When PREFER_HERMES is set, the Bedrock sonnet path runs first,
-# and agy only if asked for by name (REVIEW_USE_AGY=1): a project that pinned Bedrock to keep its
-# code with providers it chose must not fall to Google by default when Hermes is unavailable.
+# and agy or Gemini only if asked for by name (REVIEW_USE_AGY=1, REVIEW_USE_GEMINI=1): a project
+# that pinned Bedrock to keep its code with providers it chose must not fall to Google by default
+# when Hermes is unavailable.
 # `${HAS_AGY:-false}`, not `$HAS_AGY`: an unset variable expands to an empty command, which
 # succeeds, and would route the slot to a backend nobody verified.
 if $PREFER_HERMES && $HAS_HERMES; then
@@ -749,7 +767,7 @@ if $PREFER_HERMES && $HAS_HERMES; then
 elif ${HAS_AGY:-false} && { ! $PREFER_HERMES || review_helper flag REVIEW_USE_AGY; } \
      && launch_cli 3 agy "$REVIEW_TMP/prompt-3.txt"; then
   :  # launched; if agy could not be set up, launch_cli returned 1 and the next backend runs
-elif $HAS_GEMINI; then
+elif $HAS_GEMINI && { ! $PREFER_HERMES || review_helper flag REVIEW_USE_GEMINI; }; then
   launch_cli 3 gemini "$REVIEW_TMP/prompt-3.txt"
 elif $HAS_CLAUDE; then
   launch_cli 3 claude-sonnet "$REVIEW_TMP/prompt-3.txt"
@@ -803,9 +821,10 @@ kill_jobs 1 2 3 4
 
 # Extract review JSON from raw output, as the convergence loop does: Claude's wrapper, fences and
 # preamble; agy's stream only when agy ran the slot (any reviewer can be talked into printing a line
-# shaped like agy's), and only a turn that finished. Checks the required schema keys.
+# shaped like agy's), and only a turn that finished. Then the loop's own validation: the required
+# keys, findings that are a list of objects, and the reviewer named by the slot, not by the model.
 extract_json() {
-  review_helper extract "$1" "$2" "${3:-}" 2>"$REVIEW_TMP/extract-$(basename "$2" .json).err"
+  review_helper extract "$1" "$2" "$3" "${4:-}" 2>"$REVIEW_TMP/extract-$(basename "$2" .json).err"
 }
 
 # Post-process: normalize all output to result-N.json.
@@ -815,7 +834,7 @@ for num in 1 2 3 4; do
 
   # Try each possible output file (Claude raw wrapper, then stdout)
   for src in "$REVIEW_TMP/claude-raw-$num.json" "$REVIEW_TMP/stdout-$num.txt"; do
-    [ -f "$src" ] && extract_json "$src" "$result" "${JOB_BACKEND[$num]:-}" && break
+    [ -f "$src" ] && extract_json "$src" "$result" "$num" "${JOB_BACKEND[$num]:-}" && break
   done
 
   # If no result produced, write a synthetic error. The done-marker distinguishes the two very
@@ -847,7 +866,7 @@ shell and inherits nothing from the call that wrote it.
 
 ```bash
 export REVIEW_TMP HAS_CLAUDE HAS_HERMES HAS_CODEX HAS_GEMINI HAS_AGY AGY_MODEL PREFER_HERMES \
-  MMCRA_SKIP_AGY_SANDBOX_CHECK
+  MMCRA_SKIP_AGY_SANDBOX_CHECK REVIEW_USE_AGY REVIEW_USE_GEMINI
 "$REVIEW_TMP/run-reviewers.sh" 2>&1 | tee "$REVIEW_TMP/round.log"
 ```
 
@@ -899,7 +918,7 @@ Report what the status lines say rather than guessing. "Three of four are still 
 thing to tell a waiting human; silence is not.
 
 
-**Tool restriction**: Hermes uses `-t file` (best isolation). Claude CLI: `--allowedTools "Read Grep Glob"` plus `--disallowedTools` for every writing tool, since `--allowedTools` alone does not confine (a slot given writing tools on purpose with `REVIEWER_TOOLS_N` has only those taken off the deny list). Codex: both paths pin `-s read-only` and `approvals_reviewer="user"` and canary-test them before use. Gemini uses `--approval-mode plan` (read-only). agy runs under bubblewrap -- filesystem read-only outside an empty workspace, home, /tmp and /run hidden, environment cleared, verified before use -- plus `--sandbox --disable-slash-commands`. Extraction errors logged to `$REVIEW_TMP/extract-N.err`.
+**Tool restriction**: Hermes uses `-t file` (best isolation). Claude CLI: `--allowedTools "Read Grep Glob"` plus `--disallowedTools` for every writing tool, since `--allowedTools` alone does not confine (a slot given writing tools on purpose with `REVIEWER_TOOLS_N` has only those taken off the deny list). Codex: both paths pin `-s read-only` and `approvals_reviewer="user"` and canary-test them before use. Gemini uses `--approval-mode plan` (read-only). agy runs under bubblewrap, verified before use (what it closes and what it does not: [agy-sandbox.md](agy-sandbox.md)), plus `--sandbox --disable-slash-commands`. Extraction errors logged to `$REVIEW_TMP/extract-N.err`.
 
 ## 7. Collect and validate results
 

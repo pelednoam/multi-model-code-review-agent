@@ -14,11 +14,11 @@ Claude Code session) finds the findings without having to read the source.
 from __future__ import annotations
 
 import json
-import re
 import textwrap
 from typing import TYPE_CHECKING, Any
 
 from .agy import agy_result, ran_agy
+from .results import agy_failure, printable
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -96,16 +96,6 @@ def describe_outputs(round_dir: Path, n_slots: int = 4) -> str:
 #: see whether it was a real review; the whole thing is in raw-N.txt.
 _SALVAGE_CHARS = 600
 
-#: Terminal control characters, which a reply decoded from JSON can carry raw: an
-#: escape sequence can rewrite or hide the lines above it, retitle the window, or on
-#: some terminals write the clipboard. A reviewer's text is shaped by the diff it read.
-_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
-
-
-def _printable(text: str) -> str:
-    """``text`` with its control characters made visible as ``?``."""
-    return _CONTROL.sub("?", text)
-
 
 def _explain_missing(round_dir: Path, slot: int) -> list[str]:
     """Say why a slot produced no findings, and show what it did produce.
@@ -122,7 +112,7 @@ def _explain_missing(round_dir: Path, slot: int) -> list[str]:
         text = raw.read_text(encoding="utf-8", errors="replace").strip()
     # Parsed once, and only when agy is the backend that wrote it.
     agy = agy_result(text) if text and ran_agy(round_dir, slot) else None
-    failed = _agy_failure(agy)
+    failed = agy_failure(agy) if agy is not None else None
     if failed:
         # Whatever it drafted first is not a review it gave: the turn did not finish.
         return [
@@ -130,7 +120,7 @@ def _explain_missing(round_dir: Path, slot: int) -> list[str]:
             *[f"                {line}" for line in textwrap.wrap(failed, 74)],
             f"                (in full: {raw})",
         ]
-    said = _printable(_unwrapped(text, agy))
+    said = printable(_display_text(text, agy))
     if not said:
         return [f"  NO OUTPUT  -> R{slot} produced nothing; see stderr-{slot}.txt"]
     return [
@@ -141,21 +131,13 @@ def _explain_missing(round_dir: Path, slot: int) -> list[str]:
     ]
 
 
-def _agy_failure(agy: dict[str, Any] | None) -> str:
-    """Why agy's turn failed -- its status and error -- or "" if it did not fail.
+def _display_text(text: str, agy: dict[str, Any] | None) -> str:
+    """What to show of a reviewer's unusable reply: ``text``, unwrapped as far as it can
+    be, and trimmed. ``agy`` is its result event, if agy wrote it.
 
-    A turn can fail after the model has written a whole review, as when the plan's
-    quota runs out mid-turn; shown as a reply in prose, the draft hid the reason.
+    For showing, not parsing (that is ``results._unwrap_envelope``): it keeps what a
+    failed turn says, and a refused tool call, where parsing keeps nothing.
     """
-    if agy is None or agy.get("status") == "SUCCESS":
-        return ""
-    error = str(agy.get("error") or "no error given").strip()[:_SALVAGE_CHARS]
-    return _printable(f"status {agy.get('status')}: {error}")
-
-
-def _unwrapped(text: str, agy: dict[str, Any] | None) -> str:
-    """Whatever a reviewer wrote (``text``; ``agy``, its result event if agy wrote
-    it), unwrapped as far as it can be."""
     if agy is not None:
         # A failed turn has no response but says why, which is the useful part. So
         # does one cut short by a refused tool call, which otherwise reads as silence.

@@ -46,6 +46,7 @@ else
 fi
 
 cp "$REPO_ROOT/docs/codex-sandbox.md"                    "$TARGET/docs/" 2>/dev/null || true
+cp "$REPO_ROOT/docs/agy-sandbox.md"                      "$TARGET/docs/" 2>/dev/null || true
 
 # Codex is the one reviewer whose read-only-ness depends on the HOST rather than on a flag
 # we pass, so check it at install time instead of letting a review silently run with a
@@ -95,6 +96,7 @@ Files written:
   scripts/review_loop/      (helpers for the convergence loop)
   docs/ensemble_review_result_schema.json
   docs/codex-sandbox.md      (why codex needs a host check, and how to fix it)
+  docs/agy-sandbox.md        (what agy's sandbox closes, what it does not, its switches)
 
 Next step: open Claude Code in that project and say one of:
   "review this"           -- quick mode (2 subagents, ~30s, free)

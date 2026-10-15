@@ -81,7 +81,9 @@ def _codex_sh(script: str, path: Path) -> list[str]:
     return ["codex", "sandbox", "--", "sh", "-c", script, "codex-check", str(path)]
 
 
-def detect_backends(verify_codex: bool = True) -> dict[str, bool]:
+def detect_backends(
+    verify_codex: bool = True, prefer_hermes: bool = False
+) -> dict[str, bool]:
     """Detect which CLI backends are installed.
 
     Codex additionally has to PROVE it is confined. An unconfined codex is worse than
@@ -90,7 +92,8 @@ def detect_backends(verify_codex: bool = True) -> dict[str, bool]:
     for hosts that are already externally sandboxed, e.g. a disposable container.
 
     agy is held to the same standard whenever it is installed and not switched off
-    (``REVIEW_USE_AGY=0``): its sandbox is proven by ``agy.agy_is_confined``.
+    (``REVIEW_USE_AGY=0``): its sandbox is proven by ``agy.agy_is_confined``. A project
+    pinned to Bedrock (``prefer_hermes``) gets agy only with ``REVIEW_USE_AGY=1``.
     ``MMCRA_SKIP_AGY_SANDBOX_CHECK=1`` runs agy without the sandbox, for hosts that
     are already one.
     """
@@ -104,6 +107,12 @@ def detect_backends(verify_codex: bool = True) -> dict[str, bool]:
         if not ok:
             print(f"  codex: DISABLED for review -- {reason}")
             found["codex"] = False
+    if found["agy"] and prefer_hermes and not env_flag("REVIEW_USE_AGY"):
+        # Pinned to Bedrock to keep the code with providers it chose: agy is not run at
+        # all -- not its check, not a signed-in listing of its models -- unless asked
+        # for by name.
+        print("  agy: not used, the project is pinned to Bedrock (REVIEW_USE_AGY=1 uses it)")
+        found["agy"] = False
     if found["agy"] and not agy_enabled():
         print(f"  agy: switched off (REVIEW_USE_AGY={os.environ['REVIEW_USE_AGY']!r})")
         found["agy"] = False  # installed is not the same as in use

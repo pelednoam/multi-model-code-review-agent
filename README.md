@@ -73,7 +73,7 @@ review missed.
 | Review packet persistence | no | no | yes | yes |
 | Cross-provider models | no | no | with Codex + agy/Gemini | any provider |
 | Mandatory CI gate before commit | no | no | yes | yes |
-| Cost | free | free | free | ~$5-40 |
+| Cost | free | free | free beyond subscriptions | ~$5-40 |
 | Latency | instant | ~30s | ~3 min | ~5 min |
 
 **When to use which:**
@@ -156,7 +156,7 @@ When opted in, the precedence flips for Anthropic reviewers:
 |---|---|---|---|
 | Security (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
 | Correctness | Hermes Haiku (Bedrock) | Codex CLI GPT-5.5 (free) | Claude CLI haiku (free) |
-| Readability | Hermes Sonnet (Bedrock) | agy only with `REVIEW_USE_AGY=1` (a project that pinned Bedrock never falls to Google by default), else Gemini CLI (in the loop: `REVIEW_USE_GEMINI=1`) | Claude CLI sonnet (free) |
+| Readability | Hermes Sonnet (Bedrock) | agy only with `REVIEW_USE_AGY=1`, else Gemini CLI only with `REVIEW_USE_GEMINI=1` (a project that pinned Bedrock never falls to Google by default) | Claude CLI sonnet (free) |
 | Spec-contract (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
 
 **With all CLIs installed** (claude + codex + agy or gemini): the full review
@@ -486,73 +486,24 @@ Anthropic reviewers. For cross-provider diversity, also install:
   next run uses it. `AGY_MODEL=<slug>` overrides the pick.
 
   **agy needs [bubblewrap](https://github.com/containers/bubblewrap)
-  (`bwrap`), so Linux only.** agy cannot make itself read-only: it has no
-  deny list, and measured on agy 1.3.4 it wrote to a file *outside* its
-  workspace by absolute path with nothing denied. Its plan mode never wrote
-  in testing, but that is the model choosing not to, not agy refusing. So
-  agy runs under `bwrap`: the filesystem read-only except an empty temp
-  workspace outside the repo; the home directory (`$HOME`, and the
-  account's own where `HOME` points elsewhere), `/tmp` and `/run`
-  replaced by empty ones (no `~/.ssh`, no cloud credentials; none of the
-  sockets there -- tmux's, the session and system D-Bus, `docker.sock`,
-  snapd's -- with only the DNS resolver's directory put back); the
-  environment cleared to a short allowlist before `bwrap` starts, since
-  `bwrap` is PID 1 inside and `/proc/1/environ` would otherwise hold every
-  API key the loop was started with; host processes out of reach; and a
-  throwaway copy of agy's state holding only its sign-in, removed when the
-  round ends, or the runner is stopped by Ctrl-C, `SIGTERM`, `SIGHUP` (a
-  closed terminal or ssh session) or `SIGQUIT` -- only a `SIGKILL` leaves it.
-  Under that wrapper agy's own write tool got `read-only file system`. The
-  wrapper is verified at startup without a model call, codex-style, and the
-  slot is dropped if any of that fails. Until it passes, agy runs only as
-  `agy --version` inside the wrapper being checked: no model call, not even
-  a listing of its models.
-
-  Not closed, and worth knowing:
-  - **The network**, which agy needs, and with it *abstract* sockets that
-    live in the network namespace, not on disk. The startup check refuses
-    a session bus there (`dbus-launch`'s, IBus's), and names an
-    X server listening on `@/tmp/.X11-unix` without refusing it: one that
-    lets your user in without the cookie (`xhost +si:localuser:...`) takes
-    keystrokes from inside. (File sockets are not left open: the check
-    refuses agy if any it can write to is reachable, other than the DNS
-    resolver's; docker's, LXD's and Incus's are masked so that they do not
-    cost the slot.)
-  - **Anything reachable over the network from this host**: services on
-    localhost (docker's TCP API, databases, notebooks) and, on a cloud VM
-    or CI runner, the instance-metadata endpoint (`169.254.169.254`), which
-    hands out the machine's cloud credentials. Do not run agy on a host
-    whose instance role you would not give to the diff's author.
-  - **agy's own credentials.** Its sign-in token (the copy) and any proxy
-    URL in the allowlisted environment are readable inside, and the network
-    is open, so a diff that talks agy into a network-capable tool could send
-    them out.
-  - **Reads outside `$HOME` and `/tmp`.** A repository kept elsewhere
-    (`/srv`, `/workspace`, a CI checkout) is readable unscrubbed, and so
-    is `/var/tmp`.
-  - **Full mode runs the project's own copy of these scripts**, the
-    sandbox builder among them. Reviewing an untrusted branch that way
-    runs that branch's code; use the convergence loop from a trusted
-    checkout of this agent, with `--repo` pointing at the branch.
-  - Headless agy refused the one shell command it tried, but agy also has
-    browser and MCP tools, and whether those reach the network unprompted
-    has not been tested.
-
-  Treat the sandbox as stopping file writes and reads of your home
-  directory's credentials -- not as network isolation, not as hiding a repo
-  that lives outside `$HOME`, and not as a boundary against an X server
-  that admits your user without its cookie.
+  (`bwrap`), so Linux only.** agy cannot make itself read-only, so it runs
+  under `bwrap`: the filesystem read-only outside an empty workspace; your
+  home directory, `/tmp`, `/run` and the environment hidden; and nothing
+  reachable that runs code outside (sockets, a session bus, an X server
+  that admits you without its cookie). The wrapper is proven at startup
+  with no model call and checked again before each launch, and the slot
+  goes to its next backend if it fails. It is not network isolation:
+  localhost services and a cloud metadata endpoint stay reachable.
+  [docs/agy-sandbox.md](docs/agy-sandbox.md) has what it closes, what it
+  does not, and its switches.
 
   **Default-on means data egress.** Wherever agy is installed and signed
   in, the scrubbed diff and audit now also go to Google, and every round
   that sends them says so. Set `REVIEW_USE_AGY=0` where that is not
-  acceptable; a project pinned to Bedrock is exempt unless it opts in. Without `bwrap`, agy is skipped
-  (`MMCRA_SKIP_AGY_SANDBOX_CHECK=1`, or `true`/`yes`/`on`, runs it
-  unwrapped, for a host that is already a sandbox; `0` or anything else
-  keeps the sandbox). Its answer is held to the result
-  schema with `--json-schema`, and its prompt tells it to call no tools:
-  headless agy refuses them, and a refused call ends its turn with no
-  answer.
+  acceptable; a project pinned to Bedrock is exempt unless it opts in.
+  Its answer is held to the result schema with `--json-schema`, and its
+  prompt tells it to call no tools: headless agy refuses them, and a
+  refused call ends its turn with no answer.
 - [Hermes Agent](https://github.com/NousResearch/hermes-agent) +
   AWS Bedrock for best isolation (data stays in your AWS account)
 

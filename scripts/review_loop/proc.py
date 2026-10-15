@@ -46,13 +46,20 @@ def signals_unwind() -> Iterator[None]:
     By default each ends Python without running ``finally`` blocks, context-manager
     exits or atexit. That would leave reviewers running, and copies of agy's sign-in
     token on disk. So each is raised as ``SystemExit(128 + signum)``, and the stack
-    unwinds. The previous handlers are restored on the way out. Only the main thread
-    can install a handler; anywhere else this does nothing.
+    unwinds. One the caller ignores (``nohup``'s SIGHUP) stays ignored. The previous
+    handlers are restored on the way out. Only the main thread can install a
+    handler; anywhere else this does nothing.
     """
     if threading.current_thread() is not threading.main_thread():
         yield
         return
-    previous = {sig: signal.signal(sig, _exit_on_signal) for sig in UNWIND_SIGNALS}
+    # A signal already ignored stays ignored: that is how ``nohup`` keeps a long run
+    # alive through a closed terminal, and turning its SIGHUP into an exit undid it.
+    previous = {
+        sig: signal.signal(sig, _exit_on_signal)
+        for sig in UNWIND_SIGNALS
+        if signal.getsignal(sig) is not signal.SIG_IGN
+    }
     try:
         yield
     finally:

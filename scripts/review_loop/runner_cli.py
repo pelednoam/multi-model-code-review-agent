@@ -3,16 +3,8 @@
 The runner is bash, and what it needs from this package -- whether codex and agy are
 safe to use, agy's sandbox and what agy is sent, the review taken out of a reviewer's
 output -- is the convergence loop's own code, called through here rather than copied
-into one-liners that drift from it. It runs as::
-
-    python3 -I -c 'import sys, types; pkg = types.ModuleType("scripts");
-        pkg.__path__ = [sys.argv.pop(1) + "/scripts"]; sys.modules["scripts"] = pkg;
-        from scripts.review_loop.runner_cli import main; sys.exit(main(sys.argv[1:]))'
-        "$root" <command> [args...]
-
-``-I`` keeps PYTHONPATH, the user's site directory and the working directory out, and
-only the ``scripts`` package comes from the checkout: the checkout's root is not put on
-the path, so a ``json.py`` at its top cannot stand in for the standard library.
+into one-liners that drift from it. It runs as
+``python3 -I scripts/review_loop/runner_entry.py <command> [args...]``.
 """
 
 from __future__ import annotations
@@ -28,15 +20,24 @@ from .agy import (
     AGY_PREAMBLE,
     agy_message,
     agy_model,
+    agy_reachable,
     agy_result,
+    agy_sandbox,
     agy_sandbox_parts,
     agy_schema,
     agy_seed_state,
     agy_unsandboxed,
 )
 from .backends import codex_is_confined, detect_backends
-from .config import RESULT_SCHEMA, env_flag
-from .results import _unwrap_envelope, agy_answer, parse_review
+from .config import env_flag
+from .findings import validate_result
+from .results import (
+    EXPECTED_REVIEWERS,
+    _unwrap_envelope,
+    agy_answer,
+    agy_failure,
+    parse_review,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -55,10 +56,17 @@ def _codex_check() -> int:
     return 0 if ok else 1
 
 
-def _agy_detect() -> int:
-    """Print the model agy will run, or nothing if agy is not to be used."""
+def _agy_detect(prefer_hermes: str = "false") -> int:
+    """Print the model agy will run, or nothing if agy is not to be used.
+
+    ``prefer_hermes`` is the runner's PREFER_HERMES, ``true`` for a project pinned to
+    Bedrock: agy is then not even detected unless asked for by name.
+    """
     with contextlib.redirect_stdout(sys.stderr):
-        ok = detect_backends(verify_codex=False)["agy"]
+        found = detect_backends(
+            verify_codex=False, prefer_hermes=prefer_hermes == "true"
+        )
+        ok = found["agy"]
         model = agy_model() if ok else None
     print(model or "")
     return 0
@@ -87,6 +95,20 @@ def _agy_sandbox(workspace: str, state: str) -> int:
     return 0
 
 
+def _agy_reachable(workspace: str, state: str) -> int:
+    """Exit 0 if agy's sandbox reaches nothing it must not, right now; else say what.
+
+    The startup check's last part, again before the launch (``agy.agy_reachable``).
+    """
+    if agy_unsandboxed():
+        return 0
+    failure = agy_reachable(agy_sandbox(Path(workspace), Path(state)), Path(workspace))
+    if failure:
+        print(failure)
+        return 1
+    return 0
+
+
 def _agy_preamble(prompt_file: str) -> int:
     """Prepend agy's no-tools preamble to the prompt file, which records what it is sent."""
     path = Path(prompt_file)
@@ -100,36 +122,27 @@ def _agy_message(prompt_file: str) -> int:
     return 0
 
 
-def _extract(raw: str, out: str, backend: str = "") -> int:
-    """Write the review in ``raw`` to ``out``, unwrapped and parsed as the loop does it.
+def _extract(raw: str, out: str, slot: str, backend: str = "") -> int:
+    """Write the review in ``raw`` to ``out``, unwrapped and checked as the loop does it.
 
     agy's stream is read as such only when agy ran the slot, and only a finished turn
-    counts (``results.agy_answer``). The review must carry the schema's required keys.
+    counts. Then the loop's own ``validate_result``: the required keys, a list of
+    findings that are objects, and the reviewer named by the slot, not by the model.
     """
     text = Path(raw).read_text(encoding="utf-8", errors="replace")
     if backend == "agy":
         result = agy_result(text)
-        if result is None or result.get("status") != "SUCCESS":
-            why = (
-                "no result event"
-                if result is None
-                else (
-                    f"turn status {result.get('status')}: {result.get('error') or ''}"
-                )
-            )
-            print(f"agy gave no review ({why})", file=sys.stderr)
+        failed = agy_failure(result)
+        if failed:
+            print(f"agy gave no review ({failed[:600]})", file=sys.stderr)
             return 1
         text = agy_answer(result)
     else:
         text = _unwrap_envelope(text)
-    review = parse_review(text)
+    review = validate_result(parse_review(text), int(slot), EXPECTED_REVIEWERS)
     if review is None:
-        print("no JSON object in the output", file=sys.stderr)
-        return 1
-    required = json.loads(RESULT_SCHEMA.read_text(encoding="utf-8"))["required"]
-    missing = sorted(set(required) - set(review))
-    if missing:
-        print(f"Missing keys: {missing}", file=sys.stderr)
+        print("no review in the output: no JSON object with the required keys and a"
+              " list of findings", file=sys.stderr)  # fmt: skip
         return 1
     Path(out).write_text(json.dumps(review, indent=2), encoding="utf-8")
     return 0
@@ -160,6 +173,7 @@ _COMMANDS: dict[str, Callable[..., int]] = {
     "agy-detect": _agy_detect,
     "agy-schema": _agy_schema,
     "agy-sandbox": _agy_sandbox,
+    "agy-reachable": _agy_reachable,
     "agy-preamble": _agy_preamble,
     "agy-message": _agy_message,
     "extract": _extract,

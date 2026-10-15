@@ -294,19 +294,20 @@ def main() -> int:
         args.review_dir if args.review_dir is not None else repo / "data" / "reviews"
     )
 
-    backends = detect_backends()
+    # Bedrock opt-in: explicit flag OR project-pinned via .use-hermes
+    # at repo root. (Marker lives outside .claude/ so it can be committed
+    # even when .claude/ is gitignored.) Default is the free local CLI
+    # path so casual users aren't surprised by Bedrock charges. Decided
+    # before detection: a project pinned to Bedrock does not run agy.
+    prefer_hermes = args.prefer_hermes or (repo / ".use-hermes").exists()
+    if prefer_hermes:
+        print("Bedrock opt-in: routing Anthropic reviewers via Hermes")
+
+    backends = detect_backends(prefer_hermes=prefer_hermes)
     print(f"Backends: {backends}")
     if not backends["claude"] and not backends["hermes"]:
         print("ERROR: need claude or hermes for Anthropic reviewers")
         return 1
-
-    # Bedrock opt-in: explicit flag OR project-pinned via .use-hermes
-    # at repo root. (Marker lives outside .claude/ so it can be committed
-    # even when .claude/ is gitignored.) Default is the free local CLI
-    # path so casual users aren't surprised by Bedrock charges.
-    prefer_hermes = args.prefer_hermes or (repo / ".use-hermes").exists()
-    if prefer_hermes:
-        print("Bedrock opt-in: routing Anthropic reviewers via Hermes")
 
     session_id = datetime.now(tz=UTC).strftime("%Y%m%d_%H%M%S")
     session_dir = review_dir / f"loop_{session_id}"

@@ -23,16 +23,15 @@ import pwd
 import re
 import shlex
 import shutil
+import socket
+import struct
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from .config import AGY_MODELS_TIMEOUT, RESULT_SCHEMA, env_flag
 from .proc import run, signals_unwind
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
 
 # The flags that remain once the sandbox is in place: --sandbox restricts terminal
 # commands, and --disable-slash-commands keeps the contributor's diff from expanding as
@@ -312,9 +311,10 @@ def _homes() -> list[Path]:
     a nested agent -- and hiding only ``$HOME`` then leaves ``~/.ssh`` readable. Parents
     first, so a home inside the other is mounted on top of it, not under it.
 
-    Raises OSError when the account has no passwd entry (a container run under a bare
-    numeric UID): its own home is then unknown, so it cannot be hidden, and the sandbox
-    check fails rather than the run going on with a home it could not account for.
+    Raises OSError when a home cannot be hidden, and the sandbox check then fails rather
+    than the run going on with a home it could not account for: an account with no
+    passwd entry (a container under a bare numeric UID), whose home is unknown; or a
+    home of ``/``, which cannot be replaced without replacing everything.
     """
     try:
         account = Path(pwd.getpwuid(os.getuid()).pw_dir)
@@ -322,8 +322,10 @@ def _homes() -> list[Path]:
         raise OSError(
             f"uid {os.getuid()} has no passwd entry; its home is unknown"
         ) from exc
-    homes = {Path.home(), account}
-    return sorted((h for h in homes if h != Path("/")), key=lambda h: len(h.parts))
+    homes = {Path.home().resolve(), account.resolve()}
+    if Path("/") in homes:
+        raise OSError("a home directory of / cannot be hidden from agy")
+    return sorted(homes, key=lambda h: len(h.parts))
 
 
 def _resolver_dir() -> Path | None:
@@ -336,6 +338,18 @@ def _resolver_dir() -> Path | None:
     if resolver.is_relative_to("/run") and resolver != Path("/run"):
         return resolver
     return None
+
+
+def _maskable(sock: str) -> bool:
+    """Whether ``sock`` exists outside /run, which the sandbox replaces anyway.
+
+    One the user cannot even stat -- under a root-only directory -- is one the user
+    cannot reach, so it needs no mask; that is not an error to lose the slot over.
+    """
+    try:
+        return os.path.lexists(sock) and not Path(sock).resolve().is_relative_to("/run")
+    except OSError:
+        return False
 
 
 def agy_sandbox(workspace: Path, state: Path) -> list[str]:
@@ -351,30 +365,14 @@ def agy_sandbox_parts(workspace: Path, state: Path) -> tuple[list[str], list[str
     launcher can put a command between them: the bash runner's ``timeout`` goes after
     env, so its command line, readable by any local user in /proc, holds no values.
 
-    What it closes, each measured or reported by a review of this wrapper:
-
-    - writes anywhere but the workspace (``--ro-bind / /``);
-    - the home directory, read whole -- ``~/.ssh``, cloud credentials, other tools'
-      tokens -- both of them (``_homes``), and /tmp: replaced by empty ones holding
-      only what agy needs;
-    - agy's real state, replaced by ``state`` (see ``agy_seed_state``);
-    - the environment, cleared to ``_AGY_ENV`` before bwrap starts (``env -i``): bwrap
-      runs as PID 1 inside, and ``/proc/1/environ`` would otherwise hand every API key
-      in the caller's environment to a file read, whatever the child was given;
-    - host processes, and through ``/proc/<pid>/cwd`` their writable view of the
-      filesystem (``--unshare-pid``); a terminal to inject input into
-      (``--new-session``, CVE-2017-5226);
-    - sockets that run code outside the sandbox. Most live under /run, replaced
-      wholesale: docker's; the system D-Bus, where polkit lets a local session power off
-      or mount disks; snapd's; the user's runtime directory with the session bus, whose
-      systemd answers ``systemd-run --user``. Only the resolver's directory is put
-      back, for DNS. /tmp holds tmux's server socket and X11's; ``_HOST_SOCKETS``
-      masks the known ones elsewhere, and the check refuses any other left reachable.
-
-    Not closed, and said so in the README: the network, which agy needs to reach its
-    model -- and with it abstract-namespace sockets other than a session bus,
-    localhost services and a cloud metadata endpoint. Headless agy refused the one terminal command it tried; whether its
-    browser and MCP tools can reach the network unprompted has not been measured.
+    It replaces the home directories (``_homes``), /tmp and /run with empty ones --
+    putting back only the resolver's directory for DNS -- masks ``_HOST_SOCKETS``,
+    gives agy a throwaway copy of its state (``agy_seed_state``), runs bwrap as PID 1
+    of a new process namespace and session, and clears the environment to
+    ``_AGY_ENV`` with ``env -i`` before bwrap starts: bwrap's own /proc/1/environ
+    would otherwise hand every API key to a file read. What that closes and what it
+    does not -- the network, mainly -- is docs/agy-sandbox.md; ``agy_is_confined``
+    proves it.
 
     The bash launcher in docs/ensemble-review.md builds its wrapper by calling this
     (through ``runner_cli``), so there is one copy.
@@ -397,7 +395,7 @@ def agy_sandbox_parts(workspace: Path, state: Path) -> tuple[list[str], list[str
     if resolver is not None:
         wrap += ["--ro-bind", str(resolver), str(resolver)]
     for sock in _HOST_SOCKETS:
-        if Path(sock).exists() and not Path(sock).resolve().is_relative_to("/run"):
+        if _maskable(sock):
             wrap += ["--ro-bind", "/dev/null", sock]
     for home in _homes():
         wrap += ["--tmpfs", str(home)]
@@ -439,30 +437,60 @@ class _Box:
         self.stderr = done.stderr or ""
         return done.stdout or ""
 
-    def strays(self, root: Path) -> set[str]:
-        """What ``root`` shows inside beyond what the wrapper mounted there."""
+    def mounted_under(self, root: Path) -> set[str]:
+        """The names directly under ``root`` that the wrapper mounted there."""
         # Mount destinations only -- an environment value such as a PATH under HOME is
         # not a mount. Paths, not strings: HOME=/home/user/ is the same directory.
         indexed = list(enumerate(self.wrap))
         dests = [Path(self.wrap[i + 1]) for i, a in indexed if a == "--tmpfs"]
         dests += [Path(self.wrap[i + 2]) for i, a in indexed if a.endswith("-bind")]
-        mounted = {
+        return {
             d.relative_to(root).parts[0]
             for d in dests
             if d.is_relative_to(root) and d != root
         }
-        # One name per line, so a name with a space stays one name.
-        listed = self.sh(f"ls -A1 {shlex.quote(str(root))}")
-        return {n for n in listed.split("\n") if n} - mounted
 
 
-# Each check returns why the wrapper fails it, or None. In order: the codex check's
-# three -- it runs, it reads, it refuses a write outside the workspace -- then one per
-# thing the wrapper claims. A canary that survives because the sandbox never launched
-# is not a pass, which is why it runs first.
+#: Opens each answer in the probe's output; what follows, up to the next mark, is it.
+_MARK = "@@mmcra-probe@@"
+
+
+def _probe(box: _Box, canary: Path, roots: list[Path]) -> dict[str, str]:
+    """Everything the check asks inside the sandbox, from one launch of it.
+
+    One script with its answers marked, where one launch per question had the check
+    start bwrap a dozen times. The two writes are in it too; whether they landed is
+    read from outside.
+    """
+    q = shlex.quote
+    questions = {
+        "agy": "agy --version >/dev/null 2>&1 && echo AGY_OK",
+        # Read first, then try to overwrite.
+        "canary": f"cat {q(str(canary))}; echo changed > {q(str(canary))}",
+        "workspace": f"echo ok > {q(str(box.workspace / 'probe'))}",
+        "pidns": "readlink /proc/self/ns/pid",
+        # Every process's environment, not only the shell's: bwrap is PID 1 inside.
+        "env": 'printf %s "$MMCRA_ENV_PROBE"; cat /proc/[0-9]*/environ'
+        " | tr '\\0' '\\n' | grep -q '^MMCRA_ENV_PROBE=' && echo LEAK",
+        "unix": "cat /proc/net/unix",
+        **{f"ls {i}": f"ls -A1 {q(str(root))}" for i, root in enumerate(roots)},
+    }
+    script = "\n".join(
+        f"echo {_MARK}{key}; {{ {ask}; }} 2>/dev/null" for key, ask in questions.items()
+    )
+    said = box.sh(script, env={**os.environ, "MMCRA_ENV_PROBE": "x"})
+    answers: dict[str, list[str]] = {}
+    for line in said.split("\n"):
+        if line.startswith(_MARK):
+            answers[line[len(_MARK) :]] = []
+        elif answers:
+            answers[next(reversed(answers))].append(line)
+    return {key: "\n".join(lines) for key, lines in answers.items()}
 
 
 def _check_runs(box: _Box) -> str | None:
+    # First, alone: a canary that survives because the sandbox never launched is not a
+    # pass, and why it did not launch is in its stderr.
     if "SANDBOX_OK" in box.sh("echo SANDBOX_OK"):
         return None
     detail = (box.stderr.strip().splitlines() or [""])[-1][:200]
@@ -475,95 +503,160 @@ def _check_runs(box: _Box) -> str | None:
     return f"bwrap could not start: {detail}{hint}"
 
 
-def _check_agy_starts(box: _Box) -> str | None:
-    # A wrapper that hides agy's runtime passes every check below and leaves a slot
+# Each check below reads the probe's answers and returns why the wrapper fails, or None.
+
+
+def _check_agy_starts(seen: dict[str, str]) -> str | None:
+    # A wrapper that hides agy's runtime passes every other check and leaves a slot
     # that never answers.
-    if "AGY_OK" in box.sh("agy --version >/dev/null 2>&1 && echo AGY_OK"):
-        return None
-    return "agy does not start inside its sandbox"
+    return (
+        None
+        if "AGY_OK" in seen.get("agy", "")
+        else "agy does not start inside its sandbox"
+    )
 
 
-def _check_files(box: _Box, canary: Path) -> str | None:
+def _check_files(seen: dict[str, str], canary: Path, workspace: Path) -> str | None:
     # A reviewer that cannot read the system cannot run.
-    if "original" not in box.sh(f"cat {shlex.quote(str(canary))}"):
+    if "original" not in seen.get("canary", ""):
         return "bwrap sandbox could not read outside the workspace"
-    # The one that matters: is a write outside the workspace REFUSED?
-    box.sh(f"echo changed > {shlex.quote(str(canary))}")
+    # The one that matters: was the write outside the workspace REFUSED?
     if not canary.is_file() or canary.read_bytes() != b"original":
         return "bwrap sandbox ALLOWED a write outside the workspace"
     # And inside it, allowed? agy keeps its working files there, and fails without
     # them looking like a reviewer with nothing to say.
-    box.sh(f"echo ok > {shlex.quote(str(box.workspace / 'probe'))}")
-    if not (box.workspace / "probe").is_file():
+    if not (workspace / "probe").is_file():
         return "bwrap sandbox refused a write inside agy's workspace"
     return None
 
 
-def _check_hidden(box: _Box) -> str | None:
-    for root in (*_homes(), Path("/tmp"), Path("/run")):
-        extra = box.strays(root)
+def _check_hidden(seen: dict[str, str], box: _Box, roots: list[Path]) -> str | None:
+    for i, root in enumerate(roots):
+        listed = {name for name in seen.get(f"ls {i}", "").split("\n") if name}
+        extra = listed - box.mounted_under(root)
         if extra:
             return f"bwrap sandbox shows {root}/{sorted(extra)[0]}"
     return None
 
 
-def _check_processes(box: _Box) -> str | None:
+def _check_processes(seen: dict[str, str]) -> str | None:
     # A namespace, compared as one: a host PID can exist inside too (the loop as PID 1
     # in a container), so looking one up proves nothing.
-    inner = box.sh("readlink /proc/self/ns/pid").strip()
+    inner = seen.get("pidns", "").strip()
     if not inner or inner == os.readlink("/proc/self/ns/pid"):
         return "bwrap sandbox shares the host's processes"
     return None
 
 
-def _check_environment(box: _Box) -> str | None:
-    # Every process's environment, not only the child's: bwrap is PID 1 inside, and
-    # its /proc/1/environ is as readable as the child's own variables.
-    leak = box.sh(
-        'printf %s "$MMCRA_ENV_PROBE"; cat /proc/[0-9]*/environ 2>/dev/null'
-        " | tr '\\0' '\\n' | grep -q '^MMCRA_ENV_PROBE=' && echo LEAK",
-        env={**os.environ, "MMCRA_ENV_PROBE": "x"},
-    )
-    return "bwrap sandbox passes the host environment through" if leak.strip() else None
+def _check_environment(seen: dict[str, str]) -> str | None:
+    if seen.get("env", "").strip():
+        return "bwrap sandbox passes the host environment through"
+    return None
 
 
-def _check_sockets(box: _Box, unix: str) -> str | None:
-    """``unix`` is /proc/net/unix, which lists every socket on the host: the sandbox
-    shares the network namespace."""
-    # Every path socket the sandbox can still connect to, not a list of known ones: a
-    # list always lags what is installed. The resolver's directory is put back on
-    # purpose, for DNS.
-    paths = sorted(
-        {
-            f
-            for line in unix.splitlines()[1:]
-            for f in line.split()[7:8]
-            if f.startswith("/")
-        }
-    )
-    quoted = " ".join(shlex.quote(p) for p in paths)
-    script = f'for s in {quoted}; do [ -S "$s" ] && [ -w "$s" ] && echo "$s"; done'
+def _unix_names(unix: str) -> list[str]:
+    """Every name bound in /proc/net/unix, paths and ``@abstract`` ones, whole.
+
+    Raises ValueError if ``unix`` is not that file: an empty or unreadable list would
+    pass every check that reads it.
+    """
+    lines = unix.split("\n")
+    if not lines[0].startswith("Num "):
+        raise ValueError("could not read the socket list (/proc/net/unix)")
+    # The name is the eighth field to the end of the line, spaces and all.
+    fields = (line.split(None, 7) for line in lines[1:])
+    return [f[7] for f in fields if len(f) == 8]
+
+
+def _check_sockets(box: _Box, names: list[str]) -> str | None:
+    """No socket ``names`` lists can be connected to from inside, but DNS's.
+
+    /proc/net/unix lists every socket on the host: the sandbox shares the network
+    namespace. Every path socket the sandbox can still reach is refused, not a list of
+    known ones, which always lags what is installed. The resolver's directory is put
+    back on purpose, for DNS.
+    """
+    relative = [n for n in names if not n.startswith(("/", "@"))]
+    if relative:
+        return f"a socket bound by a relative name ({relative[0]!r}) cannot be checked"
+    paths = sorted({n for n in names if n.startswith("/")})
+    # On stdin, one NUL-terminated path each: not in the script, which a busy host's
+    # list would push past the 128 KB limit on one argument.
+    probe = 'xargs -0 sh -c \'for s; do [ -S "$s" ] && [ -w "$s" ] && printf "%s\\0" "$s"; done\' sh'
+    reached = box.sh(probe, input="".join(f"{p}\0" for p in paths)) if paths else ""
     allowed = _resolver_dir()
-    for reached in box.sh(script).split("\n") if paths else []:
-        if reached and not (allowed and Path(reached).is_relative_to(allowed)):
-            return f"bwrap sandbox can reach {reached}"
+    for path in reached.split("\0"):
+        if path and not (allowed and Path(path).is_relative_to(allowed)):
+            return f"bwrap sandbox can reach {path}"
     # Abstract sockets belong to the network namespace, which agy keeps to reach its
     # model, so no mount hides them. A session bus -- dbus-launch's under /tmp, IBus's
-    # under ~/.cache -- starts any program it is asked to: refused. (An X server is
-    # named by ``_x_server_note``, not refused.)
-    for line in unix.splitlines()[1:]:
-        name = (line.split()[7:8] or [""])[0]
+    # under ~/.cache -- starts any program it is asked to.
+    for name in names:
         if name.startswith("@") and "/dbus-" in name:
             return f"bwrap sandbox can reach a session bus ({name})"
     return None
 
 
-def _x_server_note(unix: str) -> str:
-    # Reachable only if its access control lets this user in without the cookie, which
-    # the hidden home holds: named rather than refused, or no desktop could run agy.
-    if " @/tmp/.X11-unix/" in unix:
-        return "; an X server is reachable (@/tmp/.X11-unix), see the README"
-    return ""
+_X_DISPLAY = re.compile(r"@/tmp/\.X11-unix/X(\d+)$")
+
+
+def _check_x_servers(names: list[str]) -> str | None:
+    """No X server in ``names`` lets this user in without credentials.
+
+    Its abstract socket is reachable from inside, and one that admits a client with no
+    cookie -- stock GNOME and Xwayland grant ``SI:localuser`` -- takes keystrokes into a
+    terminal outside the sandbox. Asked from here, which is the same thing: the server
+    decides by the connecting uid, and inside it is this one.
+    """
+    for name in names:
+        match = _X_DISPLAY.match(name)
+        if match and _x_admits(name):
+            display = f":{match.group(1)}"
+            return (
+                f"the X server {display} admits this user without a cookie, and a"
+                f" program inside could type into a terminal outside; `xhost"
+                f" -si:localuser:$USER` (on DISPLAY={display}) closes that"
+            )
+    return None
+
+
+def _x_admits(name: str) -> bool:
+    """Whether the X server at abstract socket ``name`` accepts a client with no auth."""
+    # The connection setup: little-endian, protocol 11.0, no authorization name or
+    # data. The first byte of the reply is 1 for Success, 0 Failed, 2 Authenticate.
+    setup = b"l\0" + struct.pack("<HHHHH", 11, 0, 0, 0, 0)
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+            conn.settimeout(2)
+            conn.connect("\0" + name[1:])
+            conn.sendall(setup)
+            return conn.recv(1) == b"\x01"
+    except OSError:
+        return False
+
+
+def _check_reachable(box: _Box, unix: str) -> str | None:
+    """No socket and no X server ``unix`` (/proc/net/unix) lists is reachable."""
+    try:
+        names = _unix_names(unix)
+    except ValueError as exc:
+        return str(exc)
+    return _check_sockets(box, names) or _check_x_servers(names)
+
+
+def agy_reachable(wrap: list[str], workspace: Path) -> str | None:
+    """What the sandbox ``wrap`` can reach right now that it must not, or None.
+
+    The startup check describes the host as it was then. A loop runs for half an hour,
+    and a session bus, a socket or an X server that appears later would be reachable
+    from every later round, so this part of it runs again before each launch. The list
+    is read here: the sandbox shares this network namespace, so it is the same list.
+    """
+    try:
+        unix = Path("/proc/net/unix").read_text(encoding="utf-8", errors="replace")
+        return _check_reachable(_Box(wrap, workspace), unix)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"could not check what agy's sandbox can reach: {exc}"
 
 
 def agy_is_confined() -> tuple[bool, str]:
@@ -571,8 +664,8 @@ def agy_is_confined() -> tuple[bool, str]:
 
     It runs, agy starts in it, it reads outside the workspace but writes only inside,
     both homes, /tmp and /run hold only what was put there, the process namespace is
-    not the host's, the environment is cleared, and no session bus or named host
-    socket is reachable, by path or abstract name.
+    not the host's, the environment is cleared, and nothing that runs code outside --
+    a socket, a session bus, an X server -- is reachable.
     """
     if shutil.which("bwrap") is None:
         return False, (
@@ -599,27 +692,24 @@ def agy_is_confined() -> tuple[bool, str]:
             # An empty state: this checks the mounts, which need no sign-in, so there
             # is no reason for a copy of the token to exist while it runs.
             box = _Box(agy_sandbox(workspace, Path(st).resolve()), workspace)
-            checks: tuple[Callable[[_Box], str | None], ...] = (
-                _check_runs,
-                _check_agy_starts,
-                functools.partial(_check_files, canary=canary),
-                _check_hidden,
-                _check_processes,
-                _check_environment,
-            )
-            for check in checks:
-                failure = check(box)
-                if failure:
-                    return False, failure
-            unix = box.sh("cat /proc/net/unix")
-            failure = _check_sockets(box, unix)
+            failure = _check_runs(box)
             if failure:
                 return False, failure
-            note = _x_server_note(unix)
+            roots = [*_homes(), Path("/tmp"), Path("/run")]
+            seen = _probe(box, canary, roots)
+            failure = (
+                _check_agy_starts(seen)
+                or _check_files(seen, canary, workspace)
+                or _check_hidden(seen, box, roots)
+                or _check_processes(seen)
+                or _check_environment(seen)
+                or _check_reachable(box, seen.get("unix", ""))
+            )
+            if failure:
+                return False, failure
     except (OSError, subprocess.TimeoutExpired) as exc:
         return False, f"agy sandbox check failed: {exc}"
-    verified = "agy sandbox verified (read-only; home, /tmp, /run hidden; no env)"
-    return True, verified + note
+    return True, "agy sandbox verified (read-only; home, /tmp, /run hidden; no env)"
 
 
 # -- its output ----------------------------------------------------------------

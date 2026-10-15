@@ -9,7 +9,7 @@ preflight audit. Three modes:
 - **Quick mode** (free): 2 Claude Code subagents with clean context.
   ~30 seconds. Use for every commit. Subagents run via the `Agent()`
   tool and use the parent Claude Code session's API allocation -- not
-  the local `claude`/`codex`/`gemini` CLIs.
+  the local `claude`/`codex`/`agy`/`gemini` CLIs.
 - **Full mode** (free or paid): 4 parallel reviewer subprocesses
   across providers using the locally installed CLIs by default. Free
   beyond your existing subscriptions when `claude` + `codex` + `agy` (or
@@ -102,10 +102,10 @@ ensemble-review agent (docs/ensemble-review.md)
   |  3. build context bundle      (docs, manifests, specs)              |
   |                                                                    |
   |  QUICK MODE:                         FULL MODE:                    |
-  |  Agent(opus, spec-contract)          R1: hermes opus  OR  claude -p |
+  |  Agent(opus, spec-contract)          R1: claude -p    OR  hermes    |
   |  Agent(sonnet, correctness)          R2: codex exec   (GPT-5.5)    |
   |  (2 subagents, free)                 R3: agy / gemini OR  claude -p |
-  |                                      R4: hermes opus  OR  claude -p |
+  |                                      R4: claude -p    OR  hermes    |
   |                                      (4 sessions, free or paid)    |
   |                                                                    |
   |  4. synthesize convergence report                                  |
@@ -310,7 +310,8 @@ on a real round: a reviewer killed at ten minutes wrote **fifteen findings, four
 of them critical, at nineteen** -- and the loop had collected results nine
 minutes earlier and thrown the whole review away. Reviewers now start in their
 own process group so a timeout can take the tree down, and the loop keeps
-looking for a late `result-N.json` for two minutes before giving up on a slot.
+looking for a late answer from codex -- the one reviewer that writes it to a file
+of its own (`codex-out-N.txt`) -- for two minutes before giving up on its slot.
 
 **The deadline scales with the diff.** A flat 600s killed exactly the reviewer
 worth waiting for -- the slowest slot is consistently the one with the most to
@@ -462,7 +463,9 @@ Anthropic reviewers. For cross-provider diversity, also install:
   Persist it in `~/.bashrc` / `~/.zshrc` / a project `.envrc` so
   every review picks it up.
 - [Gemini CLI](https://www.npmjs.com/package/@google/gemini-cli) for
-  Gemini (uses Google AI Studio, free tier available). The pipeline
+  Gemini (uses Google AI Studio, free tier available). Opt-in: set
+  `REVIEW_USE_GEMINI=1` to use it in slot 3 (agy is preferred where
+  installed). The pipeline
   pins `gemini-2.5-flash` by default -- as of 2026-05, the free tier
   does not include quota for `gemini-2.5-pro` (it returns HTTP 429).
   If you have paid quota and want Pro, set `GEMINI_MODEL=gemini-2.5-pro`

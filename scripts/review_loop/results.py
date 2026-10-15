@@ -98,6 +98,22 @@ def agy_denied(result: dict[str, Any]) -> list[str]:
     ]
 
 
+def agy_summary(result: dict[str, Any]) -> str:
+    """What agy's turn said, for a person: its answer, or why there is none.
+
+    A failed turn has no response but says why, which is the useful part. So does one
+    cut short by a refused tool call, which otherwise reads as silence.
+    """
+    said = result.get("response") or result.get("error") or ""
+    denied = agy_denied(result)
+    if not said and denied:
+        said = (
+            f"agy ended its turn with no answer after a refused tool call"
+            f" ({', '.join(denied)})"
+        )
+    return str(said).strip()
+
+
 def agy_answer(result: dict[str, Any] | None) -> str:
     """The review in agy's ``result`` event (``agy_result``), or "" if it gave none.
 

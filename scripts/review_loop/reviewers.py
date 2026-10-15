@@ -217,8 +217,9 @@ def _agy_cmd(model: str) -> list[str]:
     return agy_command(model, "--json-schema", agy_schema(RESULT_SCHEMA))
 
 
-def _agy_workspace(repo: Path | None = None) -> Path | None:
-    """An empty directory for agy to run in, outside the repository -- or None.
+def _outside_workspace(repo: Path | None = None) -> Path | None:
+    """An empty directory for agy or gemini to run in, outside the repository -- or
+    None.
 
     The workspace is the one place the sandbox leaves writable, so it must not be the
     repository under review (``repo``, from ``--repo``, or else the directory the loop
@@ -505,34 +506,36 @@ def _launch_one(
 def _pick_backend(slot: int, round_: _Round) -> _Picked | None:
     """The backend for ``slot`` -- or None if none is available.
 
-    If agy is chosen but cannot be set up, the slot gets the backend it would have had
-    without agy, as the routing tables say: an empty slot 3 every round never
-    converges. The prompt is built once the backend is settled, not per attempt.
+    If agy, or gemini, is chosen but cannot be set up, the slot gets the backend it
+    would have had without it, as the routing tables say: an empty slot 3 every round
+    never converges. The prompt is built once the backend is settled, not per attempt.
     """
     prompt_path = round_.round_dir / f"prompt-{slot}.txt"
-    first, without_agy = round_.backends, {**round_.backends, "agy": False}
-    for backends in (first, without_agy):
+    backends = dict(round_.backends)
+    while True:
         choice = _choose_command(
             slot, prompt_path, round_.writes_to, backends, round_.prefer_hermes
         )
         if choice is None:
             return None
         cmd, label = choice
+        if cmd[0] not in ("agy", "gemini"):
+            return _Picked(cmd, cmd[0], label, None)
         if cmd[0] == "gemini":
             # Not from the repository under review, whose .gemini/settings.json --
             # chosen by the change being reviewed -- it would load (--skip-trust):
-            # an empty directory of its own, in the round's private one. Its prompt
+            # an empty directory of its own, checked to be outside it. Its prompt
             # carries the diff and the audit.
-            workspace = round_.writes_to / f"ws-{slot}"
-            workspace.mkdir(exist_ok=True)
-            return _Picked(cmd, "gemini", label, workspace)
-        if cmd[0] != "agy":
-            return _Picked(cmd, cmd[0], label, None)
-        prepared = _prepare_agy(slot, cmd, round_.repo)
-        if prepared is not None:
-            wrapped, workspace = prepared
-            return _Picked(wrapped, "agy", label, workspace)
-    return None
+            workspace = _outside_workspace(round_.repo)
+            if workspace is not None:
+                return _Picked(cmd, "gemini", label, workspace)
+            print(f"  R{slot}: gemini has no workspace outside the repo (see TMPDIR)")
+        else:
+            prepared = _prepare_agy(slot, cmd, round_.repo)
+            if prepared is not None:
+                wrapped, workspace = prepared
+                return _Picked(wrapped, "agy", label, workspace)
+        backends[cmd[0]] = False
 
 
 def _spawn(
@@ -583,7 +586,7 @@ def _prepare_agy(
     slot: int, cmd: list[str], repo: Path | None
 ) -> tuple[list[str], Path] | None:
     """agy's command inside its sandbox, and its workspace -- or None, saying why."""
-    workspace = _agy_workspace(repo)
+    workspace = _outside_workspace(repo)
     if workspace is None:
         print(f"  R{slot}: agy has no workspace outside the repo (see TMPDIR)")
         return None
@@ -760,8 +763,11 @@ def _publish_outputs(out_dir: Path, round_dir: Path) -> None:
             # say, a codex answer planted for a codex that wrote none -- so it goes
             # whether or not there is a copy to replace it.
             (round_dir / name).unlink(missing_ok=True)
-            if (out_dir / name).is_file():
-                shutil.copyfile(out_dir / name, round_dir / name)
+            # A regular file only: a symlink planted under the name would publish
+            # whatever it points to.
+            source = out_dir / name
+            if source.is_file() and not source.is_symlink():
+                shutil.copyfile(source, round_dir / name, follow_symlinks=False)
 
 
 def _await_reviewers(procs: list[ReviewerProc], out_dir: Path, n_lines: int) -> None:

@@ -228,14 +228,36 @@ def agy_schema(path: Path = RESULT_SCHEMA) -> str:
         from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
         from jsonschema.exceptions import SchemaError  # type: ignore[import-untyped]
     except ImportError:  # the loop runs without it; validate_review_results does not
-        if not isinstance(schema, dict) or schema.get("type") != "object":
-            raise ValueError(f"{path} is not an object schema") from None
+        _check_schema_shape(schema, path)
     else:
         try:
             Draft202012Validator.check_schema(schema)
         except SchemaError as exc:
             raise ValueError(f"{path} is not a valid schema: {exc.message}") from exc
     return json.dumps(schema)
+
+
+def _check_schema_shape(schema: object, path: Path) -> None:
+    """The structure a result schema needs, where jsonschema is not there to check
+    all of it: an object schema whose properties are schemas, requiring only keys it
+    has. A type check alone let a schema with broken parts through, for agy to
+    reject only after launch."""
+
+    def fail(why: str) -> ValueError:
+        return ValueError(f"{path} is not a usable result schema: {why}")
+
+    if not isinstance(schema, dict) or schema.get("type") != "object":
+        raise fail("not an object schema")
+    properties = schema.get("properties")
+    if not isinstance(properties, dict) or not all(
+        isinstance(value, dict) for value in properties.values()
+    ):
+        raise fail("its properties are not a mapping of schemas")
+    required = schema.get("required", [])
+    if not isinstance(required, list) or not all(
+        isinstance(key, str) and key in properties for key in required
+    ):
+        raise fail("it requires keys it does not define")
 
 
 def agy_message(prompt: str) -> str:

@@ -150,7 +150,8 @@ class AgyCase:
         )
         script = tmp_path / "t.sh"
         script.write_text(
-            'REVIEW_ROOT="$1"\nOUT_DIR="$(dirname "$2")"\nAGY_SCRATCH=()\n'
+            'REVIEW_ROOT="$1"\nHELPER_ROOT="$1"\nOUT_DIR="$(dirname "$2")"\n'
+            + "AGY_SCRATCH=()\n"
             + 'AGY_SCHEMA="" AGY_WS="" AGY_STATE="" AGY_ENVP=() AGY_BWRAP=()\n'
             + real
             + "review_helper() {\n"

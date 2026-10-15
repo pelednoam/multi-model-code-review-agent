@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import subprocess
 import sys
 import time
@@ -51,6 +52,7 @@ class TestReviewerProcesses(AgyCase):
         (proc,) = started
         assert proc.poll() is not None
 
+    @pytest.mark.skipif(not hasattr(os, "waitid"), reason="needs os.waitid")
     def test_a_finished_reviewer_is_not_reaped_until_its_group_is_killed(
         self, tmp_path: Path
     ) -> None:
@@ -206,3 +208,14 @@ class TestReviewerProcesses(AgyCase):
         assert (
             reviewers.launch_reviewers(tmp_path, "diff", "{}", "", self.BACKENDS) == {}
         )
+
+    def test_a_planted_symlink_is_not_published(self, tmp_path: Path) -> None:
+        # Copied by name, a symlink under a reviewer's output name published whatever
+        # it pointed to.
+        out, round_dir = tmp_path / "out", tmp_path / "round"
+        out.mkdir()
+        round_dir.mkdir()
+        (tmp_path / "secret").write_text("not a review")
+        (out / "raw-1.txt").symlink_to(tmp_path / "secret")
+        reviewers._publish_outputs(out, round_dir)
+        assert not (round_dir / "raw-1.txt").exists()

@@ -34,7 +34,11 @@ class TestRunnerCli:
         # One short line in each place, the detection snippet's and the runner's.
         doc = AGENT_DOC.read_text()
         assert doc.count('python3 -I "$PWD/' + self.ENTRY + '" "$@"') == 1
-        assert 'python3 -I "$REVIEW_ROOT/' + self.ENTRY + '" "$@"' in runner_script()
+        # The runner's from a private copy taken before any reviewer starts.
+        assert 'python3 -I "$HELPER_ROOT/' + self.ENTRY + '" "$@"' in runner_script()
+        assert 'cp -R "$REVIEW_ROOT/scripts/review_loop" "$HELPER_ROOT/scripts/"' in (
+            runner_script()
+        )
 
     def test_the_checkout_root_does_not_shadow_the_stdlib(self, tmp_path: Path) -> None:
         # With the root put first on sys.path, a json.py at its top replaced the
@@ -234,6 +238,25 @@ class TestRunnerCli:
         sent = json.loads(line)["message"]["content"]
         assert sent == prompt.read_text(encoding="utf-8")
         assert sent.endswith("Review this.\n") and sent != "Review this.\n"
+
+    @pytest.mark.parametrize(
+        "schema",
+        [
+            {"type": "object", "properties": {"a": "not a schema"}},
+            {"type": "object", "properties": {"a": {}}, "required": ["b"]},
+            {"type": "object", "properties": []},
+        ],
+        ids=["property-not-a-schema", "requires-undefined", "properties-not-a-map"],
+    )
+    def test_a_broken_schema_fails_without_jsonschema(
+        self, tmp_path: Path, schema: dict[str, object]
+    ) -> None:
+        # With no jsonschema installed, only the top-level type was looked at, and agy
+        # rejected the rest only after launch.
+        from scripts.review_loop.agy import _check_schema_shape
+
+        with pytest.raises(ValueError, match="not a usable result schema"):
+            _check_schema_shape(schema, tmp_path / "s.json")
 
     def test_the_real_schema_is_usable(self) -> None:
         done = self._cli("agy-schema", str(SCHEMA_PATH))

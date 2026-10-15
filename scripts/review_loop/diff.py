@@ -42,23 +42,33 @@ class SecretsDetectedError(RuntimeError):
 DEFAULT_BASE = "origin/main"
 
 
-def _warn_of_vendored_changes(repo: Path, base: str) -> None:
+def _warn_of_vendored_changes(repo: Path, diff_range: list[str]) -> None:
     """Name the vendored review files this change touches, which are not reviewed.
 
     They are left out of a host project's diff (``diff_pathspec``) so that a fresh
     install is not spent reviewing the reviewer. But full mode runs the project's own
     copy -- its sandbox builder among them -- so a change that weakens it would run
     with no reviewer having seen it. Re-vendoring changes them too, so this warns
-    rather than refuses.
+    rather than refuses. ``diff_range`` is the range the diff was taken over, its
+    fallbacks included, and new files count as they do there.
     """
     if is_agent_repo(repo):
         return
     changed = run(
-        ["git", "diff", "--merge-base", base, "--name-only", "--", *VENDORED_PATHS],
+        ["git", "diff", *diff_range, "--name-only", "--", *VENDORED_PATHS], cwd=repo
+    )
+    added = run(
+        ["git", "ls-files", "--others", "--exclude-standard", "--", *VENDORED_PATHS],
         cwd=repo,
     )
-    names = (changed.stdout or "").split()
-    if changed.returncode == 0 and names:
+    if changed.returncode != 0 or added.returncode != 0:
+        print(
+            "  WARNING: could not tell whether this change touches the reviewer's own"
+            " vendored files, which are not reviewed"
+        )
+        return
+    names = (changed.stdout or "").split() + (added.stdout or "").split()
+    if names:
         shown = ", ".join(names[:5]) + (", ..." if len(names) > 5 else "")
         print(
             f"  WARNING: this change touches the reviewer's own vendored files"
@@ -98,11 +108,12 @@ def collect_diff(round_dir: Path, repo: Path, base: str = DEFAULT_BASE) -> tuple
     # host project, so without this a host's first review spends most of its
     # budget -- 60% of the diff on a fresh install -- reviewing the reviewer.
     pathspec = diff_pathspec(repo)
-    _warn_of_vendored_changes(repo, base)
     untracked = _untracked(repo, pathspec)
-    git = run(["git", "diff", "--merge-base", base, "--", *pathspec], cwd=repo)
+    diff_range = ["--merge-base", base]
+    git = run(["git", "diff", *diff_range, "--", *pathspec], cwd=repo)
     if git.returncode != 0:
-        fallback = run(["git", "diff", "HEAD~1", "--", *pathspec], cwd=repo)
+        diff_range = ["HEAD~1"]
+        fallback = run(["git", "diff", *diff_range, "--", *pathspec], cwd=repo)
         if fallback.returncode != 0:
             raise RuntimeError(
                 f"failed to collect diff: {git.stderr}\n{fallback.stderr}"
@@ -114,7 +125,9 @@ def collect_diff(round_dir: Path, repo: Path, base: str = DEFAULT_BASE) -> tuple
         # something else. And not when there are new files: those *are* the
         # change, and reviewing the last commit instead would review the
         # wrong thing without saying so.
-        git = run(["git", "diff", "HEAD~1", "--", *pathspec], cwd=repo)
+        diff_range = ["HEAD~1"]
+        git = run(["git", "diff", *diff_range, "--", *pathspec], cwd=repo)
+    _warn_of_vendored_changes(repo, diff_range)
     diff_input = (git.stdout or "") + untracked
     # Every hop is pinned to UTF-8 with replacement. scrub_diff.py pins its own
     # streams because CI runs under LC_ALL=C, but that was the only hop that

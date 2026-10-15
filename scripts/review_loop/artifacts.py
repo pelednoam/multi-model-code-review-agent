@@ -17,7 +17,7 @@ import json
 import textwrap
 from typing import TYPE_CHECKING, Any
 
-from .results import agy_denied, agy_failure, agy_result, printable
+from .results import agy_failure, agy_result, agy_summary, printable
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -31,7 +31,7 @@ Read `result-*.json`. Everything else is intermediate.
 
 | File | What it is |
 |---|---|
-| `result-N.json` | **The findings.** One object per reviewer, checked for the schema's required top-level keys and a list of finding objects (agy's is also held to `docs/ensemble_review_result_schema.json` by `--json-schema`; `scripts/validate_review_results.py` checks the full schema). This is what you want. |
+| `result-N.json` | **The findings.** One object per reviewer, checked for the schema's required top-level keys and a list of finding objects (agy's `structured_output`, when it has one, is also held to `docs/ensemble_review_result_schema.json` by `--json-schema`; a free-text answer is checked only as the others are; `scripts/validate_review_results.py` checks the full schema). This is what you want. |
 | `raw-N.txt` | Whatever the CLI printed on stdout, before parsing. Empty for the codex slot on a *successful* run — see below. For agy, one stream-json event per line; the review is the final `result` event's `structured_output`, and only a turn whose status is `SUCCESS` counts. |
 | `codex-out-N.txt` | The codex slot's answer, its last message (`-o`), read before its `raw-N.txt`. |
 | `stderr-N.txt` | Diagnostics. Read this when a slot is missing a `result-N.json`. |
@@ -158,16 +158,7 @@ def _display_text(text: str, event: dict[str, Any] | None) -> str:
     failed turn says, and a refused tool call, where parsing keeps nothing.
     """
     if event is not None:
-        # A failed turn has no response but says why, which is the useful part. So
-        # does one cut short by a refused tool call, which otherwise reads as silence.
-        said = event.get("response") or event.get("error") or ""
-        denied = agy_denied(event)
-        if not said and denied:
-            said = (
-                f"agy ended its turn with no answer after a refused tool call"
-                f" ({', '.join(denied)})"
-            )
-        return str(said).strip()[:_SALVAGE_CHARS]
+        return agy_summary(event)[:_SALVAGE_CHARS]
     try:
         wrapper = json.loads(text)
     except ValueError:

@@ -348,8 +348,8 @@ class TestAgyLaunch(AgyCase):
         target = tmp_path / "target"
         (target / ".tmp").mkdir(parents=True)
         monkeypatch.setattr(reviewers.tempfile, "tempdir", str(target / ".tmp"))
-        assert reviewers._agy_workspace(target) is None
-        assert reviewers._agy_workspace(tmp_path / "elsewhere") is not None
+        assert reviewers._outside_workspace(target) is None
+        assert reviewers._outside_workspace(tmp_path / "elsewhere") is not None
 
     def test_a_loop_started_from_root_still_gets_a_workspace(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -357,10 +357,10 @@ class TestAgyLaunch(AgyCase):
         # The cwd counted even with --repo given: from /, every workspace was inside it.
         monkeypatch.chdir("/")
         monkeypatch.setattr(reviewers.tempfile, "tempdir", str(tmp_path))
-        assert reviewers._agy_workspace(tmp_path / "repo") is not None
+        assert reviewers._outside_workspace(tmp_path / "repo") is not None
         # Without --repo, the cwd is the repository, and is still kept out.
         monkeypatch.chdir(tmp_path)
-        assert reviewers._agy_workspace() is None
+        assert reviewers._outside_workspace() is None
 
     def test_the_check_passes_with_a_trailing_slash_home_and_a_spaced_tmpdir(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -381,7 +381,7 @@ class TestAgyLaunch(AgyCase):
     ) -> None:
         monkeypatch.setenv("REVIEW_USE_AGY", "1")
         monkeypatch.setenv("AGY_MODEL", self.MODEL)
-        monkeypatch.setattr(reviewers, "_agy_workspace", lambda repo=None: None)
+        monkeypatch.setattr(reviewers, "_outside_workspace", lambda repo=None: None)
         _, seen = self._launch(monkeypatch, tmp_path)
         cmd = seen["cmd"]
         assert isinstance(cmd, list) and cmd[0] == "claude"
@@ -400,10 +400,16 @@ class TestAgyLaunch(AgyCase):
         # From the repository under review, --skip-trust had it load the project's own
         # .gemini/settings.json, which the change being reviewed chooses.
         monkeypatch.setenv("REVIEW_USE_GEMINI", "1")
+        monkeypatch.setattr(reviewers.tempfile, "tempdir", str(tmp_path))
         found = {**self.BACKENDS, "agy": False}
-        out = tmp_path / "out"
-        out.mkdir()
-        round_ = reviewers._Round("d", "{}", "", tmp_path, found, False, None, out)
+        repo = tmp_path / "repo"
+        round_ = reviewers._Round("d", "{}", "", tmp_path, found, False, repo, tmp_path)
         picked = reviewers._pick_backend(3, round_)
         assert picked is not None and picked.backend == "gemini"
-        assert picked.workspace == out / "ws-3" and picked.workspace.is_dir()
+        assert picked.workspace is not None and picked.workspace.is_dir()
+        assert not picked.workspace.is_relative_to(repo)
+        # With nowhere outside the repository, the slot goes to its next backend.
+        monkeypatch.setattr(reviewers.tempfile, "tempdir", str(repo))
+        repo.mkdir()
+        picked = reviewers._pick_backend(3, round_)
+        assert picked is not None and picked.backend == "claude"

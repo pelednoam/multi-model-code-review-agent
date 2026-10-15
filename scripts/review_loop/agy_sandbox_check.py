@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 from .agy_sandbox import agy_wrapper, user_homes
 from .proc import run, signals_unwind
+from .results import printable
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -114,12 +115,13 @@ def _check_runs(seen: dict[str, str], box: _Box) -> str | None:
     # Not one answer means the probe never ran, and why is in bwrap's stderr.
     if seen:
         return None
-    detail = (box.stderr.strip().splitlines() or [""])[-1][:200]
+    # What the sandbox printed, escapes and all, made safe to print.
+    detail = printable((box.stderr.strip().splitlines() or [""])[-1][:200])
     hint = ""
     if "uid map" in detail or "userns" in detail or "namespace" in detail:
         hint = (
             " -- looks like the kernel is blocking unprivileged user namespaces;"
-            " see docs/codex-sandbox.md"
+            " see docs/agy-sandbox.md"
         )
     return f"bwrap could not start: {detail}{hint}"
 
@@ -156,7 +158,8 @@ def _check_hidden(seen: dict[str, str], box: _Box, roots: list[Path]) -> str | N
         listed = {name for name in seen.get(f"ls {i}", "").split("\n") if name}
         extra = listed - box.mounted_under(root)
         if extra:
-            return f"bwrap sandbox shows {root}/{sorted(extra)[0]}"
+            # repr: a file name the sandbox failed to hide, chosen by whoever made it.
+            return f"bwrap sandbox shows {root}/{sorted(extra)[0]!r}"
     return None
 
 
@@ -329,34 +332,55 @@ def _shown(name: bytes) -> str:
 def _check_sockets(box: _Box, socks: list[_Sock]) -> str | None:
     """No socket in ``socks`` (``_unix_sockets``) can be connected to from inside.
 
-    They are the sockets of this network namespace, which the sandbox shares.
-
-    - A path socket, whoever owns it, if the sandbox can still write to it at the path
-      it was bound at: refused, not looked up in a list of known ones, which always
-      lags what is installed. None is let through. A socket bound in another
-      namespace (a container's), or whose directory has since moved, is not found
-      at the path that reaches it: docs/agy-sandbox.md says so.
-    - An abstract one -- which no mount hides: it belongs to the network namespace,
-      which agy keeps to reach its model -- if this user's and it takes connections
-      (a client's connected socket has a name too): whatever listens there admits
-      this user, whatever it is called (a session bus can take any name).
-      Where the kernel does not say whose (before 5.3), the listener says, asked
-      over a connection (``_listener_uid``). Root's
-      system daemons check who connects, and another user's admit that user only:
-      counting those would let any local user switch the slot off by binding one.
-      X servers, of any owner, are asked (``_check_x_servers``).
-    - A relative one, which cannot be checked, if this user's or root's.
+    They are the sockets of this network namespace, which the sandbox shares. X
+    servers, of any owner, are asked separately (``_check_x_servers``).
     """
-    me = os.getuid()
+    return (
+        _check_relative_sockets(socks)
+        or _check_path_sockets(box, socks)
+        or _check_abstract_sockets(socks)
+    )
+
+
+def _check_relative_sockets(socks: list[_Sock]) -> str | None:
+    """A socket bound by a relative name cannot be checked: this user's or root's
+    fails. Another user's lives in that user's own directory."""
     for sock in socks:
-        if sock.name[:1] not in (b"/", b"\0") and sock.uid in (me, 0, None):
+        if sock.name[:1] not in (b"/", b"\0") and sock.uid in (os.getuid(), 0, None):
             return f"a socket bound by a relative name ({_shown(sock.name)}) cannot be checked"
+    return None
+
+
+def _check_path_sockets(box: _Box, socks: list[_Sock]) -> str | None:
+    """No path socket, whoever owns it, that the sandbox can write to where it was
+    bound.
+
+    Refused, not looked up in a list of known ones, which always lags what is
+    installed; none is let through. A socket bound in another namespace (a
+    container's), or whose directory has since moved, is not found at the path that
+    reaches it: docs/agy-sandbox.md says so.
+    """
     paths = sorted({sock.name for sock in socks if sock.name[:1] == b"/"})
     reached = _reachable(box, paths)
     if isinstance(reached, str):
         return reached
     if reached:
         return f"bwrap sandbox can reach {_shown(reached[0])}"
+    return None
+
+
+def _check_abstract_sockets(socks: list[_Sock]) -> str | None:
+    """No abstract socket of this user's that takes connections.
+
+    No mount hides one: it belongs to the network namespace, which agy keeps to reach
+    its model. Whatever listens there admits this user, whatever it is called (a
+    session bus can take any name); a client's connected socket has a name too, and
+    takes nothing. Where the kernel does not say whose (before 5.3), the listener
+    says, asked over a connection (``_listener_uid``). Root's system daemons check
+    who connects, and another user's admit that user only: counting those would let
+    any local user switch the slot off by binding one.
+    """
+    me = os.getuid()
     for sock in socks:
         if (
             not sock.accepts
@@ -430,7 +454,7 @@ def _reachable(box: _Box, paths: list[bytes]) -> list[bytes] | str:
     )
     if done.returncode != 0:
         said = done.stderr.decode("utf-8", "replace").strip().splitlines()
-        detail = (said or ["no detail"])[-1][:200]
+        detail = printable((said or ["no detail"])[-1][:200])
         return f"could not check the sockets agy's sandbox can reach: {detail}"
     return [p for p in done.stdout.split(b"\0") if p]
 

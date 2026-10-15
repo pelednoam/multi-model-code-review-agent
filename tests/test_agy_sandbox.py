@@ -21,6 +21,10 @@ from scripts.review_loop import agy, agy_sandbox, agy_sandbox_check, backends
 from scripts.review_loop.agy_sandbox import agy_state_dir as real_agy_state_dir
 
 
+#: Abstract unix sockets, SO_PEERCRED and sock_diag are Linux's.
+LINUX_ONLY = pytest.mark.skipif(sys.platform != "linux", reason="needs Linux sockets")
+
+
 class TestAgySandboxCheck(AgyCase):
     """The startup check that proves the wrapper, with no model call."""
 
@@ -229,6 +233,7 @@ class TestAgySandboxCheck(AgyCase):
         with pytest.raises(OSError, match="did not answer"):
             agy_sandbox_check._check_reachable(None, slow)  # type: ignore[arg-type]
 
+    @LINUX_ONLY
     def test_a_seqpacket_listener_is_asked_as_one(self) -> None:
         # Asked with a stream connection, it refused, and read as nothing listening.
         name = f"\0mmcra-seq-{os.getpid()}".encode()
@@ -246,6 +251,7 @@ class TestAgySandboxCheck(AgyCase):
         socks = [agy_sandbox_check._Sock(b"\0/org/kernel/linux/storage/multipathd", 0)]
         assert agy_sandbox_check._check_reachable(None, socks)  # type: ignore[arg-type]
 
+    @LINUX_ONLY
     def test_the_listener_says_whose_it_is(self) -> None:
         name = f"\0mmcra-listener-{os.getpid()}".encode()
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as mine:
@@ -290,10 +296,9 @@ class TestAgySandboxCheck(AgyCase):
         # Named in the message escaped, not raw: someone else chose it.
         assert "\n" not in reason and "\xff" not in reason
 
+    @LINUX_ONLY
     def test_the_kernel_lists_this_hosts_sockets(self) -> None:
         # Byte for byte: a line break in a name stays in it.
-        if sys.platform != "linux":
-            pytest.skip("sock_diag is Linux's")
         name = b"\0mmcra-test-\n-" + str(os.getpid()).encode()
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as mine:
             mine.bind(name)
@@ -394,6 +399,7 @@ class TestAgySandboxCheck(AgyCase):
         reason = agy_sandbox_check.agy_reachable(["true"], tmp_path)
         assert reason and "sock_diag" in reason
 
+    @LINUX_ONLY
     def test_an_x_server_that_does_not_answer_is_not_a_pass(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -510,6 +516,7 @@ class TestAgySandboxCheck(AgyCase):
         assert "--unshare-user" in wrap
         assert wrap[wrap.index("--cap-drop") + 1] == "ALL"
 
+    @LINUX_ONLY
     @pytest.mark.parametrize(("reply", "refused"), [(b"\x01", True), (b"\x02", False)])
     def test_an_x_server_that_admits_this_user_without_a_cookie_is_refused(
         self, monkeypatch: pytest.MonkeyPatch, reply: bytes, refused: bool

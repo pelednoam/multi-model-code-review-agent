@@ -116,6 +116,15 @@ Treat the sandbox as stopping file writes, reads of your home directory, and cod
 running outside it through local sockets. It is not network isolation, and it does
 not hide a repository that lives outside the home directory.
 
+## If bwrap cannot start
+
+The check then says `bwrap could not start`, with bwrap's own message. On Ubuntu
+23.10 and later the usual cause is `kernel.apparmor_restrict_unprivileged_userns=1`,
+which keeps bwrap from creating the user namespace it needs; codex's sandbox is
+bwrap too, and docs/codex-sandbox.md has the fix (an AppArmor profile scoped to
+bwrap, rather than turning the restriction off). Until then the slot goes to its
+next backend.
+
 ## Switches
 
 - `REVIEW_USE_AGY=0` (or `false`, `no`, `off`, or set but empty): do not use agy.

@@ -146,7 +146,7 @@ Bedrock opt-in precedence (PREFER_HERMES=true), used for regulated codebases tha
 | `claude` | `-p` | `--allowedTools "Read Grep Glob"` **plus** `--disallowedTools "Edit Write MultiEdit NotebookEdit Bash WebFetch WebSearch"`, `--strict-mcp-config` (no MCP servers) and `--setting-sources user` (no project hooks) -- `--allowedTools` alone only skips the permission prompt, it does *not* confine the agent | stdin (`< prompt.txt`) | `--output-format json` wraps in `{"result":"..."}` |
 | `codex` | `codex exec` **plus `-s read-only` and `-c approvals_reviewer="user"`** (in both the convergence loop and this runner) -- both are pinned by the tool and neither is optional: no sandbox flag was passed at all before, and `-s read-only` on its own is silently overridden by a global `approvals_reviewer = "auto_review"` (see docs/codex-sandbox.md). Codex is also canary-tested at launch and its slot is DROPPED if the sandbox does not actually refuse a write (optional `-m <model> -c model_reasoning_effort=<level>` -- override via `CODEX_MODEL`, `CODEX_REASONING_EFFORT`; `=high` is the "GPT-5.5 Pro" equivalent) | verified read-only, not assumed | stdin (file) | `-o <file>` writes last message |
 | `gemini` | `-p` | `--model <m> --approval-mode plan --skip-trust` (default `<m>` is `gemini-2.5-flash` for free-tier compatibility; override via `GEMINI_MODEL`) | stdin (file) | stdout (text, may have fences) |
-| `agy` | `--input-format stream-json --output-format stream-json` (no `-p`: the prompt is one JSON line on stdin, because a single argument is capped at 128 KB) **plus `--sandbox --disable-slash-commands`**, pinned. On by default where installed; `REVIEW_USE_AGY=0` switches it off. Model: `AGY_MODEL` if set, else the best Gemini model `agy models` lists, picked each run. agy has no deny list and was measured writing outside its workspace, so it runs under **bubblewrap** (see [agy-sandbox.md](agy-sandbox.md)), verified at startup without a model call and again before each launch; the slot goes to its next backend if that fails. The prompt opens with a no-tools preamble: a refused tool call ends agy's turn with no answer | bubblewrap read-only filesystem, verified; `--sandbox --disable-slash-commands` (no `--mode=plan`: it is a slash command, so a no-op once expansion is off) | stdin (one stream-json line) | stream-json; the last `result` event carries `structured_output` (enforced by `--json-schema`) |
+| `agy` | `--input-format stream-json --output-format stream-json` (no `-p`: the prompt is one JSON line on stdin, because a single argument is capped at 128 KB) **plus `--sandbox --disable-slash-commands`**, pinned. On by default where installed; `REVIEW_USE_AGY=0` switches it off. Model: `AGY_MODEL` if set, else the best Gemini model `agy models` lists, picked each run. agy has no deny list and was measured writing outside its workspace, so it runs under **bubblewrap** (see docs/agy-sandbox.md), verified at startup without a model call and again before each launch; the slot goes to its next backend if that fails. The prompt opens with a no-tools preamble: a refused tool call ends agy's turn with no answer | bubblewrap read-only filesystem, verified; `--sandbox --disable-slash-commands` (no `--mode=plan`: it is a slash command, so a no-op once expansion is off) | stdin (one stream-json line) | stream-json; the last `result` event carries `structured_output` (enforced by `--json-schema`) |
 | `hermes` | `-z --yolo` | none: `-t file` limits it to the file toolset, which writes under `--yolo`; only the convergence loop's tamper check reports writes | `-z` flag (has ARG_MAX risk for large prompts) | stdout (the answer text; the prompt asks for the JSON in the reply, not in a file) |
 
 ### Retrieving the reviewers' output
@@ -156,8 +156,8 @@ prints that path plus an `ARTIFACTS.md` key into the directory itself.
 
 **Read `result-N.json`. That is where the findings are.** Each one is an
 object with the schema's required top-level keys and a list of finding objects,
-as the loop checks it (agy's is also held to
-`docs/ensemble_review_result_schema.json` by `--json-schema`; run
+as the loop checks it (agy's `structured_output`, when it has one, is also held
+to `docs/ensemble_review_result_schema.json` by `--json-schema`; run
 `scripts/validate_review_results.py` for the full schema).
 
 ```bash
@@ -384,7 +384,7 @@ explanation before or after the JSON. If you have no findings,
 return the JSON with an empty findings array.
 ```
 
-### Reviewer 1 -- Security & robustness (Opus 4.6 via Bedrock)
+### Reviewer 1 -- Security & robustness (Claude CLI Opus; Hermes/Bedrock Opus when opted in)
 
 Output: `$REVIEW_TMP/result-1.json`
 
@@ -406,7 +406,7 @@ Output: `$REVIEW_TMP/result-3.json`
 
 Lens: naming, function length, abstraction leaks, dead code, N+1 I/O, unnecessary allocations, unbounded memory growth.
 
-### Reviewer 4 -- Spec-contract compliance (Opus 4.6 via Bedrock)
+### Reviewer 4 -- Spec-contract compliance (Claude CLI Opus; Hermes/Bedrock Opus when opted in)
 
 Output: `$REVIEW_TMP/result-4.json`
 
@@ -456,6 +456,19 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ] || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${
   echo "ERROR: the runner needs bash 4.4 or later (this is $BASH_VERSION)"; exit 1
 fi
 : "${REVIEW_TMP:?REVIEW_TMP must be exported by the caller}"
+# A session of its own, so that "a group with a member in this session" (live_group) means one of
+# this run's: in the caller's session, a group number reused by any other of its processes passed.
+# The first runner starts the real one in a new session (setsid, which does not fork here: a
+# background job is not a group leader) and forwards it the signals that should stop it.
+if [ -z "${MMCRA_OWN_SESSION:-}" ] && command -v setsid >/dev/null 2>&1; then
+  export MMCRA_OWN_SESSION=1
+  setsid bash "$0" "$@" &
+  inner=$!
+  trap 'kill -TERM "$inner" 2>/dev/null' INT TERM HUP QUIT
+  status=0
+  while kill -0 "$inner" 2>/dev/null; do wait "$inner"; status=$?; done
+  exit "$status"
+fi
 # Absolute: the agy job changes into its workspace before its redirections are opened, and a
 # relative REVIEW_TMP would then put its output inside a directory deleted after the run.
 REVIEW_TMP="$(cd "$REVIEW_TMP" && pwd -P)" || exit 1
@@ -466,8 +479,16 @@ REVIEW_TMP="$(cd "$REVIEW_TMP" && pwd -P)" || exit 1
 # reviewing an untrusted branch in full mode runs that branch's code. For that, run the convergence
 # loop from a trusted checkout of this agent with --repo pointing at the branch.
 REVIEW_ROOT="$PWD"
+# A private copy of that code and the result schema, taken before any reviewer starts: a reviewer
+# with a file tool (hermes -t file --yolo) can write the checkout, and the runner goes on running
+# this code -- extraction among it -- after the reviewers have.
+HELPER_ROOT="$(mktemp -d)" && HELPER_ROOT="$(cd "$HELPER_ROOT" && pwd -P)" \
+  && mkdir -p "$HELPER_ROOT/scripts" "$HELPER_ROOT/docs" \
+  && cp -R "$REVIEW_ROOT/scripts/review_loop" "$HELPER_ROOT/scripts/" \
+  && cp "$REVIEW_ROOT/docs/ensemble_review_result_schema.json" "$HELPER_ROOT/docs/" \
+  || { echo "ERROR: could not copy the runner's helpers"; exit 1; }
 review_helper() {
-  python3 -I "$REVIEW_ROOT/scripts/review_loop/runner_entry.py" "$@"
+  python3 -I "$HELPER_ROOT/scripts/review_loop/runner_entry.py" "$@"
 }
 
 # JOB CONTROL IN A SCRIPT, deliberately. With `set -m` each background job gets its OWN process
@@ -504,7 +525,10 @@ publish_outputs() {
   for num in 1 2 3 4; do
     for name in "stdout-$num.txt" "stderr-$num.txt" "claude-raw-$num.json" "codex-out-$num.txt"; do
       rm -f -- "$REVIEW_TMP/$name" || return 1
-      if [ -f "$OUT_DIR/$name" ]; then cp -- "$OUT_DIR/$name" "$REVIEW_TMP/$name" || return 1; fi
+      # A regular file only: a symlink planted under the name would publish what it points to.
+      if [ -f "$OUT_DIR/$name" ] && [ ! -L "$OUT_DIR/$name" ]; then
+        cp -- "$OUT_DIR/$name" "$REVIEW_TMP/$name" || return 1
+      fi
     done
   done
   PUBLISHED=true
@@ -591,6 +615,7 @@ finish_round() {
   trap '' INT TERM HUP QUIT
   kill_jobs 1 2 3 4
   remove_agy_scratch
+  rm -rf -- "$HELPER_ROOT"
   [ -n "${OUT_DIR:-}" ] || return 0
   # Once: a second try after a failed one would remove the copies the warning points to.
   $PUBLISH_TRIED || publish_outputs
@@ -681,7 +706,7 @@ agy_scratch() {
 }
 prepare_agy() {
   local num=$1 prompt_file=$2 wrap=()
-  AGY_SCHEMA="$(review_helper agy-schema "$REVIEW_ROOT/docs/ensemble_review_result_schema.json")" \
+  AGY_SCHEMA="$(review_helper agy-schema "$HELPER_ROOT/docs/ensemble_review_result_schema.json")" \
     || { echo "R$num: SKIPPED (agy result schema unusable)"; return 1; }
   { agy_scratch AGY_WS && agy_scratch AGY_STATE; } \
     || { echo "R$num: SKIPPED (no temporary directory for agy)"; return 1; }
@@ -793,6 +818,11 @@ launch_cli() {
       # you have paid quota.
       # In an empty directory of its own, not the repository under review, whose
       # .gemini/settings.json -- chosen by the change being reviewed -- it would load.
+      case "$OUT_DIR/" in
+        "$(cd "$REVIEW_ROOT" && pwd -P)"/*)
+          echo "R$num: SKIPPED (gemini's directory $OUT_DIR is inside the repo; check TMPDIR)"
+          return 1 ;;
+      esac
       mkdir -p "$OUT_DIR/ws-$num" || { echo "R$num: SKIPPED (no directory for gemini)"; return 1; }
       { cd "$OUT_DIR/ws-$num" && timeout --foreground -k 10 "$REVIEWER_TIMEOUT" gemini \
           --model "${GEMINI_MODEL:-gemini-2.5-flash}" \
@@ -895,8 +925,9 @@ if $PREFER_HERMES && $HAS_HERMES; then
 elif ${HAS_AGY:-false} && { ! $PREFER_HERMES || review_helper flag REVIEW_USE_AGY; } \
      && launch_cli 3 agy "$REVIEW_TMP/prompt-3.txt"; then
   :  # launched; if agy could not be set up, launch_cli returned 1 and the next backend runs
-elif $HAS_GEMINI && review_helper flag REVIEW_USE_GEMINI; then
-  launch_cli 3 gemini "$REVIEW_TMP/prompt-3.txt"
+elif $HAS_GEMINI && review_helper flag REVIEW_USE_GEMINI \
+     && launch_cli 3 gemini "$REVIEW_TMP/prompt-3.txt"; then
+  :  # launched; if gemini could not be set up, the next backend runs, as for agy
 elif $HAS_CLAUDE; then
   launch_cli 3 claude-sonnet "$REVIEW_TMP/prompt-3.txt"
 elif $HAS_HERMES; then
@@ -970,7 +1001,8 @@ extract_json() {
 for num in 1 2 3 4; do
   result="$REVIEW_TMP/result-$num.json"
   # No CLI writes this file itself, so one already here was planted; only extraction writes it.
-  rm -f -- "$result"
+  # One that cannot be removed would pass for this round's review: stop rather than leave it.
+  rm -f -- "$result" || { echo "ERROR: cannot remove $result, which would pass for a review"; exit 1; }
 
   # Only the file the slot's own CLI writes, as recorded at launch: any other file there, named
   # like another CLI's output, may have been put there by a reviewer with a file tool. Checked as
@@ -1061,7 +1093,7 @@ Report what the status lines say rather than guessing. "Three of four are still 
 thing to tell a waiting human; silence is not.
 
 
-**Tool restriction**: Hermes uses `-t file --yolo`: the file toolset, which can write -- the data stays in your AWS account, but writes are not prevented, only reported by the convergence loop's tamper check -- full mode does not check. Claude CLI: `--allowedTools "Read Grep Glob"` plus `--disallowedTools` for every tool that writes, runs a command or reaches the network, `--strict-mcp-config` (no MCP servers) and `--setting-sources user` (no project hooks), since `--allowedTools` alone does not confine (a slot given writing tools on purpose with `REVIEWER_TOOLS_N` has only those taken off the deny list). Codex: both paths pin `-s read-only` and `approvals_reviewer="user"` and canary-test them before use. Gemini uses `--approval-mode plan` (read-only). agy runs under bubblewrap, verified before use (what it closes and what it does not: [agy-sandbox.md](agy-sandbox.md)), plus `--sandbox --disable-slash-commands`. Extraction errors logged to `$REVIEW_TMP/extract-result-N.err`.
+**Tool restriction**: Hermes uses `-t file --yolo`: the file toolset, which can write -- the data stays in your AWS account, but writes are not prevented, only reported by the convergence loop's tamper check -- full mode does not check. Claude CLI: `--allowedTools "Read Grep Glob"` plus `--disallowedTools` for every tool that writes, runs a command or reaches the network, `--strict-mcp-config` (no MCP servers) and `--setting-sources user` (no project hooks), since `--allowedTools` alone does not confine (a slot given writing tools on purpose with `REVIEWER_TOOLS_N` has only those taken off the deny list). Codex: both paths pin `-s read-only` and `approvals_reviewer="user"` and canary-test them before use. Gemini uses `--approval-mode plan` (read-only). agy runs under bubblewrap, verified before use (what it closes and what it does not: docs/agy-sandbox.md), plus `--sandbox --disable-slash-commands`. Extraction errors logged to `$REVIEW_TMP/extract-result-N.err`.
 
 ## 7. Collect and validate results
 

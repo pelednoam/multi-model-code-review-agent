@@ -23,16 +23,17 @@ from scripts.review_loop import reviewers as reviewers_mod
 from scripts.review_loop.artifacts import describe_outputs, write_artifacts_key
 from scripts.review_loop.claude_tools import claude_denied
 
+SCRUB_SCRIPT = REPO_ROOT / "scripts" / "scrub_diff.py"
+PREFLIGHT_SCRIPT = REPO_ROOT / "scripts" / "review_preflight.py"
+VALIDATE_SCRIPT = REPO_ROOT / "scripts" / "validate_review_results.py"
+
+
 def _liveness(runner: str) -> str:
     """The runner's live_group, and the /proc reader it falls back on."""
     return shell_function(runner, "live_group") + shell_function(
         runner, "session_groups"
     )
 
-
-SCRUB_SCRIPT = REPO_ROOT / "scripts" / "scrub_diff.py"
-PREFLIGHT_SCRIPT = REPO_ROOT / "scripts" / "review_preflight.py"
-VALIDATE_SCRIPT = REPO_ROOT / "scripts" / "validate_review_results.py"
 
 # Imported as well as run as a subprocess. Most of the scrubber's behaviour is
 # about a whole diff and is tested through its real entry point below; the
@@ -1564,11 +1565,18 @@ class TestVendoredExclusion:
         from scripts.review_loop.diff import _warn_of_vendored_changes
 
         repo = self._host_repo(tmp_path)
-        _warn_of_vendored_changes(repo, "HEAD~1")
+        _warn_of_vendored_changes(repo, ["HEAD~1"])
         said = capsys.readouterr().out
         assert "scripts/review_preflight.py" in said and "not reviewed" in said
-        _warn_of_vendored_changes(repo, "HEAD")
+        _warn_of_vendored_changes(repo, ["--merge-base", "HEAD"])
         assert capsys.readouterr().out == ""
+        # A new vendored file, untracked, counts as it does in the diff.
+        (repo / "scripts" / "scrub_diff.py").write_text("# planted\n")
+        _warn_of_vendored_changes(repo, ["--merge-base", "HEAD"])
+        assert "scripts/scrub_diff.py" in capsys.readouterr().out
+        # A range git cannot read is said, not taken for "nothing changed".
+        _warn_of_vendored_changes(repo, ["--merge-base", "no-such-ref"])
+        assert "could not tell" in capsys.readouterr().out
 
     def test_agent_repo_still_reviews_itself(self, tmp_path: Path) -> None:
         from scripts.review_loop.config import diff_pathspec, is_agent_repo
@@ -2232,6 +2240,34 @@ class TestRunnerScript:
         assert (tmp / "stdout-1.txt").read_text() == "real"
         assert not (tmp / "codex-out-2.txt").exists()
 
+    def test_the_runner_has_a_session_of_its_own(self, tmp_path: Path) -> None:
+        # In the caller's session, a group number reused by another of its processes
+        # passed live_group, and was signalled.
+        runner = runner_script()
+        start = runner.index('if [ -z "${MMCRA_OWN_SESSION:-}" ]')
+        wrapper = runner[start : runner.index("\nfi\n", start) + 4]
+        script = tmp_path / "t.sh"
+        script.write_text(
+            wrapper
+            + 'echo "leader=$([ "$(ps -o sid= -p $$ | tr -d " ")" = "$$" ] && echo yes)"\n'
+            + "trap 'echo got-TERM; exit 143' TERM\nsleep 20 >/dev/null & wait $!\n"
+        )
+        proc = subprocess.Popen(
+            ["bash", str(script)], stdout=subprocess.PIPE, text=True
+        )
+        assert proc.stdout is not None
+        assert proc.stdout.readline().strip() == "leader=yes"
+        proc.terminate()  # to the outer runner, which forwards it
+        rest, _ = proc.communicate(timeout=20)
+        assert "got-TERM" in rest and proc.returncode == 143
+
+    def test_the_runner_runs_a_copy_of_its_helpers(self) -> None:
+        # A reviewer with a file tool can write the checkout, whose code the runner
+        # ran after the reviewers had started.
+        runner = runner_script()
+        assert runner.index("HELPER_ROOT=") < runner.index("launch_cli 1")
+        assert 'rm -rf -- "$HELPER_ROOT"' in shell_function(runner, "finish_round")
+
     def test_the_private_directory_is_absolute(self) -> None:
         # The agy job changes into its workspace before its redirections are opened: a
         # relative TMPDIR put its output, and its done marker, somewhere else.
@@ -2322,7 +2358,7 @@ class TestRunnerScript:
         # Bedrock sent slot 3 to Google through it.
         runner = runner_script()
         # Nor any other: gemini is opt-in in both modes now.
-        gated = "elif $HAS_GEMINI && review_helper flag REVIEW_USE_GEMINI; then"
+        gated = "elif $HAS_GEMINI && review_helper flag REVIEW_USE_GEMINI \\\n"
         assert gated in runner
         # And the switches reach the runner, a separate script that inherits only exports.
         doc = AGENT_DOC.read_text()
@@ -2368,7 +2404,7 @@ class TestRunnerScript:
         assert "--strict-mcp-config --setting-sources user \\\n" in runner
         script = tmp_path / "t.sh"
         script.write_text(
-            f"REVIEW_ROOT={shlex.quote(str(REPO_ROOT))}\n"
+            f"HELPER_ROOT={shlex.quote(str(REPO_ROOT))}\n"
             f"OUT_DIR={shlex.quote(str(tmp_path))}\n"
             + shell_function(runner, "review_helper")
             + shell_function(runner, "claude_deny")

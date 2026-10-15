@@ -470,7 +470,7 @@ Anthropic reviewers. For cross-provider diversity, also install:
 - [Antigravity CLI](https://antigravity.google/docs/cli/headless/) (`agy`)
   for Google's frontier models, e.g. Gemini 4 Argon, in the readability
   slot. On by default wherever it is installed, ahead of the gemini CLI;
-  `REVIEW_USE_AGY=0` (or `false`, `no`, `off`) switches it off. A project
+  `REVIEW_USE_AGY=0` (or `false`, `no`, `off`, or empty) switches it off. A project
   that pinned Bedrock (`.use-hermes`) gets agy only with `REVIEW_USE_AGY=1`.
   Setup is install and sign in:
   ```bash

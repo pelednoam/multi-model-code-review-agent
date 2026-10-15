@@ -45,7 +45,7 @@ from scripts.review_loop import (  # noqa: E402
     FindingKey,
     ScrubberFailedError,
     SecretsDetectedError,
-    _run,
+    run as _run,
     apply_fixes,
     build_reviewer_prompt,
     collect_blocking_findings,
@@ -161,18 +161,18 @@ def _run_one_round(
     # runs --yolo with the file toolset -- so the outcome is checked rather
     # than the permissions, which covers a backend added tomorrow too.
     untouched = tamper.snapshot(repo)
-    launch_reviewers(
+    answered_by = launch_reviewers(
         round_dir, diff_text, audit_text, context, backends, prefer_hermes, repo
     )
     print(f"Reviewers finished in {time.time() - t0:.0f}s")
     tamper.report(repo, untouched)
 
-    results = extract_results(round_dir)
+    results = extract_results(round_dir, answered_by)
     print(_describe_results(results, n_lines))
     # Say where the findings are, every round, whatever the outcome -- the
     # round directory is not self-explanatory and `raw-N.txt` is a trap.
     write_artifacts_key(round_dir)
-    print(describe_outputs(round_dir))
+    print(describe_outputs(round_dir, answered_by))
     if not any(results):
         print(
             "\nERROR: no reviewer results could be parsed; cannot determine convergence."

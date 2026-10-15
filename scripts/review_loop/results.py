@@ -6,10 +6,10 @@ import json
 import re
 from typing import TYPE_CHECKING, Any
 
-from .agy import agy_result, ran_agy
 from .findings import validate_result
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from pathlib import Path
 
 EXPECTED_REVIEWERS = {
@@ -40,6 +40,37 @@ _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 def printable(text: str) -> str:
     """``text`` with its control characters made visible as ``?``, safe to print."""
     return _CONTROL.sub("?", text)
+
+
+def agy_result(stdout: str) -> dict[str, Any] | None:
+    """The ``result`` payload of agy's stream-json output, or None if no turn completed.
+
+    The stream is one event per line -- ``init``, ``step_update``s, then ``result``,
+    which carries ``status``, ``response``, ``error`` on failure, and
+    ``structured_output`` when ``--json-schema`` was given.
+    """
+    # From the end, a line at a time: the result is the last event, and the stream --
+    # every step_update -- can be large. On newlines only, not splitlines(): NDJSON
+    # separates on newlines, and JSON strings may carry U+0085 and U+2028 raw.
+    end = len(stdout)
+    while end > 0:
+        start = stdout.rfind("\n", 0, end) + 1
+        line = stdout[start:end].strip()
+        end = start - 1
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if (
+            isinstance(event, dict)
+            and event.get("event") == "result"
+            and isinstance(event.get("result"), dict)
+        ):
+            result: dict[str, Any] = event["result"]
+            return result
+    return None
 
 
 def agy_failure(result: dict[str, Any] | None) -> str | None:
@@ -109,12 +140,14 @@ def parse_review(text: str) -> dict[str, Any] | None:
     return review if isinstance(review, dict) else None
 
 
-def _extract_from_raw(round_dir: Path, slot: int) -> dict[str, Any] | None:
+def _extract_from_raw(
+    round_dir: Path, slot: int, backend: str | None
+) -> dict[str, Any] | None:
     """Parse raw-{slot}.txt as JSON, writing result-{slot}.json on success."""
     raw_path = round_dir / f"raw-{slot}.txt"
     if not raw_path.exists():
         return None
-    text = _unwrap_envelope(raw_path.read_text(), ran_agy(round_dir, slot))
+    text = _unwrap_envelope(raw_path.read_text(), backend == "agy")
     d = parse_review(text)
     if d is None:
         return None
@@ -126,12 +159,22 @@ def _extract_from_raw(round_dir: Path, slot: int) -> dict[str, Any] | None:
     return d
 
 
-def extract_results(round_dir: Path) -> list[dict[str, Any] | None]:
-    """Extract and validate result JSON from each reviewer's output."""
+def extract_results(
+    round_dir: Path, answered_by: Mapping[int, str]
+) -> list[dict[str, Any] | None]:
+    """Extract and validate result JSON from each reviewer's output.
+
+    ``answered_by`` is the CLI that ran each slot (``launch_reviewers``): only agy's
+    output is read as an agy stream. Any reviewer can be talked into printing a line
+    shaped like agy's ``result`` event -- one with a failed status would silence a
+    real review -- so the shape alone decides nothing.
+    """
     results: list[dict[str, Any] | None] = []
     for i in range(1, 5):
         result_path = round_dir / f"result-{i}.json"
-        d = _try_load_existing_result(result_path, i) or _extract_from_raw(round_dir, i)
+        d = _try_load_existing_result(result_path, i) or _extract_from_raw(
+            round_dir, i, answered_by.get(i)
+        )
         results.append(d)
     return results
 

@@ -21,12 +21,11 @@ from .agy import (
     agy_command,
     agy_message,
     agy_model,
-    agy_reachable,
-    agy_sandbox,
     agy_schema,
-    agy_seed_state,
     agy_unsandboxed,
 )
+from .agy_sandbox import agy_reachable, agy_sandbox, agy_seed_state
+from .claude_tools import claude_denied
 from .config import (
     LATE_RESULT_GRACE,
     POLL_INTERVAL,
@@ -144,47 +143,6 @@ def _hermes_cmd(prompt_path: Path, model: str) -> list[str]:
         "file",
         "--yolo",
     ]
-
-
-#: The tools a claude reviewer is denied unless it is granted them by name: each one
-#: writes, runs a command, or reaches the network.
-CLAUDE_DENIED = ("Edit", "Write", "MultiEdit", "NotebookEdit", "Bash", "WebFetch", "WebSearch")  # fmt: skip
-
-
-def claude_denied(tools: str) -> tuple[list[str], list[str]]:
-    """What a claude reviewer allowed ``tools`` is denied, and what it is granted scoped.
-
-    ``tools`` is an --allowedTools spec. That flag only skips the permission prompt;
-    it does not confine. So every tool in ``CLAUDE_DENIED`` the spec does not name is
-    denied -- a spec naming only reading tools must not lift the deny list with it.
-    Only the names count, not what is inside a scope: ``Bash(git log --grep Edit:*)``
-    names Bash, not Edit. An unbalanced spec grants nothing.
-
-    The second list is the tools granted with a scope. A deny cannot keep a scope,
-    which only the permission prompt enforces, and settings can turn that prompt off:
-    the caller says so.
-    """
-    granted: set[str] = set()
-    scoped: list[str] = []
-    depth, name = 0, ""
-    for c in tools + " ":
-        if c == "(":
-            if depth == 0 and name:
-                scoped.append(name)
-            depth += 1
-        elif c == ")":
-            depth -= 1
-            if depth < 0:
-                break
-        elif depth == 0 and c in ", \t\n":
-            granted.add(name)
-            name = ""
-        elif depth == 0:
-            name += c
-    if depth != 0:
-        granted, scoped = set(), []
-    denied = [tool for tool in CLAUDE_DENIED if tool not in granted]
-    return denied, [tool for tool in scoped if tool in CLAUDE_DENIED]
 
 
 #: What a claude reviewer is allowed, when nothing overrides it.
@@ -449,6 +407,19 @@ class _Round:
     repo: Path | None = None
 
 
+class _Picked(NamedTuple):
+    """The backend that answers a slot, ready to launch."""
+
+    #: The command, wrapper included.
+    cmd: list[str]
+    #: The CLI that answers, which decides how its output is read.
+    backend: str
+    #: The model the prompt should name; None for the lens's own.
+    label: str | None
+    #: Its working directory; None for the round's.
+    workspace: Path | None
+
+
 def _launch_one(
     slot: int, lens_args: tuple[str, str, str, str], round_: _Round
 ) -> ReviewerProc | None:
@@ -470,8 +441,8 @@ def _launch_one(
         print(f"  R{slot}: {AGY_EGRESS}")
     # The record of what the reviewer was sent.
     (round_.round_dir / f"prompt-{slot}.txt").write_text(prompt)
-    # Which backend answered, so its output is parsed as that backend's: a stream
-    # that merely looks like agy's, from another reviewer, is not agy's verdict.
+    # Which backend answered, for a person reading the round. The loop goes by what
+    # it launched (``launch_reviewers`` returns it), not by this file.
     (round_.round_dir / f"backend-{slot}.txt").write_text(backend)
     fed = None
     if backend in _stdin_backends():
@@ -480,19 +451,6 @@ def _launch_one(
         slot, picked.cmd, backend, picked.workspace, fed, round_.round_dir
     )
     return slot, proc, backend, out_f, err_f
-
-
-class _Picked(NamedTuple):
-    """The backend that answers a slot, ready to launch."""
-
-    #: The command, wrapper included.
-    cmd: list[str]
-    #: The CLI that answers, which decides how its output is read.
-    backend: str
-    #: The model the prompt should name; None for the lens's own.
-    label: str | None
-    #: Its working directory; None for the round's.
-    workspace: Path | None
 
 
 def _pick_backend(slot: int, round_: _Round) -> _Picked | None:
@@ -645,11 +603,16 @@ def launch_reviewers(
     backends: dict[str, bool],
     prefer_hermes: bool = False,
     repo: Path | None = None,
-) -> None:
+) -> dict[int, str]:
     """Launch 4 reviewers in parallel, write raw outputs to round_dir.
 
     ``repo`` is the repository under review, which no reviewer's writable scratch
     directory may be inside.
+
+    Returns the CLI that answered each slot launched, which decides how its output is
+    read (``extract_results``). From memory, not from ``backend-N.txt``: that file is
+    in round_dir, which a reviewer with a file tool -- hermes runs ``--yolo`` -- can
+    write, and a slot it marked agy's would be read as agy's verdict.
 
     Reports progress while it waits. Four models on a large diff is fifteen
     minutes of silence otherwise, during which the only way to tell a working
@@ -668,6 +631,7 @@ def launch_reviewers(
                 if tracked is not None:
                     procs.append(tracked)
             _await_reviewers(procs, round_dir, diff.count("\n") + 1)
+            return {slot: backend for slot, _, backend, _, _ in procs}
         finally:
             # Every group, finished or not: a reviewer that exited can leave helpers
             # running in its group, spending quota and writing into round_dir. Each

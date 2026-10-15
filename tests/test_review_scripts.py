@@ -20,7 +20,7 @@ from helpers import AGENT_DOC, REPO_ROOT, runner_script, shell_function
 from scripts.review_loop import backends
 from scripts.review_loop import reviewers as reviewers_mod
 from scripts.review_loop.artifacts import describe_outputs
-from scripts.review_loop.reviewers import claude_denied
+from scripts.review_loop.claude_tools import claude_denied
 
 SCRUB_SCRIPT = REPO_ROOT / "scripts" / "scrub_diff.py"
 PREFLIGHT_SCRIPT = REPO_ROOT / "scripts" / "review_preflight.py"
@@ -1084,7 +1084,7 @@ class TestSalvagingProse:
         (tmp_path / "raw-3.txt").write_text(
             json.dumps({"result": "test_app_sockets.py duplicates 12 tests verbatim."})
         )
-        summary = describe_outputs(tmp_path)
+        summary = describe_outputs(tmp_path, {})
         assert "NOT JSON" in summary
         assert "duplicates 12 tests verbatim" in summary
         assert "raw-3.txt" in summary
@@ -1093,23 +1093,23 @@ class TestSalvagingProse:
         self, tmp_path: Path
     ) -> None:
         """ "No output" and "unusable output" read as one thing and are not."""
-        summary = describe_outputs(tmp_path)
+        summary = describe_outputs(tmp_path, {})
         assert "NO OUTPUT" in summary
         assert "NOT JSON" not in summary
 
     def test_an_empty_raw_file_counts_as_nothing(self, tmp_path: Path) -> None:
         """codex writes straight to result-N.json, so its raw file is empty."""
         (tmp_path / "raw-2.txt").write_text("")
-        assert "NO OUTPUT" in describe_outputs(tmp_path)
+        assert "NO OUTPUT" in describe_outputs(tmp_path, {})
 
     def test_bare_prose_is_salvaged_too(self, tmp_path: Path) -> None:
         """Not every backend wraps its reply in an envelope."""
         (tmp_path / "raw-1.txt").write_text("The diff looks fine to me.")
-        assert "looks fine to me" in describe_outputs(tmp_path)
+        assert "looks fine to me" in describe_outputs(tmp_path, {})
 
     def test_a_long_reply_is_trimmed_not_dumped(self, tmp_path: Path) -> None:
         (tmp_path / "raw-1.txt").write_text("x" * 5000)
-        assert len(describe_outputs(tmp_path)) < 2000
+        assert len(describe_outputs(tmp_path, {})) < 2000
 
     def test_a_failed_agy_turn_leads_with_its_error(self, tmp_path: Path) -> None:
         """Measured: the quota ran out after agy had drafted a whole review.
@@ -1121,11 +1121,10 @@ class TestSalvagingProse:
             "response": '{"reviewer": "readability_performance", "findings": []}',
             "error": "Individual quota reached. Resets in 155h25m52s.",
         }
-        (tmp_path / "backend-3.txt").write_text("agy")
         (tmp_path / "raw-3.txt").write_text(
             json.dumps({"event": "result", "result": result}) + "\n"
         )
-        summary = describe_outputs(tmp_path)
+        summary = describe_outputs(tmp_path, {3: "agy"})
         assert "FAILED" in summary and "status ERROR" in summary
         assert "Individual quota reached" in summary
         assert "NOT JSON" not in summary and "readability_performance" not in summary
@@ -1135,12 +1134,11 @@ class TestSalvagingProse:
     ) -> None:
         # The reply is shaped by the diff; an escape sequence can hide the lines above it.
         result = {"status": "ERROR", "error": "quota\x1b[2K\x1b]52;c;cGF5bG9hZA==\x07"}
-        (tmp_path / "backend-3.txt").write_text("agy")
         (tmp_path / "raw-3.txt").write_text(
             json.dumps({"event": "result", "result": result}) + "\n"
         )
         (tmp_path / "raw-1.txt").write_text("fine\x1b[1A\x1b[2Kforged")
-        summary = describe_outputs(tmp_path)
+        summary = describe_outputs(tmp_path, {3: "agy"})
         assert "\x1b" not in summary and "\x07" not in summary
         assert "quota?[2K" in summary and "fine?[1A" in summary
 
@@ -1154,7 +1152,7 @@ class TestSalvagingProse:
 
     def test_a_reviewer_with_findings_is_left_alone(self, tmp_path: Path) -> None:
         (tmp_path / "result-1.json").write_text("{}")
-        summary = describe_outputs(tmp_path, n_slots=1)
+        summary = describe_outputs(tmp_path, {}, n_slots=1)
         assert "result-{1}.json" in summary
         assert "NOT JSON" not in summary
 
@@ -2091,6 +2089,16 @@ class TestRunnerScript:
         runner = runner_script()
         assert "mapfile -d" in runner
         assert "the runner needs bash 4.4 or later" in runner
+
+    def test_google_counts_as_a_provider_only_if_slot_3_may_go_there(self) -> None:
+        # Gemini installed in a project pinned to Bedrock counted as a third provider
+        # though the gate kept slot 3 from it.
+        runner = runner_script()
+        count = runner[runner.index("# Count provider diversity") :]
+        count = count[: count.index('echo "Provider diversity')]
+        gated = "! $PREFER_HERMES || review_helper flag REVIEW_USE_GEMINI"
+        assert "{ $HAS_GEMINI && { " + gated + "; }; }" in count
+        assert "{ $HAS_GEMINI || ${HAS_AGY:-false}; }" not in count
 
     def test_codexs_answer_is_checked_like_the_others(self) -> None:
         # Written straight to result-N.json, it skipped the validation every other

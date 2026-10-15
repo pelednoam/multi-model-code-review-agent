@@ -17,10 +17,10 @@ import json
 import textwrap
 from typing import TYPE_CHECKING, Any
 
-from .agy import agy_result, ran_agy
-from .results import agy_failure, printable
+from .results import agy_failure, agy_result, printable
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from pathlib import Path
 
 ARTIFACTS_FILENAME = "ARTIFACTS.md"
@@ -35,7 +35,7 @@ Read `result-*.json`. Everything else is intermediate.
 | `raw-N.txt` | Whatever the CLI printed on stdout, before parsing. Empty for the codex slot on a *successful* run — see below. For agy, one stream-json event per line; the review is the final `result` event's `structured_output`, and only a turn whose status is `SUCCESS` counts. |
 | `stderr-N.txt` | Diagnostics. Read this when a slot is missing a `result-N.json`. |
 | `prompt-N.txt` | The exact prompt that reviewer received. For agy it begins with a preamble telling it to call no tools. |
-| `backend-N.txt` | Which CLI ran slot N (`agy`, `claude`, `codex`, ...). Only a slot marked `agy` has its `raw-N.txt` read as agy's stream-json; the same shape from any other reviewer is ignored. |
+| `backend-N.txt` | Which CLI ran slot N (`agy`, `claude`, `codex`, ...), for reading. The loop itself goes by what it launched, not by this file: only the slot it ran agy in has its `raw-N.txt` read as agy's stream-json, and the same shape from any other reviewer is ignored. |
 | `diff.patch` | The scrubbed diff every reviewer saw. |
 | `audit.json` | Preflight audit (git state, coverage, patterns) included in each prompt. |
 
@@ -73,8 +73,13 @@ def write_artifacts_key(round_dir: Path) -> Path:
     return path
 
 
-def describe_outputs(round_dir: Path, n_slots: int = 4) -> str:
-    """A console summary naming where the findings actually are."""
+def describe_outputs(
+    round_dir: Path, answered_by: Mapping[int, str], n_slots: int = 4
+) -> str:
+    """A console summary naming where the findings actually are.
+
+    ``answered_by`` is the CLI that ran each slot (``launch_reviewers``).
+    """
     present = [
         i for i in range(1, n_slots + 1) if (round_dir / f"result-{i}.json").exists()
     ]
@@ -87,7 +92,7 @@ def describe_outputs(round_dir: Path, n_slots: int = 4) -> str:
         else "  findings   -> (none produced)",
     ]
     for slot in missing:
-        lines.extend(_explain_missing(round_dir, slot))
+        lines.extend(_explain_missing(round_dir, slot, answered_by.get(slot)))
     lines.append(f"  file guide -> {round_dir / ARTIFACTS_FILENAME}")
     return "\n".join(lines)
 
@@ -97,7 +102,7 @@ def describe_outputs(round_dir: Path, n_slots: int = 4) -> str:
 _SALVAGE_CHARS = 600
 
 
-def _explain_missing(round_dir: Path, slot: int) -> list[str]:
+def _explain_missing(round_dir: Path, slot: int, backend: str | None) -> list[str]:
     """Say why a slot produced no findings, and show what it did produce.
 
     "NO RESULT" covered two different things and read as one. A reviewer that
@@ -111,7 +116,7 @@ def _explain_missing(round_dir: Path, slot: int) -> list[str]:
     if raw.exists():
         text = raw.read_text(encoding="utf-8", errors="replace").strip()
     # Parsed once, and only when agy is the backend that wrote it.
-    event = agy_result(text) if text and ran_agy(round_dir, slot) else None
+    event = agy_result(text) if text and backend == "agy" else None
     failed = agy_failure(event) if event is not None else None
     if failed:
         # Whatever it drafted first is not a review it gave: the turn did not finish.

@@ -16,19 +16,15 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .agy import (
-    AGY_PREAMBLE,
-    agy_message,
-    agy_model,
+from .agy import AGY_PREAMBLE, agy_message, agy_model, agy_schema, agy_unsandboxed
+from .agy_sandbox import (
     agy_reachable,
-    agy_result,
     agy_sandbox,
     agy_sandbox_parts,
-    agy_schema,
     agy_seed_state,
-    agy_unsandboxed,
 )
 from .backends import codex_usable, detect_backends
+from .claude_tools import claude_denied
 from .config import env_flag
 from .findings import validate_result
 from .results import (
@@ -36,9 +32,9 @@ from .results import (
     _unwrap_envelope,
     agy_answer,
     agy_failure,
+    agy_result,
     parse_review,
 )
-from .reviewers import claude_denied
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -146,7 +142,7 @@ def _extract(raw: str, out: str, slot: str, backend: str = "") -> int:
 def _claude_deny(tools: str) -> int:
     """Print what a claude reviewer allowed ``tools`` is denied, space-separated.
 
-    ``reviewers.claude_denied``. A tool granted with a scope is granted whole, as far
+    ``claude_tools.claude_denied``. A tool granted with a scope is granted whole, as far
     as the deny list goes, which stderr says.
     """
     denied, scoped = claude_denied(tools)

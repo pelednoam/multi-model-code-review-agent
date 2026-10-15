@@ -7,7 +7,8 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from .agy import agy_enabled, agy_is_confined, agy_model_choice, agy_unsandboxed
+from .agy import agy_enabled, agy_model_choice, agy_unsandboxed
+from .agy_sandbox import agy_is_confined
 from .config import env_flag
 from .proc import run
 
@@ -102,7 +103,7 @@ def detect_backends(
     report and never edit.
 
     agy is held to the same standard whenever it is installed and not switched off
-    (``REVIEW_USE_AGY=0``): its sandbox is proven by ``agy.agy_is_confined``. A project
+    (``REVIEW_USE_AGY=0``): its sandbox is proven by ``agy_sandbox.agy_is_confined``. A project
     pinned to Bedrock (``prefer_hermes``) gets agy only with ``REVIEW_USE_AGY=1``.
     ``MMCRA_SKIP_AGY_SANDBOX_CHECK=1`` runs agy without the sandbox, for hosts that
     are already one.

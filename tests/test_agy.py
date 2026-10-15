@@ -21,14 +21,14 @@ from types import SimpleNamespace
 import pytest
 
 from helpers import REPO_ROOT, SCHEMA_PATH, runner_script, shell_function
-from scripts.review_loop import agy, backends, reviewers
+from scripts.review_loop import agy, agy_sandbox, backends, reviewers
 from scripts.review_loop.artifacts import describe_outputs
-from scripts.review_loop.results import _unwrap_envelope
-from scripts.review_loop.results import extract_results
+from scripts.review_loop.results import _unwrap_envelope, extract_results
 from scripts.review_loop.reviewers import _choose_command
 
 # agy_models itself, kept before _AgyCase's autouse fixture replaces it.
 from scripts.review_loop.agy import agy_models as real_agy_models
+from scripts.review_loop.agy_sandbox import agy_state_dir as real_agy_state_dir
 
 
 class _AgyCase:
@@ -60,7 +60,9 @@ class _AgyCase:
     ]
 
     @pytest.fixture(autouse=True)
-    def _fresh_pick(self, monkeypatch: pytest.MonkeyPatch) -> object:
+    def _fresh_pick(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+    ) -> object:
         # The pick is cached per run; each test is a run. And no test may reach the
         # real `agy models` -- it is installed on some machines that run this suite.
         def unreachable() -> list[str]:
@@ -68,10 +70,10 @@ class _AgyCase:
 
         monkeypatch.setattr(agy, "agy_models", unreachable)
         # Nor the real agy state, which holds a sign-in token.
-        fake_state = Path(tempfile.mkdtemp()) / ".gemini" / "antigravity-cli"
+        fake_state = tmp_path_factory.mktemp("home") / ".gemini" / "antigravity-cli"
         (fake_state / "bin").mkdir(parents=True)
         (fake_state / "antigravity-oauth-token").write_text("not-a-real-token")
-        monkeypatch.setattr(agy, "agy_state_dir", lambda: fake_state)
+        monkeypatch.setattr(agy_sandbox, "agy_state_dir", lambda: fake_state)
         agy._picked_agy_model.cache_clear()
         yield
         agy._picked_agy_model.cache_clear()
@@ -257,17 +259,32 @@ class _AgyCase:
     def _prepare_agy(
         tmp_path: Path, root: Path = REPO_ROOT, writable: bool = True, **env: str
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, list[str]]]:
-        """Run the runner's prepare_agy for real; its AGY_* results, one list each."""
+        """Run the runner's prepare_agy for real; its AGY_* results, one list each.
+
+        Real but for two helper commands: what this host's sandbox can reach is the
+        sandbox check's to test (a runner test should not need bwrap to work here),
+        and a prompt that cannot be written (``writable``) is a failing preamble, not a
+        read-only file, which root writes anyway.
+        """
         runner = runner_script()
         prompt = tmp_path / "prompt-3.txt"
         prompt.write_text("Review this.\n", encoding="utf-8")
-        if not writable:
-            prompt.chmod(0o444)
+        real = shell_function(runner, "review_helper").replace(
+            "review_helper() {", "real_review_helper() {", 1
+        )
         script = tmp_path / "t.sh"
         script.write_text(
             'REVIEW_ROOT="$1"\nAGY_SCRATCH=()\n'
             + 'AGY_SCHEMA="" AGY_WS="" AGY_STATE="" AGY_ENVP=() AGY_BWRAP=()\n'
-            + shell_function(runner, "review_helper")
+            + real
+            + "review_helper() {\n"
+            + '  case "$1" in\n'
+            + "    agy-reachable) return 0 ;;\n"
+            + f"    agy-preamble) {'' if writable else 'return 1 ;;'}\n"
+            + "  esac\n"
+            + '  real_review_helper "$@"\n'
+            + "}\n"
+            + shell_function(runner, "agy_scratch")
             + shell_function(runner, "prepare_agy")
             + 'prepare_agy 3 "$2"; rc=$?\n'
             + 'printf "\\0"\n'
@@ -292,10 +309,12 @@ class _AgyCase:
                 parts[key].append(item)
         return done, parts
 
+    #: Slot 3 answered by agy, as launch_reviewers returns it.
+    AGY = {3: "agy"}
+
     @staticmethod
     def _raw(round_dir: Path) -> Path:
-        """Slot 3's raw output file, recorded as agy's -- as _launch_one records it."""
-        (round_dir / "backend-3.txt").write_text("agy")
+        """Slot 3's raw output file."""
         return round_dir / "raw-3.txt"
 
     @staticmethod
@@ -348,22 +367,23 @@ class _AgyCase:
         kw = {k: v for k, v in kw.items() if k in ("input", "env")}
         return subprocess.run(bare, capture_output=True, text=True, check=False, **kw)
 
-    class _Reach:
-        """A box in which exactly ``reachable`` answers the socket probe."""
+    @staticmethod
+    def _reach(monkeypatch: pytest.MonkeyPatch, reachable: bytes | str = b"") -> None:
+        """A sandbox in which exactly ``reachable`` answers the socket probe; a str is
+        the probe failing, with that reason."""
 
-        def __init__(self, reachable: str, returncode: int = 0) -> None:
-            self.reachable = reachable
-            self.returncode = returncode
-            self.stderr = "" if returncode == 0 else "sh: 1: xargs: not found"
+        def probe(box: object, paths: list[bytes]) -> list[bytes] | str:
+            if isinstance(reachable, str):
+                return reachable
+            return [p for p in paths if p == reachable]
 
-        def sh(self, script: str, input: str = "") -> str:
-            return self.reachable + "\0" if self.reachable + "\0" in input else ""
+        monkeypatch.setattr(agy_sandbox, "_reachable", probe)
 
-    UNIX = (
-        "Num RefCount Protocol Flags Type St Inode Path\n"
-        "0: 00000002 00000000 00010000 0001 01 1 /var/lib/incus/unix.socket\n"
-        "0: 00000002 00000000 00010000 0001 01 2 /run/systemd/resolve/io.systemd.Resolve\n"
-    )
+    #: The host's sockets, as ``agy_sandbox._unix_sockets`` lists them.
+    SOCKETS = [
+        b"/var/lib/incus/unix.socket",
+        b"/run/systemd/resolve/io.systemd.Resolve",
+    ]
 
     def _detect(
         self, monkeypatch: pytest.MonkeyPatch, verdict: tuple[bool, str] | None
@@ -548,8 +568,8 @@ class TestAgyRouting(_AgyCase):
         cmd = seen["cmd"]
         assert isinstance(cmd, list) and cmd[-2:] == ["agy", "models"]
         wrap = cmd[: cmd.index("--") + 1]
-        state = Path(wrap[wrap.index(str(agy.agy_state_dir())) - 1])
-        assert wrap == agy.agy_sandbox(Path(str(seen["cwd"])), state)
+        state = Path(wrap[wrap.index(str(agy_sandbox.agy_state_dir())) - 1])
+        assert wrap == agy_sandbox.agy_sandbox(Path(str(seen["cwd"])), state)
 
     def test_a_listing_that_fails_is_empty(
         self, monkeypatch: pytest.MonkeyPatch
@@ -667,8 +687,8 @@ class TestAgyLaunch(_AgyCase):
         cmd = seen["cmd"]
         assert isinstance(cmd, list)
         wrap = cmd[: cmd.index("--") + 1]
-        state = Path(wrap[wrap.index(str(agy.agy_state_dir())) - 1])
-        assert wrap == agy.agy_sandbox(workspace, state)
+        state = Path(wrap[wrap.index(str(agy_sandbox.agy_state_dir())) - 1])
+        assert wrap == agy_sandbox.agy_sandbox(workspace, state)
         assert cmd[len(wrap)] == "agy"
         # A throwaway copy of agy's state, holding the sign-in and nothing else.
         assert sorted(p.name for p in state.iterdir()) == ["antigravity-oauth-token"]
@@ -799,16 +819,16 @@ class TestAgyLaunch(_AgyCase):
         script = (
             "import os, signal, sys, time\n"
             "sys.path.insert(0, sys.argv[1])\n"
-            "from scripts.review_loop import agy\n"
+            "from scripts.review_loop import agy, agy_sandbox\n"
             "agy.tempfile.tempdir = sys.argv[2]\n"
-            "agy._canary_parent = lambda: sys.argv[2]\n"
+            "agy_sandbox._canary_parent = lambda: sys.argv[2]\n"
             # Nothing real runs (run is replaced), so bwrap need not be installed.
             "agy.shutil.which = lambda c: '/usr/bin/' + c\n"
             "def killed(*a, **k):\n"
             f"    os.kill(os.getpid(), signal.{sig})\n"
             "    time.sleep(30)\n"
-            "agy.run = killed\n"
-            f"agy.{helper}()\n"
+            "agy.run = agy_sandbox.run = killed\n"
+            f"{'agy_sandbox' if helper == 'agy_is_confined' else 'agy'}.{helper}()\n"
         )
         env = {**os.environ, "HOME": str(home)}
         env.pop("MMCRA_SKIP_AGY_SANDBOX_CHECK", None)
@@ -830,9 +850,9 @@ class TestAgyLaunch(_AgyCase):
             return subprocess.CompletedProcess([], 1, "", "bwrap: no")
 
         monkeypatch.setattr(agy.shutil, "which", lambda c: f"/usr/bin/{c}")
-        monkeypatch.setattr(agy, "agy_seed_state", seeded)
-        monkeypatch.setattr(agy, "run", nothing_runs)
-        ok, reason = agy.agy_is_confined()
+        monkeypatch.setattr(agy_sandbox, "agy_seed_state", seeded)
+        monkeypatch.setattr(agy_sandbox, "run", nothing_runs)
+        ok, reason = agy_sandbox.agy_is_confined()
         assert not ok and "could not start" in reason
 
     @pytest.mark.usefixtures("on")
@@ -935,7 +955,7 @@ class TestAgyLaunch(_AgyCase):
         spaced = Path(tempfile.mkdtemp(prefix="review scratch "))
         monkeypatch.setenv("HOME", str(Path.home()) + "/")
         monkeypatch.setattr(agy.tempfile, "tempdir", str(spaced))
-        ok, reason = agy.agy_is_confined()
+        ok, reason = agy_sandbox.agy_is_confined()
         assert ok, reason
 
     def test_a_slot_whose_agy_cannot_be_set_up_falls_through(
@@ -970,7 +990,7 @@ class TestAgyOutput(_AgyCase):
                 }
             )
         )
-        result = extract_results(tmp_path)[2]
+        result = extract_results(tmp_path, self.AGY)[2]
         assert result is not None
         assert result["findings"][0]["issue"] == "dead code"
         assert (tmp_path / "result-3.json").exists()
@@ -979,7 +999,7 @@ class TestAgyOutput(_AgyCase):
         self._raw(tmp_path).write_text(
             self._stream({"status": "SUCCESS", "response": json.dumps(self._review())})
         )
-        result = extract_results(tmp_path)[2]
+        result = extract_results(tmp_path, self.AGY)[2]
         assert result is not None and result["model"] == self.MODEL
 
     def test_a_line_separator_inside_a_string_does_not_lose_the_review(
@@ -995,7 +1015,7 @@ class TestAgyOutput(_AgyCase):
         self._raw(tmp_path).write_text(
             init + "\n" + json.dumps(event, ensure_ascii=False), encoding="utf-8"
         )
-        result = extract_results(tmp_path)[2]
+        result = extract_results(tmp_path, self.AGY)[2]
         assert result is not None and result["overall_assessment"] == "one\u0085two"
 
     @pytest.mark.parametrize("status", ["ERROR", "CANCELED", "INTERRUPTED", "WAITING"])
@@ -1007,13 +1027,13 @@ class TestAgyOutput(_AgyCase):
         self._raw(tmp_path).write_text(
             self._stream({"status": status, "structured_output": self._review()})
         )
-        assert extract_results(tmp_path)[2] is None
+        assert extract_results(tmp_path, self.AGY)[2] is None
 
     def test_a_failed_turn_says_why(self, tmp_path: Path) -> None:
         self._raw(tmp_path).write_text(
             self._stream({"status": "ERROR", "error": "quota exhausted for this model"})
         )
-        assert "quota exhausted" in describe_outputs(tmp_path)
+        assert "quota exhausted" in describe_outputs(tmp_path, self.AGY)
 
     def test_a_refused_tool_call_is_named_not_silent(self, tmp_path: Path) -> None:
         # The first real sweep: `ls -la`, denied, turn over, empty response, and the
@@ -1029,14 +1049,14 @@ class TestAgyOutput(_AgyCase):
                 }
             )
         )
-        said = describe_outputs(tmp_path)
+        said = describe_outputs(tmp_path, self.AGY)
         assert "refused tool call" in said and "RunCommand" in said
 
     def test_a_malformed_denied_list_still_reports(self, tmp_path: Path) -> None:
         self._raw(tmp_path).write_text(
             self._stream({"status": "ERROR", "error": "bad", "denied_actions": True})
         )
-        assert "bad" in describe_outputs(tmp_path)
+        assert "bad" in describe_outputs(tmp_path, self.AGY)
 
     def test_an_agy_shaped_line_from_another_backend_is_not_agys(
         self, tmp_path: Path
@@ -1046,11 +1066,17 @@ class TestAgyOutput(_AgyCase):
         ok = {"status": "SUCCESS", "structured_output": self._review()}
         injected = self._stream(ok)
         (tmp_path / "raw-3.txt").write_text(injected)
-        (tmp_path / "backend-3.txt").write_text("gemini")
-        assert extract_results(tmp_path)[2] is None
+        assert extract_results(tmp_path, {3: "gemini"})[2] is None
         # The same stream from agy is agy's answer.
+        assert extract_results(tmp_path, self.AGY)[2] is not None
+
+    def test_a_reviewer_cannot_mark_its_own_slot_as_agys(self, tmp_path: Path) -> None:
+        # backend-N.txt is in the round directory, which hermes (--yolo, a file tool)
+        # can write: read back, a slot it marked agy's was parsed as agy's verdict.
+        ok = {"status": "SUCCESS", "structured_output": self._review()}
+        (tmp_path / "raw-3.txt").write_text(self._stream(ok))
         (tmp_path / "backend-3.txt").write_text("agy")
-        assert extract_results(tmp_path)[2] is not None
+        assert extract_results(tmp_path, {3: "hermes"})[2] is None
 
     def test_a_stream_with_no_result_event_is_no_review(self) -> None:
         # Without a result event, the stream was read as plain text, and a bare object
@@ -1069,7 +1095,7 @@ class TestAgySandboxCheck(_AgyCase):
         """Not a mock: the wrapper agy runs under, against the real filesystem."""
         if not self._bwrap_works():
             pytest.skip("bwrap or agy cannot run here")
-        ok, reason = agy.agy_is_confined()
+        ok, reason = agy_sandbox.agy_is_confined()
         assert ok, reason
 
     @pytest.mark.parametrize(
@@ -1090,7 +1116,7 @@ class TestAgySandboxCheck(_AgyCase):
     ) -> None:
         if not self._bwrap_works():
             pytest.skip("bwrap or agy cannot run here")
-        real = agy.agy_sandbox
+        real = agy_sandbox.agy_sandbox
         target = tuple(str(Path.home()) if a == "HOME" else a for a in drop)
 
         def weakened(ws: Path, st: Path) -> list[str]:
@@ -1100,8 +1126,8 @@ class TestAgySandboxCheck(_AgyCase):
                     return wrap[:i] + wrap[i + len(target) :]
             raise AssertionError(f"{target} is not in the wrapper")
 
-        monkeypatch.setattr(agy, "agy_sandbox", weakened)
-        ok, reason = agy.agy_is_confined()
+        monkeypatch.setattr(agy_sandbox, "agy_sandbox", weakened)
+        ok, reason = agy_sandbox.agy_is_confined()
         assert not ok and caught.replace("HOME", str(Path.home())) in reason
 
     def test_no_place_for_the_canary_is_said_not_misreported(
@@ -1109,16 +1135,16 @@ class TestAgySandboxCheck(_AgyCase):
     ) -> None:
         # A canary in /tmp is hidden by the sandbox: "could not read" would be a lie.
         monkeypatch.setattr(agy.shutil, "which", lambda c: f"/usr/bin/{c}")
-        monkeypatch.setattr(agy, "_canary_parent", lambda: None)
-        ok, reason = agy.agy_is_confined()
+        monkeypatch.setattr(agy_sandbox, "_canary_parent", lambda: None)
+        ok, reason = agy_sandbox.agy_is_confined()
         assert not ok and "/var/tmp" in reason
 
     def test_a_sandbox_that_lets_writes_through_fails(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(agy.shutil, "which", lambda c: f"/usr/bin/{c}")
-        monkeypatch.setattr(agy, "run", self._unconfined)
-        ok, reason = agy.agy_is_confined()
+        monkeypatch.setattr(agy_sandbox, "run", self._unconfined)
+        ok, reason = agy_sandbox.agy_is_confined()
         assert not ok and "ALLOWED a write" in reason
 
     def test_a_sandbox_that_cannot_start_is_not_a_pass(
@@ -1127,7 +1153,7 @@ class TestAgySandboxCheck(_AgyCase):
         """The codex ambiguity again: an untouched canary is also what nothing looks like."""
         monkeypatch.setattr(agy.shutil, "which", lambda c: f"/usr/bin/{c}")
         monkeypatch.setattr(
-            agy,
+            agy_sandbox,
             "run",
             lambda *a, **k: SimpleNamespace(
                 stdout="",
@@ -1135,7 +1161,7 @@ class TestAgySandboxCheck(_AgyCase):
                 returncode=1,
             ),
         )
-        ok, reason = agy.agy_is_confined()
+        ok, reason = agy_sandbox.agy_is_confined()
         assert not ok and "could not start" in reason and "namespaces" in reason
 
     def test_an_account_with_no_passwd_entry_disables_only_agy(
@@ -1146,9 +1172,9 @@ class TestAgySandboxCheck(_AgyCase):
         def unknown(uid: int) -> object:
             raise KeyError(uid)
 
-        monkeypatch.setattr(agy.pwd, "getpwuid", unknown)
+        monkeypatch.setattr(agy_sandbox.pwd, "getpwuid", unknown)
         monkeypatch.setattr(agy.shutil, "which", lambda c: f"/usr/bin/{c}")
-        ok, reason = agy.agy_is_confined()
+        ok, reason = agy_sandbox.agy_is_confined()
         assert not ok and "passwd" in reason
         monkeypatch.setenv("REVIEW_USE_AGY", "1")
         monkeypatch.setenv("MMCRA_SKIP_CODEX_SANDBOX_CHECK", "1")
@@ -1156,62 +1182,101 @@ class TestAgySandboxCheck(_AgyCase):
         found = backends.detect_backends()
         assert found["agy"] is False and found["claude"] is True
 
-    def test_any_reachable_socket_is_refused_not_only_named_ones(self) -> None:
+    def test_any_reachable_socket_is_refused_not_only_named_ones(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         # A list of known sockets lags what is installed: Incus's was not on it.
-        box = self._Reach("/var/lib/incus/unix.socket")
-        reason = agy._check_reachable(box, self.UNIX)  # type: ignore[arg-type]
+        self._reach(monkeypatch, b"/var/lib/incus/unix.socket")
+        reason = agy_sandbox._check_reachable(None, self.SOCKETS)  # type: ignore[arg-type]
         assert reason and "/var/lib/incus/unix.socket" in reason
 
     def test_the_resolvers_socket_is_put_back_on_purpose(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(agy, "_resolver_dir", lambda: Path("/run/systemd/resolve"))
-        box = self._Reach("/run/systemd/resolve/io.systemd.Resolve")
-        assert agy._check_reachable(box, self.UNIX) is None  # type: ignore[arg-type]
+        monkeypatch.setattr(
+            agy_sandbox, "_resolver_dir", lambda: Path("/run/systemd/resolve")
+        )
+        self._reach(monkeypatch, b"/run/systemd/resolve/io.systemd.Resolve")
+        assert agy_sandbox._check_reachable(None, self.SOCKETS) is None  # type: ignore[arg-type]
 
-    def test_any_abstract_session_bus_is_refused(self) -> None:
+    def test_a_path_that_climbs_out_of_the_resolvers_directory_is_not_its(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Bound by that name, it started with the resolver's directory and passed.
+        monkeypatch.setattr(
+            agy_sandbox, "_resolver_dir", lambda: Path("/run/systemd/resolve")
+        )
+        escape = b"/run/systemd/resolve/../../../var/tmp/x.sock"
+        self._reach(monkeypatch, escape)
+        reason = agy_sandbox._check_reachable(None, [*self.SOCKETS, escape])  # type: ignore[arg-type]
+        assert reason and "x.sock" in reason
+
+    def test_any_abstract_session_bus_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         # Not only dbus-launch's under /tmp: IBus keeps one under ~/.cache.
-        unix = (
-            self.UNIX
-            + "0: 00000002 00000000 00010000 0001 01 3 @/home/u/.cache/ibus/dbus-AbCd\n"
-        )
-        reason = agy._check_reachable(self._Reach("nothing"), unix)  # type: ignore[arg-type]
-        assert reason and "session bus" in reason
+        self._reach(monkeypatch)
+        names = [*self.SOCKETS, b"\0/home/u/.cache/ibus/dbus-AbCd"]
+        reason = agy_sandbox._check_reachable(None, names)  # type: ignore[arg-type]
+        assert reason and "session bus" in reason and "@/home/u" in reason
 
-    def test_a_socket_path_with_a_space_is_checked_whole(self) -> None:
-        # Split on whitespace, "/var/tmp/my app.sock" was probed as "/var/tmp/my".
-        unix = (
-            self.UNIX + "0: 00000002 00000000 00010000 0001 01 4 /var/tmp/my app.sock\n"
-        )
-        reason = agy._check_reachable(self._Reach("/var/tmp/my app.sock"), unix)  # type: ignore[arg-type]
-        assert reason and "/var/tmp/my app.sock" in reason
+    @pytest.mark.parametrize(
+        "name",
+        [b"/var/tmp/my app.sock", b"/var/tmp/a\nb.sock", b"/var/tmp/\xff.sock"],
+        ids=["space", "line-break", "not-utf8"],
+    )
+    def test_a_socket_name_is_checked_byte_for_byte(
+        self, monkeypatch: pytest.MonkeyPatch, name: bytes
+    ) -> None:
+        # Read from /proc/net/unix, a space split the name, a line break cut it in two,
+        # and a byte that is not UTF-8 became another character: each a different path
+        # from the socket that existed.
+        self._reach(monkeypatch, name)
+        reason = agy_sandbox._check_reachable(None, [*self.SOCKETS, name])  # type: ignore[arg-type]
+        assert reason and "can reach" in reason
+        # Named in the message escaped, not raw: someone else chose it.
+        assert "\n" not in reason and "\xff" not in reason
 
-    @pytest.mark.parametrize("unix", ["", "cat: /proc/net/unix: No such file\n"])
-    def test_a_socket_list_that_cannot_be_read_is_not_a_pass(self, unix: str) -> None:
+    def test_the_kernel_lists_this_hosts_sockets(self) -> None:
+        if not Path("/proc/net/unix").exists():
+            pytest.skip("not Linux")
+        names = agy_sandbox._unix_sockets()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as mine:
+            mine.bind(b"\0mmcra-test-\n-" + str(os.getpid()).encode())
+            assert (
+                b"\0mmcra-test-\n-" + str(os.getpid()).encode()
+                in agy_sandbox._unix_sockets()
+            )
+        assert all(n[:1] in (b"/", b"\0") or n for n in names)
+
+    def test_a_socket_list_the_kernel_will_not_give_is_not_a_pass(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         # An empty list passed every socket check there was.
-        reason = agy._check_reachable(self._Reach("x"), unix)  # type: ignore[arg-type]
-        assert reason and "socket list" in reason
+        def refused() -> list[bytes]:
+            raise OSError("the kernel would not list its sockets (sock_diag)")
 
-    def test_a_socket_probe_that_failed_is_not_a_pass(self) -> None:
+        monkeypatch.setattr(agy_sandbox, "_unix_sockets", refused)
+        reason = agy_sandbox.agy_reachable(["true"], tmp_path)
+        assert reason and "sock_diag" in reason
+
+    def test_a_socket_probe_that_failed_is_not_a_pass(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         # No xargs inside, or a sandbox that did not start: nothing printed, and
         # nothing printed read as nothing reachable.
-        reason = agy._check_reachable(self._Reach("", returncode=127), self.UNIX)  # type: ignore[arg-type]
-        assert reason and "could not check the sockets" in reason and "xargs" in reason
+        failed = "could not check the sockets agy's sandbox can reach: xargs: not found"
+        self._reach(monkeypatch, failed)
+        reason = agy_sandbox._check_reachable(None, self.SOCKETS)  # type: ignore[arg-type]
+        assert reason == failed
 
-    def test_a_socket_name_with_a_line_break_is_not_a_pass(self) -> None:
-        # The kernel prints a name raw: cut at its line break, the half probed was not
-        # the socket that exists.
-        unix = (
-            self.UNIX + "0: 00000002 00000000 00010000 0001 01 7 /var/tmp/a\nb.sock\n"
+    def test_the_socket_probe_fails_closed_for_real(self, tmp_path: Path) -> None:
+        # The probe's own status, through a "sandbox" that is a failing command.
+        box = agy_sandbox._Box(
+            ["sh", "-c", "echo 'xargs: not found' >&2; exit 127", "--"], tmp_path
         )
-        reason = agy._check_reachable(self._Reach("x"), unix)  # type: ignore[arg-type]
-        assert reason and "line break" in reason
-
-    def test_the_real_socket_list_parses(self) -> None:
-        unix = Path("/proc/net/unix")
-        if not unix.exists():
-            pytest.skip("no /proc/net/unix")
-        assert isinstance(agy._unix_names(unix.read_text(errors="replace")), list)
+        reason = agy_sandbox._reachable(box, [b"/var/tmp/x.sock"])
+        assert isinstance(reason, str) and "xargs: not found" in reason
 
     def test_the_probes_marks_cannot_be_forged(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -1228,25 +1293,45 @@ class TestAgySandboxCheck(_AgyCase):
                 return ""
 
         for _ in range(2):
-            agy._probe(Box(), tmp_path / "canary", [])  # type: ignore[arg-type]
+            agy_sandbox._probe(Box(), tmp_path / "canary", [])  # type: ignore[arg-type]
         marks = [re.search(r"echo (@@\S+@@)agy", s).group(1) for s in scripts]  # type: ignore[union-attr]
         assert marks[0] != marks[1]
-        assert all("cat /proc/net/unix" not in s for s in scripts)
 
-    def test_a_socket_with_a_relative_name_is_not_a_pass(self) -> None:
-        unix = self.UNIX + "0: 00000002 00000000 00010000 0001 01 5 relative.sock\n"
-        reason = agy._check_reachable(self._Reach("x"), unix)  # type: ignore[arg-type]
+    def test_a_socket_with_a_relative_name_is_not_a_pass(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._reach(monkeypatch)
+        reason = agy_sandbox._check_reachable(None, [*self.SOCKETS, b"relative.sock"])  # type: ignore[arg-type]
         assert reason and "relative" in reason
+
+    @pytest.mark.parametrize(
+        "caps",
+        ["CapEff:\t000001ffffffffff", "", "CapEff:"],
+        ids=["root", "none", "empty"],
+    )
+    def test_a_sandbox_holding_capabilities_is_not_a_pass(self, caps: str) -> None:
+        # Run as root without a user namespace, bwrap kept every capability, and a
+        # remount would have undone the read-only binds.
+        assert agy_sandbox._check_capabilities({"caps": caps})
+        assert (
+            agy_sandbox._check_capabilities({"caps": "CapEff:\t0000000000000000"})
+            is None
+        )
+
+    def test_the_sandbox_has_a_user_namespace_and_no_capabilities(self) -> None:
+        wrap = agy_sandbox.agy_sandbox(Path("/var/tmp/ws"), Path("/var/tmp/st"))
+        assert "--unshare-user" in wrap
+        assert wrap[wrap.index("--cap-drop") + 1] == "ALL"
 
     @pytest.mark.parametrize(("reply", "refused"), [(b"\x01", True), (b"\x02", False)])
     def test_an_x_server_that_admits_this_user_without_a_cookie_is_refused(
-        self, reply: bytes, refused: bool
+        self, monkeypatch: pytest.MonkeyPatch, reply: bytes, refused: bool
     ) -> None:
         # Only named before; stock GNOME and Xwayland admit the local user, and a
         # program inside could type into a terminal outside.
-        name = f"@/tmp/.X11-unix/X{os.getpid() % 10000 + 50000}"
+        name = f"\0/tmp/.X11-unix/X{os.getpid() % 10000 + 50000}".encode()
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        server.bind("\0" + name[1:])
+        server.bind(name)
         server.listen(1)
 
         def answer() -> None:
@@ -1257,14 +1342,29 @@ class TestAgySandboxCheck(_AgyCase):
 
         thread = threading.Thread(target=answer, daemon=True)
         thread.start()
+        self._reach(monkeypatch)
         try:
-            unix = "Num RefCount Protocol Flags Type St Inode Path\n"
-            unix += f"0: 00000002 00000000 00010000 0001 01 6 {name}\n"
-            reason = agy._check_reachable(self._Reach("x"), unix)  # type: ignore[arg-type]
+            reason = agy_sandbox._check_reachable(None, [name])  # type: ignore[arg-type]
         finally:
             thread.join(timeout=5)
             server.close()
         assert bool(reason and "X server" in reason) is refused
+
+    def test_no_home_at_all_disables_only_agy(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # HOME unset and no passwd entry: Path.home() raised RuntimeError, which no
+        # caller caught, and detection stopped with no reviewer started.
+        def nowhere() -> Path:
+            raise RuntimeError("Could not determine home directory.")
+
+        monkeypatch.setattr(agy.Path, "home", staticmethod(nowhere))
+        monkeypatch.setattr(agy_sandbox, "agy_state_dir", real_agy_state_dir)
+        with pytest.raises(OSError, match="home directory"):
+            agy_sandbox.agy_state_dir()
+        monkeypatch.setattr(agy.shutil, "which", lambda c: f"/usr/bin/{c}")
+        ok, reason = agy_sandbox.agy_is_confined()
+        assert not ok and "home directory" in reason
 
     def test_a_home_of_root_is_not_a_pass(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1272,9 +1372,9 @@ class TestAgySandboxCheck(_AgyCase):
         # Dropped from the list, / was neither hidden nor checked: /.ssh stayed readable.
         monkeypatch.setenv("HOME", "/")
         with pytest.raises(OSError, match="home directory of /"):
-            agy._homes()
+            agy_sandbox._homes()
         monkeypatch.setattr(agy.shutil, "which", lambda c: f"/usr/bin/{c}")
-        ok, reason = agy.agy_is_confined()
+        ok, reason = agy_sandbox.agy_is_confined()
         assert not ok and "home directory of /" in reason
 
     def test_a_socket_under_a_root_only_directory_needs_no_mask(
@@ -1286,11 +1386,11 @@ class TestAgySandboxCheck(_AgyCase):
 
         monkeypatch.setattr(agy.os.path, "lexists", lambda p: True)
         monkeypatch.setattr(Path, "resolve", denied)
-        assert agy._maskable("/var/lib/incus/unix.socket") is False
+        assert agy_sandbox._maskable("/var/lib/incus/unix.socket") is False
 
     def test_no_bwrap_is_not_a_pass(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(agy.shutil, "which", lambda c: None)
-        ok, reason = agy.agy_is_confined()
+        ok, reason = agy_sandbox.agy_is_confined()
         assert not ok and "bwrap" in reason
 
     @pytest.mark.parametrize(
@@ -1304,8 +1404,8 @@ class TestAgySandboxCheck(_AgyCase):
             raise failure
 
         monkeypatch.setattr(agy.shutil, "which", lambda c: f"/usr/bin/{c}")
-        monkeypatch.setattr(agy, "run", boom)
-        ok, reason = agy.agy_is_confined()
+        monkeypatch.setattr(agy_sandbox, "run", boom)
+        ok, reason = agy_sandbox.agy_is_confined()
         assert not ok and "check failed" in reason
 
     def test_the_check_proves_the_wrapper_a_reviewer_runs_under(
@@ -1318,14 +1418,14 @@ class TestAgySandboxCheck(_AgyCase):
             return SimpleNamespace(stdout="", stderr="", returncode=1)
 
         monkeypatch.setattr(agy.shutil, "which", lambda c: f"/usr/bin/{c}")
-        monkeypatch.setattr(agy, "run", record)
-        agy.agy_is_confined()
+        monkeypatch.setattr(agy_sandbox, "run", record)
+        agy_sandbox.agy_is_confined()
         (first,) = calls  # it stops at "could not start"
         wrap = first[: first.index("--") + 1]
-        state = Path(wrap[wrap.index(str(agy.agy_state_dir())) - 1])
+        state = Path(wrap[wrap.index(str(agy_sandbox.agy_state_dir())) - 1])
         last_bind = len(wrap) - 1 - wrap[::-1].index("--bind")
         workspace = Path(wrap[last_bind + 1])
-        assert wrap == agy.agy_sandbox(workspace, state)
+        assert wrap == agy_sandbox.agy_sandbox(workspace, state)
 
 
 class TestAgyDetection(_AgyCase):
@@ -1423,7 +1523,7 @@ class TestAgyDetection(_AgyCase):
         # that one left the account's ~/.ssh readable.
         account = Path(pwd.getpwuid(os.getuid()).pw_dir)
         monkeypatch.setenv("HOME", str(tmp_path))
-        _, bwrap = agy.agy_sandbox_parts(tmp_path / "ws", tmp_path / "st")
+        _, bwrap = agy_sandbox.agy_sandbox_parts(tmp_path / "ws", tmp_path / "st")
         hidden = [Path(bwrap[i + 1]) for i, a in enumerate(bwrap) if a == "--tmpfs"]
         assert tmp_path in hidden
         if account != Path("/"):
@@ -1459,12 +1559,14 @@ class TestAgyRunner(_AgyCase):
         assert 'echo agy > "$REVIEW_TMP/backend-$num.txt"' in runner  # for watching
         assert 'cat "$REVIEW_TMP/backend-' not in runner
         # Scratch listed in the runner's own shell, not in a file a reviewer could write.
-        assert 'AGY_SCRATCH+=("$AGY_WS")' in prepare
-        assert 'AGY_SCRATCH+=("$AGY_STATE")' in prepare
+        assert "agy_scratch AGY_WS && agy_scratch AGY_STATE" in prepare
+        assert 'AGY_SCRATCH+=("$dir")' in shell_function(runner, "agy_scratch")
         assert "scratch-" not in runner
         assert "trap finish_round EXIT" in runner
         # A failed mktemp must not fall back to running agy in the repository.
-        assert 'AGY_WS="$(mktemp -d)" && [ -n "$AGY_WS" ]' in prepare
+        assert 'dir="$(mktemp -d)" && [ -n "$dir" ] || return 1' in shell_function(
+            runner, "agy_scratch"
+        )
         assert 'rm -rf "$AGY_WS" "$AGY_STATE"' in runner
         # Absolute, or the job's cd into the workspace sends its output there.
         assert 'REVIEW_TMP="$(cd "$REVIEW_TMP" && pwd -P)" || exit 1' in runner

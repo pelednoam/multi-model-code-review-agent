@@ -9,7 +9,7 @@ choosing not to, not agy refusing.
 So the boundary is the operating system's: agy runs under
 [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`), Linux only. Under
 it, agy's own write tool got `read-only file system`. The wrapper is built in one
-place, `agy_sandbox_parts` in `scripts/review_loop/agy.py`, and both the
+place, `agy_sandbox_parts` in `scripts/review_loop/agy_sandbox.py`, and both the
 convergence loop and the full-mode runner call it.
 
 ## What it closes
@@ -24,23 +24,28 @@ convergence loop and the full-mode runner call it.
   resolver's directory is put back.
 - **agy's real state**, replaced by a throwaway copy holding its sign-in token, with
   its program directories (`bin`, `builtin`) mounted read-only beside it and nothing
-  else of the real state: no history, no other settings. The copy is removed when the round ends, or when the run is stopped by Ctrl-C,
-  `SIGTERM`, `SIGHUP` or `SIGQUIT`. Only a `SIGKILL` leaves it. A run started under
-  `nohup` keeps ignoring `SIGHUP`.
+  else of the real state: no history, no other settings. The copy is removed when
+  the round ends, or when the run is stopped by Ctrl-C, `SIGTERM`, `SIGHUP` or
+  `SIGQUIT`. Only a `SIGKILL` leaves it. A run started under `nohup` keeps ignoring
+  `SIGHUP`.
 - **The environment**, cleared to a short allowlist before `bwrap` starts. `bwrap`
   is PID 1 inside, and `/proc/1/environ` would otherwise hold every API key the run
   was started with. The values are not on `bwrap`'s command line either, which any
   local user can read.
 - **Host processes** (`--unshare-pid`), and a terminal to inject input into
   (`--new-session`).
+- **Privilege**: agy runs in a user namespace of its own with every capability
+  dropped (`--unshare-user --cap-drop ALL`), checked. Run as root, as in many CI
+  containers, bwrap otherwise keeps all of root's, and a remount would undo every
+  read-only mount.
 - **Anything that runs code outside**:
   - every writable socket left reachable, refused by the check rather than looked
     up in a list (docker's, LXD's and Incus's are masked so that they do not cost
-    the slot). The check reads `/proc/net/unix`, which lists the sockets of the
-    host's network namespace by the path each was bound at. A socket bound in
+    the slot). The check asks the kernel (`sock_diag`, over netlink) for the
+    sockets of the host's network namespace, each by the exact path it was bound
+    at; if the kernel will not list them, the check fails. A socket bound in
     another namespace (a container's), or whose directory was renamed after, is
-    not found at the path that reaches it; one whose name has a line break fails
-    the check;
+    not found at the path that reaches it;
   - a session bus on an abstract socket (`dbus-launch`'s, IBus's);
   - an X server that admits your user without its cookie. Stock GNOME and
     Xwayland grant `SI:localuser`, and a program inside could type into a terminal
@@ -83,6 +88,10 @@ included, unless `REVIEW_USE_AGY=1`.
   pointing at the branch.
 - **agy's browser and MCP tools.** Headless agy refused the one shell command it
   tried, but whether those tools reach the network unprompted has not been tested.
+- **`@path` mentions in the prompt.** Whether agy reads a file named that way in
+  stream-json input, and sends its contents to the model, has not been measured. A
+  diff line of that shape is passed through as it is; the file would come from
+  outside the scrubbed diff, though only from what the sandbox can read.
 
 Treat the sandbox as stopping file writes, reads of your home directory, and code
 running outside it through local sockets. It is not network isolation, and it does
@@ -90,9 +99,9 @@ not hide a repository that lives outside the home directory.
 
 ## Switches
 
-- `REVIEW_USE_AGY=0` (or `false`, `no`, `off`): do not use agy. It is on by default
-  wherever it is installed, and then sends the scrubbed diff and audit to Google.
-  Every round that does so says so.
+- `REVIEW_USE_AGY=0` (or `false`, `no`, `off`, or set but empty): do not use agy.
+  It is on by default wherever it is installed, and then sends the scrubbed diff and
+  audit to Google. Every round that does so says so.
 - `REVIEW_USE_AGY=1`: use agy even in a project pinned to Bedrock.
 - `MMCRA_SKIP_AGY_SANDBOX_CHECK=1` (or `true`, `yes`, `on`): run agy without the
   wrapper, on a host that is already a sandbox. `0`, or any other value, keeps the

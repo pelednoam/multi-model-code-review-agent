@@ -36,9 +36,6 @@ from .proc import run
 from .results import extract_results, missing_reviewers
 from .reviewers import build_reviewer_prompt, launch_reviewers
 
-#: The old name, which scripts/review_until_converged.py still imports.
-_run = run
-
 __all__ = [
     "MERGE_TIMEOUT",
     "REPO_ROOT",
@@ -49,7 +46,6 @@ __all__ = [
     "FindingKey",
     "ScrubberFailedError",
     "SecretsDetectedError",
-    "_run",
     "run",
     "write_artifacts_key",
     "apply_fixes",

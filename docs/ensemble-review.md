@@ -85,7 +85,8 @@ if [ -f ".use-hermes" ]; then PREFER_HERMES=true; fi
 # "hermes review" / "bedrock review" / "isolated review".
 
 # The convergence loop's own checks, through its one entry point for bash
-# (scripts/review_loop/runner_cli.py), so the two paths cannot disagree about what is safe to use.
+# (scripts/review_loop/runner_entry.py, which runs runner_cli.py), so the two paths cannot disagree
+# about what is safe to use.
 review_helper() {
   python3 -I "$PWD/scripts/review_loop/runner_entry.py" "$@"
 }
@@ -94,7 +95,7 @@ review_helper() {
 # (or true/yes/on -- not 0) skips the check on a host that is already a sandbox.
 if $HAS_CODEX; then review_helper codex-check || HAS_CODEX=false; fi
 
-# agy (Antigravity CLI): on wherever it is installed; REVIEW_USE_AGY=0 (or false/no/off) switches it off. The model is
+# agy (Antigravity CLI): on wherever it is installed; REVIEW_USE_AGY=0 (or false/no/off, or empty) switches it off. The model is
 # AGY_MODEL if set, else the best Gemini model `agy models` lists for this sign-in (newest version,
 # then Pro/Argon over Flash over Lite, then highest effort) -- picked fresh each run, so a newer
 # model is used once the plan has it. Only true once the sandbox check has passed (no model call).
@@ -454,7 +455,7 @@ fi
 REVIEW_TMP="$(cd "$REVIEW_TMP" && pwd -P)" || exit 1
 
 # What bash cannot do -- agy's sandbox and input, taking a review out of a reviewer's output -- is
-# the convergence loop's own code, called through one entry point (scripts/review_loop/runner_cli.py)
+# the convergence loop's own code, called through one entry point (scripts/review_loop/runner_entry.py)
 # rather than copied here. It comes from the project checkout, like everything this runner uses:
 # reviewing an untrusted branch in full mode runs that branch's code. For that, run the convergence
 # loop from a trusted checkout of this agent with --repo pointing at the branch.
@@ -575,20 +576,24 @@ launch_hermes() {
 # - The preamble, into the prompt file itself, so the file is the record of what agy was sent. Last,
 #   after every way this launch can still fall through to another backend.
 AGY_SCHEMA="" AGY_WS="" AGY_STATE="" AGY_ENVP=() AGY_BWRAP=()
+# agy_scratch VAR: a new temporary directory, listed in AGY_SCRATCH, resolved, into VAR.
+agy_scratch() {
+  local dir
+  dir="$(mktemp -d)" && [ -n "$dir" ] || return 1
+  AGY_SCRATCH+=("$dir")
+  dir="$(cd "$dir" && pwd -P)" || return 1
+  printf -v "$1" %s "$dir"
+}
 prepare_agy() {
   local num=$1 prompt_file=$2 wrap=()
   AGY_SCHEMA="$(review_helper agy-schema "$REVIEW_ROOT/docs/ensemble_review_result_schema.json")" \
     || { echo "R$num: SKIPPED (agy result schema unusable)"; return 1; }
-  AGY_WS="$(mktemp -d)" && [ -n "$AGY_WS" ] && AGY_SCRATCH+=("$AGY_WS") \
-    && AGY_WS="$(cd "$AGY_WS" && pwd -P)" \
+  { agy_scratch AGY_WS && agy_scratch AGY_STATE; } \
     || { echo "R$num: SKIPPED (no temporary directory for agy)"; return 1; }
   case "$AGY_WS/" in
     "$(cd "$REVIEW_ROOT" && pwd -P)"/*)
       echo "R$num: SKIPPED (agy workspace $AGY_WS is inside the repo; check TMPDIR)"; return 1 ;;
   esac
-  AGY_STATE="$(mktemp -d)" && [ -n "$AGY_STATE" ] && AGY_SCRATCH+=("$AGY_STATE") \
-    && AGY_STATE="$(cd "$AGY_STATE" && pwd -P)" \
-    || { echo "R$num: SKIPPED (no temporary directory for agy)"; return 1; }
   mapfile -d '' -t wrap < <(review_helper agy-sandbox "$AGY_WS" "$AGY_STATE")
   [ "${#wrap[@]}" -ge 1 ] || { echo "R$num: SKIPPED (could not build agy's sandbox)"; return 1; }
   AGY_ENVP=("${wrap[@]:1:${wrap[0]}}")
@@ -606,7 +611,7 @@ prepare_agy() {
 # CLAUDE_DENY, or 1 if they could not be worked out. --allowedTools only skips the permission
 # prompt; it does not confine. So every tool that writes, runs a command or reaches the network,
 # and that TOOLS does not name, is denied -- the convergence loop's list and its parsing
-# (reviewers.claude_denied), so the two cannot drift. A tool granted with a scope is granted whole
+# (claude_tools.claude_denied), so the two cannot drift. A tool granted with a scope is granted whole
 # as far as the deny list goes, which the helper says.
 CLAUDE_DENY=()
 claude_deny() {
@@ -697,10 +702,10 @@ launch_cli() {
       # Antigravity CLI. Only reached when HAS_AGY=true, i.e. its sandbox check passed.
       #
       # agy itself confines nothing: measured, it wrote outside its workspace by absolute path
-      # with no denial. So it runs under the bubblewrap wrapper from scripts/review_loop/agy.py
-      # (agy_sandbox_parts) -- built by calling it, so there is one copy: filesystem read-only
-      # except an empty workspace OUTSIDE the repo, home hidden, a throwaway copy of agy's state,
-      # no host processes or sockets. The prompt -- with the preamble telling it to call no tools
+      # with no denial. So it runs under the bubblewrap wrapper from
+      # scripts/review_loop/agy_sandbox.py (agy_sandbox_parts) -- built by calling it, so there is
+      # one copy: filesystem read-only except an empty workspace OUTSIDE the repo, home hidden, a
+      # throwaway copy of agy's state, no host processes or sockets, no capabilities. The prompt -- with the preamble telling it to call no tools
       # -- goes in as one stream-json line on stdin.
       prepare_agy "$num" "$prompt_file" || return 1
       JOB_BACKEND[$num]=agy
@@ -719,7 +724,7 @@ launch_cli() {
         rc=$?; rm -rf "$AGY_WS" "$AGY_STATE"; echo "$rc" > "$REVIEW_TMP/done-$num"; } &
       JOB_PID[$num]=$!
       echo $! > "$REVIEW_TMP/pid-$num"
-      echo "R$num: Antigravity CLI ($AGY_MODEL) [subscription]"
+      echo "R$num: Antigravity CLI ($AGY_MODEL) [free]"
       echo "R$num: agy sends the diff and audit to Google (REVIEW_USE_AGY=0 to stop)"
       ;;
     *)
@@ -735,10 +740,15 @@ if ! $HAS_CLAUDE && ! $HAS_HERMES; then
   exit 1
 fi
 
-# Count provider diversity
+# Count provider diversity. Google counts only if slot 3 may go there: a project pinned to Bedrock
+# gets agy only when detection let it through (REVIEW_USE_AGY=1), and gemini only with
+# REVIEW_USE_GEMINI.
 N_PROVIDERS=1  # Anthropic is always available (claude or hermes)
 $HAS_CODEX && N_PROVIDERS=$((N_PROVIDERS + 1))
-{ $HAS_GEMINI || ${HAS_AGY:-false}; } && N_PROVIDERS=$((N_PROVIDERS + 1))
+if ${HAS_AGY:-false} \
+   || { $HAS_GEMINI && { ! $PREFER_HERMES || review_helper flag REVIEW_USE_GEMINI; }; }; then
+  N_PROVIDERS=$((N_PROVIDERS + 1))
+fi
 if [ $N_PROVIDERS -eq 1 ]; then
   echo "WARNING: single-provider mode (Anthropic only)."
   echo "Install codex and/or agy (or gemini) for cross-provider diversity."

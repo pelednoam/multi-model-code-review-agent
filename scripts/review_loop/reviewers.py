@@ -507,8 +507,11 @@ def _launch_one(
         prompt = AGY_PREAMBLE + prompt
         # On by default, so said whenever it runs: this is where the diff leaves.
         print(f"  R{slot}: {AGY_EGRESS}")
-    # The record of what the reviewer was sent.
+    # The record of what the reviewer was sent, and the copy hermes reads by its path:
+    # in the private directory, not in round_dir, where another reviewer with a file
+    # tool could rewrite it before hermes read it.
     (round_.round_dir / f"prompt-{slot}.txt").write_text(prompt, encoding="utf-8")
+    (round_.out_dir / f"prompt-{slot}.txt").write_text(prompt, encoding="utf-8")
     # Which backend answered, for a person reading the round. The loop goes by what
     # it launched (``launch_reviewers`` returns it), not by this file.
     (round_.round_dir / f"backend-{slot}.txt").write_text(backend, encoding="utf-8")
@@ -528,7 +531,7 @@ def _pick_backend(slot: int, round_: _Round) -> _Picked | None:
     would have had without it, as the routing tables say: an empty slot 3 every round
     never converges. The prompt is built once the backend is settled, not per attempt.
     """
-    prompt_path = round_.round_dir / f"prompt-{slot}.txt"
+    prompt_path = round_.out_dir / f"prompt-{slot}.txt"
     backends = dict(round_.backends)
     while True:
         choice = _choose_command(
@@ -604,9 +607,11 @@ def _spawn(
 
 
 def _under_review(repo: Path | None) -> tuple[Path, ...]:
-    """What agy's sandbox hides besides the homes: the repository under review (or the
-    directory the loop was started from), and this agent's checkout."""
-    return (repo if repo is not None else Path.cwd(), REPO_ROOT)
+    """What agy's sandbox hides besides the homes: the repository under review, the
+    directory the loop was started from, and this agent's checkout -- as the sandbox
+    check hides them (``agy_is_confined``). Its workspace and state are mounted after,
+    so hiding a directory that holds them does not."""
+    return tuple(dict.fromkeys(p for p in (repo, Path.cwd(), REPO_ROOT) if p))
 
 
 def _prepare_agy(
@@ -666,6 +671,24 @@ def _stop(proc: subprocess.Popen[str]) -> None:
         proc.wait(timeout=10)
 
 
+def _is_zombie(pid: int) -> bool | None:
+    """Whether ``pid`` has exited and awaits its reap; None when ``ps`` cannot say."""
+    try:
+        done = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    state = done.stdout.strip()
+    if done.returncode != 0 or not state:
+        return None
+    return state.startswith("Z")
+
+
 def _exit_status(proc: subprocess.Popen[str]) -> int | None:
     """The reviewer's exit status once it has exited -- without reaping it.
 
@@ -674,14 +697,21 @@ def _exit_status(proc: subprocess.Popen[str]) -> int | None:
     kill at the end of the round would reach that. Left a zombie until ``_stop``, the
     number stays this run's, and so does everything the kill can reach.
 
-    Where there is no ``os.waitid`` -- macOS before Python 3.13 -- it is reaped, and
-    its group killed in the same breath: the number is free only from the reap, so
-    the kill reaches this run's helpers -- left alone, they went on writing while the
-    outputs were published -- and not, in that instant, anyone else's.
+    Where there is no ``os.waitid`` -- macOS before Python 3.13 -- ``ps`` says when
+    it is a zombie, and its group is killed then, before the reap: its helpers, left
+    alone, went on writing while the outputs were published. Only where ``ps`` cannot
+    say is it reaped first and the group killed straight after.
     """
     if proc.returncode is not None:
         return proc.returncode
     if not hasattr(os, "waitid"):
+        exited = _is_zombie(proc.pid)
+        if exited is False:
+            return None
+        if exited:
+            with contextlib.suppress(OSError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            return proc.wait()
         status = proc.poll()
         if status is not None:
             with contextlib.suppress(OSError):

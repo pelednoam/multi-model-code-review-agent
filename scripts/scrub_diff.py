@@ -130,14 +130,15 @@ SHAPE_PATTERNS = [
     re.compile(r"AIza[0-9A-Za-z_-]{35}"),
     re.compile(r"(?:sk|rk)_live_[0-9a-zA-Z]{20,}"),
     re.compile(r"xox[abprs]-[0-9A-Za-z-]{10,}"),
-    # A password in a URL's userinfo: scheme, "://", user (redis's may be empty),
-    # ":", password, "@" -- in a postgres, redis or proxy URL. A password may hold
-    # ' or / (base64 often has one); a port and a path after it is not a password.
-    # The scheme anchored and bounded, the password too, so that a long line is
-    # scanned in linear time. Written in two parts, so that this line is not one.
+    # A password in a URL's userinfo: scheme, "://", user (redis's may be empty,
+    # Azure's holds an @), ":", password, "@" -- in a postgres, redis or proxy URL.
+    # A password may hold ' or / (base64 often has one); a port and a path after it
+    # is not a password, and nor is a port and a query or fragment with an @ in it.
+    # The scheme anchored and the parts bounded, so that a long line is scanned in
+    # linear time. Written in two parts, so that this line is not one.
     re.compile(
         r"(?<![a-zA-Z0-9+.-])[a-zA-Z][a-zA-Z0-9+.-]{0,31}:"
-        + r"//[^\s/:@\"]*:(?!\d{1,5}/)[^\s@\"]{1,256}@"
+        + r"//[^\s/:\"?#]{0,256}:(?!\d{1,5}/)[^\s@\"?#]{1,256}@"
     ),
     # Google's OAuth access and refresh tokens and client secrets, and the package
     # registries' tokens.

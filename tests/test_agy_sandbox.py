@@ -25,6 +25,9 @@ from scripts.review_loop.agy_sandbox import agy_state_dir as real_agy_state_dir
 #: Abstract unix sockets, SO_PEERCRED and sock_diag are Linux's.
 LINUX_ONLY = pytest.mark.skipif(sys.platform != "linux", reason="needs Linux sockets")
 
+#: The real root check, which the fixture stands in for (``AgyCase``).
+REAL_AS_ROOT = agy_sandbox_check._as_root
+
 
 class TestAgySandboxCheck(AgyCase):
     """The startup check that proves the wrapper, with no model call."""
@@ -562,6 +565,7 @@ class TestAgySandboxCheck(AgyCase):
     def test_agy_does_not_run_as_root(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Its capabilities dropped, root inside still owns root's files (/etc/shadow,
         # host keys) and can read them, with the network open.
+        monkeypatch.setattr(agy_sandbox_check, "_as_root", REAL_AS_ROOT)
         monkeypatch.setattr(agy_sandbox_check.os, "geteuid", lambda: 0)
         ok, reason = agy_sandbox_check.agy_is_confined()
         assert not ok and "running as root" in reason

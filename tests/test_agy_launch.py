@@ -231,6 +231,8 @@ class TestAgyLaunch(AgyCase):
             "from scripts.review_loop import agy, agy_sandbox_check\n"
             "import tempfile; tempfile.tempdir = sys.argv[2]\n"
             "agy_sandbox_check._canary_parent = lambda: sys.argv[2]\n"
+            # As root, the check refused before making anything to clean up.
+            "agy_sandbox_check._as_root = lambda: False\n"
             # Nothing real runs (run is replaced), so bwrap need not be installed.
             "agy.shutil.which = lambda c: '/usr/bin/' + c\n"
             "def killed(*a, **k):\n"
@@ -403,6 +405,29 @@ class TestAgyLaunch(AgyCase):
         # REVIEW_USE_AGY=0 means off; MMCRA_SKIP_AGY_SANDBOX_CHECK=0 must not mean "skip".
         monkeypatch.setenv("MMCRA_SKIP_AGY_SANDBOX_CHECK", value)
         assert agy.agy_unsandboxed() is False
+
+    def test_the_directory_the_loop_runs_from_is_hidden_too(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Hidden by the sandbox check, it was left readable in the sandbox launched.
+        repo = tmp_path / "repo"
+        monkeypatch.chdir(tmp_path)
+        assert reviewers._under_review(repo) == (repo, tmp_path, REPO_ROOT)
+
+    def test_hermes_reads_its_prompt_from_the_private_directory(
+        self, tmp_path: Path
+    ) -> None:
+        # Read by its path from round_dir, another reviewer with a file tool could
+        # rewrite it first.
+        found = {**self.BACKENDS, "hermes": True}
+        out_dir = tmp_path / "private"
+        out_dir.mkdir()
+        round_ = reviewers._Round(
+            "d", "{}", "", tmp_path, found, True, tmp_path, out_dir=out_dir
+        )
+        picked = reviewers._pick_backend(1, round_)
+        assert picked is not None and picked.backend == "hermes"
+        assert f"@{out_dir / 'prompt-1.txt'}" in picked.cmd
 
     def test_gemini_runs_outside_the_repository(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

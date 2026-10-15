@@ -79,7 +79,8 @@ to its next backend if anything fails.
 
 A run opted in to Bedrock -- `.use-hermes` in the project, `--prefer-hermes`, or a
 "hermes review", "bedrock review" or "isolated review" request in full mode -- does
-not run agy at all, the check included, unless `REVIEW_USE_AGY=1`.
+not run agy at all, the check included, unless `REVIEW_USE_AGY=1` -- and even then
+only where Hermes is not installed, since Hermes answers slot 3 when it is.
 
 ## What it does not close
 
@@ -102,7 +103,11 @@ not run agy at all, the check included, unless `REVIEW_USE_AGY=1`.
 - **Full mode runs the project's own copy of these scripts**, the sandbox builder
   among them. Reviewing an untrusted branch that way runs that branch's code. Use the
   convergence loop from a trusted checkout of this agent instead, with `--repo`
-  pointing at the branch.
+  pointing at the branch. That keeps the sandbox, the scrubber and the prompts the
+  checkout's own, not everything: the preflight runs the branch's test suite for its
+  coverage figures -- from the project's installed copy of the preflight when it has
+  one -- and the fix loop's gate runs its tests again. Run either only on a branch
+  you would run the tests of; `--report-only` still runs the preflight.
 - **agy's browser and MCP tools.** Headless agy refused the one shell command it
   tried, but whether those tools reach the network unprompted has not been tested.
 - **Root's and other users' abstract sockets.** They are not counted: they usually
@@ -144,7 +149,8 @@ next backend.
 - `REVIEW_USE_AGY` set to anything but `1`, `true`, `yes` or `on` (`0`, empty, a
   typo): do not use agy. It is on by default wherever it is installed, and then sends
   the scrubbed diff and audit to Google. Every round that does so says so.
-- `REVIEW_USE_AGY=1`: use agy even in a project pinned to Bedrock.
+- `REVIEW_USE_AGY=1`: in a project pinned to Bedrock, let agy answer slot 3 when
+  Hermes is not installed (with Hermes, Hermes answers it).
 - `MMCRA_AGY_STRICT_SOCKETS=1`: refuse every abstract socket that takes connections,
   whoever owns it, not only your own (see above).
 - `MMCRA_SKIP_AGY_SANDBOX_CHECK=1` (or `true`, `yes`, `on`): run agy without the

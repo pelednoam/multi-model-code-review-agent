@@ -446,6 +446,11 @@ def _timed_out(exc: subprocess.TimeoutExpired) -> str:
     return f"the sandbox did not answer within {exc.timeout:.0f}s"
 
 
+def _as_root() -> bool:
+    """Whether this process runs as root, whom the sandbox cannot confine."""
+    return os.geteuid() == 0
+
+
 def agy_is_confined(also_hide: tuple[Path, ...] = ()) -> tuple[bool, str]:
     """Verify, with no model call, the wrapper a reviewer runs agy under.
 
@@ -456,7 +461,7 @@ def agy_is_confined(also_hide: tuple[Path, ...] = ()) -> tuple[bool, str]:
     This checkout, the working directory and ``also_hide`` (the repository under
     review) are hidden, and shown to be.
     """
-    if os.geteuid() == 0:
+    if _as_root():
         # Its capabilities dropped, root inside still owns root's files: /etc/shadow,
         # host keys, whatever is mode 600 under /var/lib -- readable, with the network
         # open. No mount hides them all.

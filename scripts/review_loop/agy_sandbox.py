@@ -188,15 +188,14 @@ def agy_wrapper_parts(
     env, so its command line, readable by any local user in /proc, holds no values.
 
     It replaces the home directories (``user_homes``), the directories in ``hidden``
-    (the repository under review, this checkout), /tmp and /run with empty ones --
-    putting back only the resolver's file for DNS -- masks ``_HOST_SOCKETS``,
-    gives agy a throwaway copy of its state (``agy_seed_state``), runs bwrap as PID 1
-    of a new process namespace and session, and clears the environment to
-    ``_AGY_ENV`` with ``env -i`` before bwrap starts: bwrap's own /proc/1/environ
-    would otherwise hand every API key to a file read. What that closes and what it
-    does not -- the network, mainly -- is docs/agy-sandbox.md;
-    ``agy_sandbox_check.agy_is_confined``
-    proves it.
+    (the repository under review, the working directory, this checkout), /tmp and
+    /run with empty ones -- putting back only the resolver's file for DNS -- masks
+    ``_HOST_SOCKETS``, gives agy a throwaway copy of its state (``agy_seed_state``),
+    runs bwrap as PID 1 of a new process namespace and session, and clears the
+    environment to ``_AGY_ENV`` with ``env -i`` before bwrap starts: bwrap's own
+    /proc/1/environ would otherwise hand every API key to a file read. What that
+    closes and what it does not -- the network, mainly -- is docs/agy-sandbox.md;
+    ``agy_sandbox_check.agy_is_confined`` proves it.
 
     The bash launcher in docs/ensemble-review.md builds its wrapper by calling this
     (through ``runner_cli``), so there is one copy.

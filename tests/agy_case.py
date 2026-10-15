@@ -67,6 +67,9 @@ class AgyCase:
         (fake_state / "bin").mkdir(parents=True)
         (fake_state / "antigravity-oauth-token").write_text("not-a-real-token")
         monkeypatch.setattr(agy_sandbox, "agy_state_dir", lambda: fake_state)
+        # Run as root -- in a container, a CI job -- the check refused before reaching
+        # what each test is about. The real-sandbox tests skip there (_bwrap_works).
+        monkeypatch.setattr(agy_sandbox_check, "_as_root", lambda: False)
         agy._PICK.clear()
         yield
         agy._PICK.clear()
@@ -236,7 +239,10 @@ class AgyCase:
 
     @staticmethod
     def _bwrap_works() -> bool:
-        """Real-sandbox tests need bwrap that runs, and agy (the check starts it)."""
+        """Real-sandbox tests need bwrap that runs, and agy (the check starts it) -- and
+        not root, which the check refuses (``agy_sandbox_check._as_root``)."""
+        if os.geteuid() == 0:
+            return False
         if shutil.which("bwrap") is None or shutil.which("agy") is None:
             return False
         done = subprocess.run(

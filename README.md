@@ -478,7 +478,7 @@ run the runner with that one. For cross-provider diversity, also install:
   `REVIEW_USE_AGY` set to anything but `1`/`true`/`yes`/`on` switches it off. A project
   that pinned Bedrock (`.use-hermes`, `--prefer-hermes`, or a "hermes review" /
   "bedrock review" / "isolated review" request) gets agy only with
-  `REVIEW_USE_AGY=1`.
+  `REVIEW_USE_AGY=1`, and only when Hermes is not installed to answer the slot.
   Setup is install and sign in:
   ```bash
   curl -fsSL https://antigravity.google/cli/install.sh | bash

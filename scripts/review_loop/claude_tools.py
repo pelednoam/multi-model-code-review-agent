@@ -65,9 +65,13 @@ SECRET_READS = (
     "~/.docker/**", "~/.config/gcloud/**", "~/.config/gh/**", "~/.netrc",
     "~/.git-credentials", "~/.npmrc", "~/.pypirc", "~/.password-store/**",
     "~/.local/share/keyrings/**", "~/.claude/**", "~/.codex/**", "~/.gemini/**",
-    # Environment files anywhere, the repository's included; joined, because the diff
-    # scrubber rightly redacts a line that names one.
-    "**/." + "env", "**/." + "env.*",
+    "~/.config/**/credentials*",
+    # Environment files anywhere, the repository's included, and direnv's; joined,
+    # because the diff scrubber rightly redacts a line that names one.
+    "**/." + "env", "**/." + "env.*", "**/." + "envrc",
+    # Processes' environments, this one's and the CLI's own with them. "//" is an
+    # absolute path in a permission rule; a single "/" is relative to the settings.
+    "//proc/*/environ", "//proc/self/environ",
 )  # fmt: skip
 
 

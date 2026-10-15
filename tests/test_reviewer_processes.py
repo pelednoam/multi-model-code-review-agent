@@ -129,6 +129,52 @@ class TestReviewerProcesses(AgyCase):
             out_f.close()
             err_f.close()
 
+    def test_without_waitid_the_group_is_killed_before_the_reap(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Reaped first, the group's number was free for another session before the
+        # kill reached it.
+        monkeypatch.delattr(reviewers.os, "waitid", raising=False)
+        proc, out_f, err_f = reviewers._spawn(
+            1, ["true"], "true", tmp_path, None, tmp_path
+        )
+        killed: list[int | None] = []
+        real_killpg = os.killpg
+
+        def killpg(pgid: int, sig: int) -> None:
+            killed.append(proc.returncode)
+            real_killpg(pgid, sig)
+
+        monkeypatch.setattr(reviewers.os, "killpg", killpg)
+        try:
+            deadline = time.monotonic() + 10
+            while reviewers._exit_status(proc) is None:
+                assert time.monotonic() < deadline
+                time.sleep(0.05)
+            assert killed == [None]
+        finally:
+            reviewers._stop(proc)
+            out_f.close()
+            err_f.close()
+
+    def test_a_zombie_is_told_from_a_live_process(self, tmp_path: Path) -> None:
+        live = subprocess.Popen(["sleep", "30"])
+        try:
+            assert reviewers._is_zombie(live.pid) is False
+        finally:
+            live.kill()
+        deadline = time.monotonic() + 10
+        while not reviewers._is_zombie(live.pid):
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+        live.wait()
+
+    def test_without_ps_a_zombie_is_not_claimed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PATH", "/nonexistent")
+        assert reviewers._is_zombie(os.getpid()) is None
+
     def test_a_second_signal_waits_for_the_cleanup(self, tmp_path: Path) -> None:
         # A second Ctrl-C or SIGTERM raised in the middle of the cleanup the first had
         # started, and the reviewers not yet stopped kept running.

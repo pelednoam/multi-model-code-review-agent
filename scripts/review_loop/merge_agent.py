@@ -6,10 +6,15 @@ import subprocess
 import uuid
 from typing import TYPE_CHECKING, Any
 
+from .claude_tools import claude_disallowed
 from .config import MERGE_TIMEOUT
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+#: What the merge agent may use: it edits files, and nothing more.
+_MERGE_TOOLS = "Read Edit Write Grep Glob"
 
 
 def _format_fixes(findings: list[dict[str, Any]]) -> str:
@@ -82,7 +87,18 @@ def apply_fixes(
                 # that turns a prompt injection into arbitrary execution is the
                 # one it has no need of. The gate runs separately, afterwards.
                 "--allowedTools",
-                "Read Edit Write Grep Glob",
+                _MERGE_TOOLS,
+                # As the reviewers' (reviewers._claude_cmd): --allowedTools does not
+                # confine, so the rest is denied, credentials' reads among it; and
+                # the user's settings only, with no MCP servers -- the project's
+                # settings can hold hooks that run commands no deny list covers.
+                "--disallowedTools",
+                " ".join(claude_disallowed(_MERGE_TOOLS)),
+                "--strict-mcp-config",
+                "--setting-sources",
+                "user",
+                "--permission-mode",
+                "dontAsk",
                 "--output-format",
                 "json",
             ],

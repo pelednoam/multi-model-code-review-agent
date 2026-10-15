@@ -93,7 +93,15 @@ class TestAgyDetection(AgyCase):
         monkeypatch.setattr(backends, "agy_is_confined", ran)
         monkeypatch.setattr(agy, "agy_models", ran)
         assert backends.detect_backends(prefer_hermes=True)["agy"] is False
+        # Asked for by name, still not where Hermes answers its slot anyway.
         monkeypatch.setenv("REVIEW_USE_AGY", "1")
+        assert backends.detect_backends(prefer_hermes=True)["agy"] is False
+        # With no Hermes, it is the slot's fallback.
+        monkeypatch.setattr(
+            backends.shutil,
+            "which",
+            lambda c: None if c == "hermes" else f"/usr/bin/{c}",
+        )
         monkeypatch.setattr(backends, "agy_is_confined", lambda *a: (True, "verified"))
         monkeypatch.setenv("AGY_MODEL", self.MODEL)
         assert backends.detect_backends(prefer_hermes=True)["agy"] is True

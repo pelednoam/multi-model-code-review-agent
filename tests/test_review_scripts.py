@@ -1307,10 +1307,36 @@ class TestMergeAgentPrompt:
         from scripts.review_loop import merge_agent
 
         source = inspect.getsource(merge_agent)
-        allowed = re.search(r'"--allowedTools",\s*\n\s*"([^"]+)"', source)
-        assert allowed is not None
-        assert "Bash" not in allowed.group(1)
-        assert "Edit" in allowed.group(1)
+        assert '"--allowedTools",\n                _MERGE_TOOLS,' in source
+        assert "Bash" not in merge_agent._MERGE_TOOLS
+        assert "Edit" in merge_agent._MERGE_TOOLS
+
+    def test_the_merge_agent_is_confined_as_the_reviewers_are(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # It ran with the project's settings and MCP servers, and no deny list: a
+        # project hook, or a read of a credential, was its for the asking.
+        from scripts.review_loop import merge_agent
+
+        seen: list[list[str]] = []
+
+        class Stop(Exception):
+            pass
+
+        def popen(cmd: list[str], **_: object) -> None:
+            seen.append(cmd)
+            raise Stop
+
+        monkeypatch.setattr(merge_agent.subprocess, "Popen", popen)
+        with pytest.raises(Stop):
+            merge_agent.apply_fixes([], tmp_path, {"claude": True}, tmp_path)
+        cmd = seen[0]
+        denied = cmd[cmd.index("--disallowedTools") + 1]
+        assert "Bash" in denied.split()
+        assert "Read(~/.ssh/**)" in denied.split()
+        assert cmd[cmd.index("--setting-sources") + 1] == "user"
+        assert "--strict-mcp-config" in cmd
+        assert cmd[cmd.index("--permission-mode") + 1] == "dontAsk"
 
 
 class TestAuditIsData:
@@ -2663,6 +2689,7 @@ class TestCredentialShapes:
             "https://u" + ":p" + "@proxy:3128",
             "postgres://u" + ":Zx9/k+Q==" + "@db/prod",
             "postgres://u" + ":it's-me" + "@db/prod",
+            "postgres://app@srv" + ":hunter2pass" + "@srv.example.net/db",
             "ya" + "29." + "a" * 30,
             "1/" + "/0" + "a" * 40,
             "GOC" + "SPX-" + "a" * 28,
@@ -2676,7 +2703,7 @@ class TestCredentialShapes:
             "xo" + "xb-" + "1234567890-abc",
         ],
         ids=["url-userinfo", "url-no-user", "url-short-password", "url-slash-password",
-             "url-quote-password", "google-oauth-access", "google-oauth-refresh",
+             "url-quote-password", "url-azure-user", "google-oauth-access", "google-oauth-refresh",
              "google-client-secret", "huggingface", "npm", "pypi", "google-api-key", "github-fine-grained", "github-app",
              "stripe-live", "slack"],
     )  # fmt: skip
@@ -2699,6 +2726,16 @@ class TestCredentialShapes:
             "+see https://example.com/a:b and git@github.com:org/repo"
             " and http://host:8080/path?to=a@b\n"
         )
+        assert scrub_diff.scrub_line(line, False) == line
+
+    @pytest.mark.parametrize(
+        "url",
+        ["http://host:8080?to=a@b", "http://host:8080#to=a@b", "ws://h:1?u=x:y@z"],
+    )
+    def test_a_query_or_fragment_with_an_at_is_kept(self, url: str) -> None:
+        # A port and then a query holding an @ was taken for a password, and a
+        # redaction aborts the whole review.
+        line = f"+see {url}\n"
         assert scrub_diff.scrub_line(line, False) == line
 
 

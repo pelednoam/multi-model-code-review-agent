@@ -128,7 +128,8 @@ def detect_backends(
 
     agy is held to the same standard whenever it is installed and not switched off
     (``REVIEW_USE_AGY=0``): its sandbox is proven by ``agy_sandbox_check.agy_is_confined``. A project
-    pinned to Bedrock (``prefer_hermes``) gets agy only with ``REVIEW_USE_AGY=1``.
+    pinned to Bedrock (``prefer_hermes``) gets agy only with ``REVIEW_USE_AGY=1``, and
+    only where Hermes is not installed to answer slot 3 instead.
     ``MMCRA_SKIP_AGY_SANDBOX_CHECK=1`` runs agy without the sandbox, for hosts that
     are already one.
     """
@@ -142,15 +143,23 @@ def detect_backends(
             print(f"  codex: DISABLED for review -- {reason}")
             found["codex"] = False
     if found["agy"]:
-        found["agy"] = _agy_usable(prefer_hermes, repo)
+        found["agy"] = _agy_usable(prefer_hermes, repo, found["hermes"])
     return found
 
 
-def _agy_usable(prefer_hermes: bool, repo: Path | None = None) -> bool:
+def _agy_usable(
+    prefer_hermes: bool, repo: Path | None = None, hermes: bool = False
+) -> bool:
     """Whether the installed agy is to review -- wanted here, its sandbox proven, a
     model to run -- saying why not. ``repo``, the repository under review, is hidden
-    from agy while it is checked and while it lists its models, as in a review."""
+    from agy while it is checked and while it lists its models, as in a review.
+    ``hermes``: whether Hermes is installed, which answers slot 3 in a project pinned
+    to Bedrock, agy or no agy."""
     also_hide = (repo,) if repo is not None else ()
+    if prefer_hermes and hermes:
+        # Not run to be passed over: its check, and a signed-in listing of its models.
+        print("  agy: not used, Hermes answers slot 3 in a project pinned to Bedrock")
+        return False
     if prefer_hermes and not env_flag("REVIEW_USE_AGY"):
         # Pinned to Bedrock to keep the code with providers it chose: agy is not run at
         # all -- not its check, not a signed-in listing of its models -- unless asked

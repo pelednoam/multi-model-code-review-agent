@@ -6,6 +6,8 @@ One copy, for the convergence loop's claude reviewers and the full-mode runner's
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 
 #: The tools a claude reviewer is denied unless it is granted them by name: each one
 #: writes, runs a command, or reaches the network -- or, ReportFindings, takes the
@@ -65,7 +67,13 @@ SECRET_READS = (
     "~/.docker/**", "~/.config/gcloud/**", "~/.config/gh/**", "~/.netrc",
     "~/.git-credentials", "~/.npmrc", "~/.pypirc", "~/.password-store/**",
     "~/.local/share/keyrings/**", "~/.claude/**", "~/.codex/**", "~/.gemini/**",
-    "~/.config/**/credentials*",
+    "~/.config/**/credentials*", "~/.pgpass", "~/.my.cnf", "~/.vault-token",
+    "~/.cargo/credentials*", "~/.terraform.d/**", "~/.s3cfg", "~/.boto", "~/.oci/**",
+    "~/.config/hub",
+    # Where API keys are exported, and pasted into commands.
+    "~/.bashrc", "~/.bash_profile", "~/.profile", "~/.zshrc", "~/.zshenv",
+    "~/.zprofile", "~/.bash_history", "~/.zsh_history", "~/.python_history",
+    "~/.psql_history",
     # Environment files anywhere, the repository's included, and direnv's; joined,
     # because the diff scrubber rightly redacts a line that names one.
     "**/." + "env", "**/." + "env.*", "**/." + "envrc",
@@ -80,4 +88,21 @@ def claude_disallowed(tools: str) -> list[str]:
     tools of ``CLAUDE_DENIED`` it is not granted (``claude_denied``), and reads of
     ``SECRET_READS``, which no grant lifts."""
     denied, _ = claude_denied(tools)
-    return [*denied, *(f"Read({path})" for path in SECRET_READS)]
+    return [*denied, *(f"Read({path})" for path in _secret_reads())]
+
+
+def _secret_reads() -> list[str]:
+    """``SECRET_READS``, and its ``~/`` entries again under the account's own home
+    when $HOME names another directory (CI, ``sudo -E``, a wrapper): ``~`` in a rule
+    is $HOME, and the credentials are in the account's."""
+    reads = list(SECRET_READS)
+    try:
+        import pwd
+
+        account = pwd.getpwuid(os.getuid()).pw_dir
+    except (ImportError, KeyError):
+        return reads
+    if not account or Path(account) == Path(os.path.expanduser("~")):
+        return reads
+    root = account.rstrip("/")
+    return reads + [f"/{root}/{path[2:]}" for path in SECRET_READS if path[:2] == "~/"]

@@ -42,8 +42,8 @@ AGY_SAFETY_ARGS: tuple[str, ...] = (
 #: the turn with no answer -- status SUCCESS, empty response. The claude reviewers have
 #: Read/Grep/Glob and use them; agy has nothing worth reading, so it is told so.
 AGY_PREAMBLE = (
-    "You need no tools for this review and must not call any. The diff and the audit"
-    " below are the whole input, and your working directory is deliberately empty."
+    "You need no tools for this review and must not call any. Everything you need is"
+    " below, and your working directory is deliberately empty."
     " Do not run commands, list or read files, or write a plan: a tool call is refused"
     " here, and a refused tool call ends your turn with no answer, which discards your"
     " review. Read the material below and reply with the JSON object it asks for.\n\n"

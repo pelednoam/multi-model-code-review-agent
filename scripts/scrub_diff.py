@@ -106,6 +106,14 @@ KEYWORD_PATTERNS = [
     re.compile(r"(?i)client[_-]?secret\s*[:=]\s*" + _SECRET_VALUE),
 ]
 
+#: A URL password that is no password: a template's field -- {password},
+#: ${DB_PASS}, %(pw)s, <password> -- or a placeholder word or mask.
+_URL_PLACEHOLDER = (
+    r"(?:\{[^}@\s]*\}|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|%\([^)@\s]*\)s|<[^>@\s]*>"
+    + r"|\*+|x+|X+|pass(?:w(?:or)?d)?|pwd?|secret|changeme)"
+)
+
+
 # SHAPE_PATTERNS recognise a credential by its own shape, with no help from a
 # name: `sk-ant-...`, `AKIA...`, a PEM block, a service-account blob. Nothing
 # excuses these. A string shaped like a live key *is* a live key as far as this
@@ -133,12 +141,17 @@ SHAPE_PATTERNS = [
     # A password in a URL's userinfo: scheme, "://", user (redis's may be empty,
     # Azure's holds an @), ":", password, "@" -- in a postgres, redis or proxy URL.
     # A password may hold ' or / (base64 often has one); a port and a path after it
-    # is not a password, and nor is a port and a query or fragment with an @ in it.
-    # The scheme anchored and the parts bounded, so that a long line is scanned in
-    # linear time. Written in two parts, so that this line is not one.
+    # is not a password, and nor is a port and a query or fragment with an @ in it,
+    # nor an IPv6 host's colons (no user name holds a bracket). Nor a placeholder or
+    # a template's field, which documentation and connection-string code are full
+    # of: a redaction aborts the review. The scheme anchored and the parts bounded,
+    # so that a long line is scanned in linear time. Written in parts, so that this
+    # line is not one.
     re.compile(
         r"(?<![a-zA-Z0-9+.-])[a-zA-Z][a-zA-Z0-9+.-]{0,31}:"
-        + r"//[^\s/:\"?#]{0,256}:(?!\d{1,5}/)[^\s@\"?#]{1,256}@"
+        + r"//[^\s/:\"?#\[\]]{0,256}:(?!\d{1,5}/)(?!"
+        + _URL_PLACEHOLDER
+        + r"@)[^\s@\"?#]{1,256}@"
     ),
     # Google's OAuth access and refresh tokens and client secrets, and the package
     # registries' tokens.

@@ -508,7 +508,8 @@ run the runner with that one. For cross-provider diversity, also install:
   in, the scrubbed diff and audit now also go to Google, and every round
   that sends them says so. Set `REVIEW_USE_AGY=0` where that is not
   acceptable; a project pinned to Bedrock is exempt unless it opts in.
-  Its answer is held to the result schema with `--json-schema`, and its
+  Its answer is asked for in the result schema with `--json-schema` (an
+  answer given as text instead is read as the other reviewers' are), and its
   prompt tells it to call no tools: headless agy refuses them, and a
   refused call ends its turn with no answer.
 - [Hermes Agent](https://github.com/NousResearch/hermes-agent) +
@@ -634,7 +635,7 @@ gap, and emits a finding with runnable test code:
 ```json
 {
   "reviewer": "correctness",
-  "model": "gpt-5.5-codex",
+  "model": "gpt-5.5",
   "findings": [
     {
       "severity": "warning",

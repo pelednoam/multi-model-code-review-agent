@@ -21,6 +21,7 @@ from helpers import AGENT_DOC, REPO_ROOT, runner_script, shell_function
 from scripts.review_loop import backends
 from scripts.review_loop import reviewers as reviewers_mod
 from scripts.review_loop.artifacts import describe_outputs, write_artifacts_key
+from scripts.review_loop import claude_tools
 from scripts.review_loop.claude_tools import SECRET_READS, claude_denied
 
 SCRUB_SCRIPT = REPO_ROOT / "scripts" / "scrub_diff.py"
@@ -2479,7 +2480,7 @@ class TestRunnerScript:
             + 'claude_deny 2 "$1"\necho "${#CLAUDE_DENY[@]}|${CLAUDE_DENY[*]}"\n'
         )
         # The credential reads are denied whatever is granted.
-        reads = " ".join(f"Read({path})" for path in SECRET_READS)
+        reads = " ".join(f"Read({path})" for path in claude_tools._secret_reads())
         for tools, expected in [
             ("Read Grep Glob", "2|--disallowedTools Edit Write MultiEdit NotebookEdit"
              f" Bash WebFetch WebSearch ReportFindings {reads}"),
@@ -2690,6 +2691,7 @@ class TestCredentialShapes:
             "postgres://u" + ":Zx9/k+Q==" + "@db/prod",
             "postgres://u" + ":it's-me" + "@db/prod",
             "postgres://app@srv" + ":hunter2pass" + "@srv.example.net/db",
+            "postgres://u" + ":hunter2pass" + "@[::1]:5432/db",
             "ya" + "29." + "a" * 30,
             "1/" + "/0" + "a" * 40,
             "GOC" + "SPX-" + "a" * 28,
@@ -2703,7 +2705,7 @@ class TestCredentialShapes:
             "xo" + "xb-" + "1234567890-abc",
         ],
         ids=["url-userinfo", "url-no-user", "url-short-password", "url-slash-password",
-             "url-quote-password", "url-azure-user", "google-oauth-access", "google-oauth-refresh",
+             "url-quote-password", "url-azure-user", "url-ipv6-host", "google-oauth-access", "google-oauth-refresh",
              "google-client-secret", "huggingface", "npm", "pypi", "google-api-key", "github-fine-grained", "github-app",
              "stripe-live", "slack"],
     )  # fmt: skip
@@ -2729,8 +2731,24 @@ class TestCredentialShapes:
         assert scrub_diff.scrub_line(line, False) == line
 
     @pytest.mark.parametrize(
+        "password",
+        ["{password}", "${DB_PASS}", "$DB_PASS", "%(pw)s", "<password>", "****",
+         "xxx", "pass" + "word", "secret", "changeme"],
+    )  # fmt: skip
+    def test_a_placeholder_password_is_kept(self, password: str) -> None:
+        # Templates and documentation's example URLs were redacted, and a redaction
+        # aborts the review with advice to rotate a credential that does not exist.
+        line = f"+DSN = 'postgresql://{{user}}:{password}@{{host}}/db'\n"
+        assert scrub_diff.scrub_line(line, False) == line
+
+    @pytest.mark.parametrize(
         "url",
-        ["http://host:8080?to=a@b", "http://host:8080#to=a@b", "ws://h:1?u=x:y@z"],
+        [
+            "http://host:8080?to=a@b",
+            "http://host:8080#to=a@b",
+            "ws://h:1?u=x:y@z",
+            "http://[::1]:8080/@scope/pkg",
+        ],
     )
     def test_a_query_or_fragment_with_an_at_is_kept(self, url: str) -> None:
         # A port and then a query holding an @ was taken for a password, and a
@@ -2940,3 +2958,27 @@ class TestAMissingReviewerIsNotConvergence:
     def test_the_new_exit_code_is_documented(self) -> None:
         readme = (REPO_ROOT / "README.md").read_text()
         assert "| 11 | **Incomplete** |" in readme
+
+
+class TestSecretReads:
+    """What a claude reviewer may never read."""
+
+    def test_shell_startup_and_history_files_are_denied(self) -> None:
+        # It was measured reading ~/.bashrc, where API keys are exported.
+        for path in ("~/.bashrc", "~/.zshrc", "~/.bash_history", "~/.pgpass"):
+            assert path in SECRET_READS
+
+    def test_the_accounts_own_home_is_covered_when_home_is_elsewhere(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # "~" in a rule is $HOME; with it pointed elsewhere, the account's real
+        # ~/.ssh was readable.
+        import pwd
+
+        account = pwd.getpwuid(os.getuid()).pw_dir.rstrip("/")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        reads = claude_tools._secret_reads()
+        assert "~/.ssh/**" in reads
+        assert f"/{account}/.ssh/**" in reads
+        monkeypatch.setenv("HOME", account)
+        assert claude_tools._secret_reads() == list(SECRET_READS)

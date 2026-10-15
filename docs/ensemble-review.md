@@ -121,7 +121,7 @@ Default precedence (PREFER_HERMES=false):
 |---|---|---|---|
 | Security (Opus) | Claude CLI opus (free) | Hermes Opus (Bedrock, paid) | -- |
 | Correctness | Codex CLI GPT-5.5 (free) | Claude CLI haiku (free) | Hermes Haiku (Bedrock) |
-| Readability | agy (sandboxed), else Gemini CLI (in the loop: `REVIEW_USE_GEMINI=1`) | Claude CLI sonnet (free) | Hermes Sonnet (Bedrock) |
+| Readability | agy (sandboxed), else Gemini CLI with `REVIEW_USE_GEMINI=1` | Claude CLI sonnet (free) | Hermes Sonnet (Bedrock) |
 | Spec-contract (Opus) | Claude CLI opus (free) | Hermes Opus (Bedrock, paid) | -- |
 
 Bedrock opt-in precedence (PREFER_HERMES=true), used for regulated codebases that need data-at-rest in your AWS account:
@@ -135,7 +135,7 @@ Bedrock opt-in precedence (PREFER_HERMES=true), used for regulated codebases tha
 
 **Why local CLIs first by default**: free (uses existing subscriptions), reliable auth (each CLI manages its own OAuth), and for most projects (open-source, non-regulated) there's no real value to paid Bedrock routing.
 
-**Why Hermes/Bedrock matters when opted in**: data stays in your AWS account, true toolset restriction (`-t file`). Worth the cost for FDA-path / HIPAA / compliance-sensitive codebases.
+**Why Hermes/Bedrock matters when opted in**: data stays in your AWS account. Its tools are limited to the file toolset (`-t file`), which still writes under `--yolo`: the gain is data residency, not write isolation. Worth the cost for FDA-path / HIPAA / compliance-sensitive codebases.
 
 **Maximum diversity** (all CLIs installed): Anthropic (Claude CLI) + OpenAI (Codex CLI) + Google (agy, or the Gemini CLI) = 3 provider families, at no cost beyond existing subscriptions.
 
@@ -177,10 +177,13 @@ for f in "$ROUND"/result-*.json; do echo "$f: $(jq '.findings | length' "$f")"; 
   `codex-out-N.txt`, so *its raw file is empty on every successful run*. Judge a
   slot by whether `result-N.json` exists, never by the size of its raw file: the
   loop writes it only from a validated answer, and removes any it did not write.
-- **A file read mid-run is not a finished file.** Reviewers stream output over
-  several minutes. Wait for `Reviewers finished in Ns` before concluding
-  anything; a file inspected at 45 seconds into a five-minute round will look
-  empty whether or not the reviewer is healthy.
+- **A file that is not there yet.** While a round runs, the loop's reviewers
+  write to a private temporary directory (`mmcra-out-*`); their `raw-N.txt`,
+  `stderr-N.txt` and `codex-out-N.txt` are copied into the round directory only
+  once every reviewer has stopped, so that a reviewer with a file tool cannot
+  write another's. A reviewer running as the same user could still find that
+  directory: this removes the obvious path, not every path. Wait for `Reviewers
+  finished in Ns` before concluding anything.
 
 When a slot genuinely produced nothing, `result-N.json` is absent and
 `stderr-N.txt` says why.
@@ -472,6 +475,32 @@ review_helper() {
 # whose child ignores SIGTERM survives the round entirely without this.
 set -m
 
+# OUT_DIR: where the reviewers write while they run -- stdout, stderr, codex's answer and the done
+# markers -- private to this run, not $REVIEW_TMP. There, one reviewer with a file tool (hermes
+# -t file --yolo) could write another slot's output while both ran, and answer for it or silence
+# it. Copied into $REVIEW_TMP once every reviewer is stopped (publish_outputs), and read from
+# there. A reviewer running as the same user could still find it: this takes away the obvious
+# path, not every path. The done markers are also written to $REVIEW_TMP, for watching from
+# another shell; the runner itself reads only its own.
+OUT_DIR="$(mktemp -d)" && [ -n "$OUT_DIR" ] || { echo "ERROR: no temporary directory"; exit 1; }
+# mark_done N STATUS: slot N finished with STATUS.
+mark_done() {
+  echo "$2" > "$OUT_DIR/done-$1"
+  echo "$2" > "$REVIEW_TMP/done-$1"
+}
+# publish_outputs: what the reviewers wrote, into $REVIEW_TMP, replacing whatever is there under
+# those names, which no reviewer of this run wrote.
+publish_outputs() {
+  local num name
+  for num in 1 2 3 4; do
+    for name in "stdout-$num.txt" "stderr-$num.txt" "claude-raw-$num.json" "codex-out-$num.txt"; do
+      rm -f -- "$REVIEW_TMP/$name"
+      [ -f "$OUT_DIR/$name" ] && cp -- "$OUT_DIR/$name" "$REVIEW_TMP/$name"
+    done
+  done
+  return 0
+}
+
 # What the runner kills and removes, it keeps in its own memory, never in a file: a reviewer can
 # write files in $REVIEW_TMP, and a planted pid-N of 1 would have the runner signal every process
 # the user owns. JOB_PID holds each reviewer's job, set by its launcher, which runs in this shell,
@@ -511,8 +540,10 @@ kill_jobs() {
 live_group() {
   [ -n "$1" ] || return 1
   if [ "$GROUP_CHECK" = pgrep ]; then
+    # $? said, not left implied: in a trap -- the cleanup runs in one -- a bare `return` gives
+    # the status from before the trap (the `exit 143`), and every group read as gone.
     pgrep -s 0 -g "$1" >/dev/null 2>&1
-    return
+    return $?
   fi
   local stat line pgrp sid mine=""
   for stat in "/proc/$$/stat" /proc/[0-9]*/stat; do
@@ -539,6 +570,7 @@ finish_round() {
   trap '' INT TERM HUP QUIT
   kill_jobs 1 2 3 4
   remove_agy_scratch
+  [ -z "${OUT_DIR:-}" ] || rm -rf -- "$OUT_DIR"
 }
 # remove_agy_scratch: agy's scratch gone, or named: one left behind may hold a copy of its sign-in
 # token, and an rm that failed said nothing. Made writable first, in case agy made it read-only.
@@ -583,9 +615,9 @@ launch_hermes() {
   local num=$1 hermes_model=$2 prompt_file=$3
   { timeout --foreground -k 10 "$REVIEWER_TIMEOUT" hermes -z "$(cat "$prompt_file")" \
       -m "$hermes_model" --provider bedrock -t file --yolo \
-      1>"$REVIEW_TMP/stdout-$num.txt" \
-      2>"$REVIEW_TMP/stderr-$num.txt"
-    echo $? > "$REVIEW_TMP/done-$num"; } &
+      1>"$OUT_DIR/stdout-$num.txt" \
+      2>"$OUT_DIR/stderr-$num.txt"
+    mark_done "$num" $?; } &
   JOB_PID[$num]=$!
   JOB_OUT[$num]="$REVIEW_TMP/stdout-$num.txt"
   JOB_PROVIDER[$num]=anthropic
@@ -651,8 +683,8 @@ CLAUDE_DENY=()
 claude_deny() {
   local num=$1 tools=$2 denied
   CLAUDE_DENY=()
-  denied="$(review_helper claude-deny "$tools" 2>"$REVIEW_TMP/claude-deny-$num.err")" || return 1
-  sed "s/^/R$num: note: /" "$REVIEW_TMP/claude-deny-$num.err"
+  denied="$(review_helper claude-deny "$tools" 2>"$OUT_DIR/claude-deny-$num.err")" || return 1
+  sed "s/^/R$num: note: /" "$OUT_DIR/claude-deny-$num.err"
   [ -z "$denied" ] || CLAUDE_DENY=(--disallowedTools "$denied")
 }
 
@@ -686,9 +718,9 @@ launch_cli() {
           --allowedTools "$tools" "${CLAUDE_DENY[@]}" \
           --strict-mcp-config --setting-sources user \
           --output-format json < "$prompt_file" \
-          1>"$REVIEW_TMP/claude-raw-$num.json" \
-          2>"$REVIEW_TMP/stderr-$num.txt"
-        echo $? > "$REVIEW_TMP/done-$num"; } &
+          1>"$OUT_DIR/claude-raw-$num.json" \
+          2>"$OUT_DIR/stderr-$num.txt"
+        mark_done "$num" $?; } &
       JOB_PID[$num]=$!
       JOB_OUT[$num]="$REVIEW_TMP/claude-raw-$num.json"
       JOB_PROVIDER[$num]=anthropic
@@ -709,11 +741,11 @@ launch_cli() {
         codex_extra+=(-c "model_reasoning_effort=$CODEX_REASONING_EFFORT")
       { timeout --foreground -k 10 "$REVIEWER_TIMEOUT" codex exec \
           "${codex_extra[@]}" \
-          -o "$REVIEW_TMP/codex-out-$num.txt" \
+          -o "$OUT_DIR/codex-out-$num.txt" \
           - < "$prompt_file" \
-          1>"$REVIEW_TMP/stdout-$num.txt" \
-          2>"$REVIEW_TMP/stderr-$num.txt"
-        echo $? > "$REVIEW_TMP/done-$num"; } &
+          1>"$OUT_DIR/stdout-$num.txt" \
+          2>"$OUT_DIR/stderr-$num.txt"
+        mark_done "$num" $?; } &
       JOB_PID[$num]=$!
       JOB_OUT[$num]="$REVIEW_TMP/codex-out-$num.txt"
       JOB_PROVIDER[$num]=openai
@@ -732,9 +764,9 @@ launch_cli() {
           --model "${GEMINI_MODEL:-gemini-2.5-flash}" \
           --approval-mode plan --skip-trust \
           < "$prompt_file" \
-          1>"$REVIEW_TMP/stdout-$num.txt" \
-          2>"$REVIEW_TMP/stderr-$num.txt"
-        echo $? > "$REVIEW_TMP/done-$num"; } &
+          1>"$OUT_DIR/stdout-$num.txt" \
+          2>"$OUT_DIR/stderr-$num.txt"
+        mark_done "$num" $?; } &
       JOB_PID[$num]=$!
       JOB_OUT[$num]="$REVIEW_TMP/stdout-$num.txt"
       JOB_PROVIDER[$num]=google
@@ -759,12 +791,12 @@ launch_cli() {
           --input-format stream-json --output-format stream-json \
           --print-timeout 0 --json-schema "$AGY_SCHEMA" \
           < <(review_helper agy-message "$prompt_file") \
-          1>"$REVIEW_TMP/stdout-$num.txt" \
-          2>"$REVIEW_TMP/stderr-$num.txt"
+          1>"$OUT_DIR/stdout-$num.txt" \
+          2>"$OUT_DIR/stderr-$num.txt"
         # agy's status held while its scratch -- with the copy of its sign-in token -- is
         # removed, and the done marker written last: by the time the watchdog sees this slot
         # finished, the copy is gone.
-        rc=$?; rm -rf "$AGY_WS" "$AGY_STATE"; echo "$rc" > "$REVIEW_TMP/done-$num"; } &
+        rc=$?; rm -rf "$AGY_WS" "$AGY_STATE"; mark_done "$num" "$rc"; } &
       JOB_PID[$num]=$!
       JOB_OUT[$num]="$REVIEW_TMP/stdout-$num.txt"
       JOB_PROVIDER[$num]=google
@@ -807,10 +839,11 @@ elif $HAS_HERMES; then
 fi
 
 # R3: Readability -- Google preferred (3rd provider for diversity): agy when installed and its
-# sandbox verified, else Gemini. When PREFER_HERMES is set, the Bedrock sonnet path runs first,
-# and agy or Gemini only if asked for by name (REVIEW_USE_AGY=1, REVIEW_USE_GEMINI=1): a project
-# that pinned Bedrock to keep its code with providers it chose must not fall to Google by default
-# when Hermes is unavailable.
+# sandbox verified, else Gemini only if asked for (REVIEW_USE_GEMINI=1), as in the convergence
+# loop: the gemini CLI explores the repository with its own tools and has not produced a finding
+# (README). When PREFER_HERMES is set, the Bedrock sonnet path runs first, and agy too only if
+# asked for by name (REVIEW_USE_AGY=1): a project that pinned Bedrock to keep its code with
+# providers it chose must not fall to Google by default when Hermes is unavailable.
 # `${HAS_AGY:-false}`, not `$HAS_AGY`: an unset variable expands to an empty command, which
 # succeeds, and would route the slot to a backend nobody verified.
 if $PREFER_HERMES && $HAS_HERMES; then
@@ -818,7 +851,7 @@ if $PREFER_HERMES && $HAS_HERMES; then
 elif ${HAS_AGY:-false} && { ! $PREFER_HERMES || review_helper flag REVIEW_USE_AGY; } \
      && launch_cli 3 agy "$REVIEW_TMP/prompt-3.txt"; then
   :  # launched; if agy could not be set up, launch_cli returned 1 and the next backend runs
-elif $HAS_GEMINI && { ! $PREFER_HERMES || review_helper flag REVIEW_USE_GEMINI; }; then
+elif $HAS_GEMINI && review_helper flag REVIEW_USE_GEMINI; then
   launch_cli 3 gemini "$REVIEW_TMP/prompt-3.txt"
 elif $HAS_CLAUDE; then
   launch_cli 3 claude-sonnet "$REVIEW_TMP/prompt-3.txt"
@@ -852,7 +885,7 @@ while :; do
   running=0
   for num in 1 2 3 4; do
     [ -n "${JOB_PID[$num]:-}" ] || continue            # slot was skipped, never launched
-    [ -f "$REVIEW_TMP/done-$num" ] && continue         # finished, status recorded
+    [ -f "$OUT_DIR/done-$num" ] && continue            # finished, status recorded
     running=$((running + 1))
   done
   [ "$running" -eq 0 ] && break
@@ -860,9 +893,9 @@ while :; do
     echo "WATCHDOG: $running reviewer(s) still running after ${ROUND_DEADLINE}s - giving up on them"
     for num in 1 2 3 4; do
       [ -n "${JOB_PID[$num]:-}" ] || continue
-      [ -f "$REVIEW_TMP/done-$num" ] && continue
+      [ -f "$OUT_DIR/done-$num" ] && continue
       kill_jobs "$num"
-      echo "timeout" > "$REVIEW_TMP/done-$num"
+      mark_done "$num" timeout
     done
     break
   fi
@@ -878,6 +911,8 @@ echo "All reviewer slots resolved after $((SECONDS - round_start))s"
 kill_jobs 1 2 3 4
 # Now, not at exit: a killed agy job never reached its own cleanup of the token copy.
 remove_agy_scratch
+# Every reviewer is stopped: nothing is left to write what is copied.
+publish_outputs
 
 # Extract review JSON from raw output, as the convergence loop does: Claude's wrapper, fences and
 # preamble; agy's stream only when agy ran the slot (any reviewer can be talked into printing a line
@@ -903,12 +938,12 @@ for num in 1 2 3 4; do
   # different failures a reader needs to tell apart: a reviewer that ran and produced unparseable
   # output, and one that never finished at all.
   if [ ! -f "$result" ]; then
-    case "$(cat "$REVIEW_TMP/done-$num" 2>/dev/null)" in
+    case "$(cat "$OUT_DIR/done-$num" 2>/dev/null)" in
       timeout) why="killed by the watchdog before it finished" ;;
       124|137) why="hit its own ${REVIEWER_TIMEOUT}s timeout" ;;
       "")      why="no parseable JSON output and no exit status recorded" ;;
       0)       why="no parseable JSON output (it exited cleanly, so read its stdout)" ;;
-      *)       why="exited $(cat "$REVIEW_TMP/done-$num") without usable JSON" ;;
+      *)       why="exited $(cat "$OUT_DIR/done-$num") without usable JSON" ;;
     esac
     [ -n "${JOB_PID[$num]:-}" ] || why="never launched (no backend available for this slot)"
     review_helper placeholder "$result" "$num" "$why"
@@ -980,7 +1015,7 @@ Report what the status lines say rather than guessing. "Three of four are still 
 thing to tell a waiting human; silence is not.
 
 
-**Tool restriction**: Hermes uses `-t file --yolo`: the file toolset, which can write -- the data stays in your AWS account, but writes are not prevented, only reported by the convergence loop's tamper check. Claude CLI: `--allowedTools "Read Grep Glob"` plus `--disallowedTools` for every tool that writes, runs a command or reaches the network, `--strict-mcp-config` (no MCP servers) and `--setting-sources user` (no project hooks), since `--allowedTools` alone does not confine (a slot given writing tools on purpose with `REVIEWER_TOOLS_N` has only those taken off the deny list). Codex: both paths pin `-s read-only` and `approvals_reviewer="user"` and canary-test them before use. Gemini uses `--approval-mode plan` (read-only). agy runs under bubblewrap, verified before use (what it closes and what it does not: [agy-sandbox.md](agy-sandbox.md)), plus `--sandbox --disable-slash-commands`. Extraction errors logged to `$REVIEW_TMP/extract-N.err`.
+**Tool restriction**: Hermes uses `-t file --yolo`: the file toolset, which can write -- the data stays in your AWS account, but writes are not prevented, only reported by the convergence loop's tamper check -- full mode does not check. Claude CLI: `--allowedTools "Read Grep Glob"` plus `--disallowedTools` for every tool that writes, runs a command or reaches the network, `--strict-mcp-config` (no MCP servers) and `--setting-sources user` (no project hooks), since `--allowedTools` alone does not confine (a slot given writing tools on purpose with `REVIEWER_TOOLS_N` has only those taken off the deny list). Codex: both paths pin `-s read-only` and `approvals_reviewer="user"` and canary-test them before use. Gemini uses `--approval-mode plan` (read-only). agy runs under bubblewrap, verified before use (what it closes and what it does not: [agy-sandbox.md](agy-sandbox.md)), plus `--sandbox --disable-slash-commands`. Extraction errors logged to `$REVIEW_TMP/extract-N.err`.
 
 ## 7. Collect and validate results
 
@@ -1188,7 +1223,7 @@ concluding anything from a probe, and never suppress its output.
 
 | Backend | Data path | Isolation | Cost |
 |---|---|---|---|
-| Hermes+Bedrock | Your AWS account | Data: best (stays in your AWS account). Tools: `-t file --yolo`, which can write; the loop's tamper check reports writes | Bedrock API pricing |
+| Hermes+Bedrock | Your AWS account | Data: best (stays in your AWS account). Tools: `-t file --yolo`, which can write; only the convergence loop's tamper check reports writes (full mode does not check) | Bedrock API pricing |
 | Claude CLI | Anthropic infrastructure | Good (`--allowedTools` + `--disallowedTools`) | Claude subscription |
 | Codex CLI | OpenAI infrastructure | Good (sandbox) | ChatGPT subscription |
 | Gemini CLI | Google infrastructure | Good (`--approval-mode plan`) | Google AI Studio (free tier) |
@@ -1196,4 +1231,4 @@ concluding anything from a probe, and never suppress its output.
 
 - **Quick mode**: stays within Anthropic (Claude Code subagents).
 - **Full mode**: Hermes reviewers stay in your AWS. CLI reviewers go through their respective provider's infrastructure.
-- **For sensitive/FDA-path code**: use Hermes+Bedrock for all 4 reviewers (data-at-rest in your AWS account, tools restricted with `-t file`).
+- **For sensitive/FDA-path code**: use Hermes+Bedrock for all 4 reviewers (data-at-rest in your AWS account; writes are not prevented, so prefer the convergence loop, whose tamper check reports them).

@@ -95,7 +95,7 @@ Files written:
   scripts/review_until_converged.py
   scripts/validate_review_results.py
   scripts/preflight/        (helpers for the preflight audit)
-  scripts/review_loop/      (helpers for the convergence loop)
+  scripts/review_loop/      (the convergence loop, and the full-mode runner's checks)
   docs/ensemble_review_result_schema.json
   docs/codex-sandbox.md      (why codex needs a host check, and how to fix it)
   docs/agy-sandbox.md        (what agy's sandbox closes, what it does not, its switches)

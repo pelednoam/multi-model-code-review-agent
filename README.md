@@ -68,7 +68,7 @@ review missed.
 | Artifact/manifest audit | no | yes | yes | yes |
 | Coverage-gap detection | no | yes | yes | yes |
 | Per-reviewer attribution | no | 2 lenses | 4 lenses | 4 lenses |
-| Write isolation | no | no | `--disallowedTools`; codex and agy sandboxed | none: `-t file --yolo` can write; the loop's tamper check reports it |
+| Write isolation | no | no | `--disallowedTools`; codex and agy sandboxed | none: `-t file --yolo` can write; only the convergence loop's tamper check reports it (full mode does not check) |
 | Structured JSON schema | no | no | yes | yes |
 | Review packet persistence | no | no | yes | yes |
 | Cross-provider models | no | no | with Codex + agy/Gemini | any provider |
@@ -131,7 +131,7 @@ Default precedence (no Bedrock opt-in):
 |---|---|---|---|
 | Security (Opus) | Claude CLI opus (free) | Hermes Opus (Bedrock, paid) | -- |
 | Correctness | Codex CLI GPT-5.5 (free) | Claude CLI haiku (free) | Hermes Haiku (Bedrock) |
-| Readability | agy (sandboxed), else Gemini CLI (in the loop: `REVIEW_USE_GEMINI=1`) | Claude CLI sonnet (free) | Hermes Sonnet (Bedrock) |
+| Readability | agy (sandboxed), else Gemini CLI with `REVIEW_USE_GEMINI=1` | Claude CLI sonnet (free) | Hermes Sonnet (Bedrock) |
 | Spec-contract (Opus) | Claude CLI opus (free) | Hermes Opus (Bedrock, paid) | -- |
 
 ### Bedrock opt-in (when you actually want Hermes)
@@ -299,8 +299,8 @@ Results: 3/4 reviewers returned output; R3 found nothing on 5234 lines -- treat 
 **Slot 3 and the gemini CLI.** That slot is the one above. Its `stderr` shows
 why: the gemini CLI treats the prompt as a task and goes exploring the
 repository with its own tools, finishing a 200 KB diff in sixty seconds where
-the Claude reviewers take six minutes on the same input. It is opt-in now --
-`REVIEW_USE_GEMINI=1`. Slot 3 goes to agy where it is installed and its
+the Claude reviewers take six minutes on the same input. It is opt-in now, in
+both modes -- `REVIEW_USE_GEMINI=1`. Slot 3 goes to agy where it is installed and its
 sandbox verified, and otherwise falls through to Claude.
 
 **A killed reviewer's work is not always dead.** `proc.kill()` kills the process
@@ -743,7 +743,7 @@ have detected it via fingerprint matching and exited with code 2
 
 | Backend | Data path | Isolation | Cost |
 |---|---|---|---|
-| Hermes+Bedrock | Your AWS account | Data: best (stays in your AWS account). Tools: the file toolset with `--yolo`, which can write; the loop's tamper check reports writes | Bedrock pricing |
+| Hermes+Bedrock | Your AWS account | Data: best (stays in your AWS account). Tools: the file toolset with `--yolo`, which can write; only the convergence loop's tamper check reports writes (full mode does not check) | Bedrock pricing |
 | Claude CLI | Anthropic infrastructure | Good (`--allowedTools` + `--disallowedTools`) | Claude subscription |
 | Codex CLI | OpenAI infrastructure | Good (sandbox) | ChatGPT subscription |
 | Gemini CLI | Google infrastructure | Good (`--approval-mode plan`) | AI Studio free tier |

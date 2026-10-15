@@ -9,6 +9,7 @@ import re
 import shlex
 import signal
 import subprocess
+import time
 import sys
 from unittest import mock
 from pathlib import Path
@@ -1057,17 +1058,17 @@ class TestReviewerDeadline:
         self, tmp_path: Path
     ) -> None:
         """A killed reviewer's helper can outlive it and write minutes later."""
-        from scripts.review_loop.reviewers import _has_result
+        from scripts.review_loop.reviewers import _has_codex_answer
 
-        assert not _has_result(tmp_path, 2)
+        assert not _has_codex_answer(tmp_path, 2)
         (tmp_path / "codex-out-2.txt").write_text("{}")
-        assert _has_result(tmp_path, 2)
+        assert _has_codex_answer(tmp_path, 2)
 
     def test_an_empty_result_file_is_not_a_result(self, tmp_path: Path) -> None:
-        from scripts.review_loop.reviewers import _has_result
+        from scripts.review_loop.reviewers import _has_codex_answer
 
         (tmp_path / "codex-out-2.txt").write_text("")
-        assert not _has_result(tmp_path, 2)
+        assert not _has_codex_answer(tmp_path, 2)
 
 
 class TestSalvagingProse:
@@ -1098,7 +1099,7 @@ class TestSalvagingProse:
         assert "NOT JSON" not in summary
 
     def test_an_empty_raw_file_counts_as_nothing(self, tmp_path: Path) -> None:
-        """codex writes straight to result-N.json, so its raw file is empty."""
+        """codex writes its answer to codex-out-N.txt (-o), so its raw file is empty."""
         (tmp_path / "raw-2.txt").write_text("")
         assert "NO OUTPUT" in describe_outputs(tmp_path, {})
 
@@ -1130,10 +1131,22 @@ class TestSalvagingProse:
         assert "NOT JSON" not in summary and "readability_performance" not in summary
 
     def test_invisible_characters_are_made_visible(self) -> None:
-        # Bidi controls reorder what the operator reads without any terminal escape.
+        # Bidi controls reorder what the operator reads without any terminal escape;
+        # a list of ranges missed some each time it was reviewed.
         from scripts.review_loop.results import printable
 
         assert printable("ok\u202edlrow\u200b\ufeff") == "ok?dlrow??"
+        hidden = "\u061c\u2028\u2029\u00ad\U000e0041\x1b"
+        assert printable(hidden) == "?" * len(hidden)
+        assert printable("tab\tline\nü — ok") == "tab\tline\nü — ok"
+
+    def test_codexs_unusable_answer_is_shown(self, tmp_path: Path) -> None:
+        # Its answer is codex-out-N.txt; read from its empty stdout, it was "NO OUTPUT".
+        (tmp_path / "raw-2.txt").write_text("")
+        (tmp_path / "codex-out-2.txt").write_text("I reviewed it and it looks fine.")
+        summary = describe_outputs(tmp_path, {2: "codex"})
+        assert "NOT JSON" in summary and "looks fine" in summary
+        assert "codex-out-2.txt" in summary
 
     def test_terminal_escapes_are_not_passed_to_the_terminal(
         self, tmp_path: Path
@@ -1992,11 +2005,14 @@ class TestRunnerScript:
         # Every launcher (hermes, claude, codex, gemini, agy) recording both is what makes
         # progress observable from another shell.
         assert runner.count('echo $! > "$REVIEW_TMP/pid-$num"') == 5
-        # agy's records its status after cleanup, so it holds it in $rc first.
-        statuses = runner.count('echo $? > "$REVIEW_TMP/done-$num"') + runner.count(
-            'echo "$rc" > "$REVIEW_TMP/done-$num"'
+        # agy's records its status after cleanup, so it holds it in $rc first. In the
+        # runner's private directory, and in $REVIEW_TMP for watching (mark_done).
+        statuses = runner.count('mark_done "$num" $?; } &') + runner.count(
+            'mark_done "$num" "$rc"; } &'
         )
         assert statuses == 5
+        mark = shell_function(runner, "mark_done")
+        assert '"$OUT_DIR/done-$1"' in mark and '"$REVIEW_TMP/done-$1"' in mark
         # The status must be written by the subshell that ran the reviewer. A separate waiter
         # cannot: `wait` refuses a pid that is not its own child, so it would record a bogus
         # status immediately while the reviewer was still running.
@@ -2081,7 +2097,30 @@ class TestRunnerScript:
         )
         # Made writable and removed; then, with rm made to fail, named.
         assert done.stdout.count("WARNING: could not remove") == 1, done.stdout
-        assert "finish_round() {" in runner and "  remove_agy_scratch\n}" in runner
+        assert "  remove_agy_scratch\n" in shell_function(runner, "finish_round")
+
+    @pytest.mark.parametrize("check", ["pgrep", "proc"])
+    def test_the_cleanup_kills_from_inside_its_trap(
+        self, tmp_path: Path, check: str
+    ) -> None:
+        # live_group ended in a bare `return`, which in a trap returns the status from
+        # before it -- the `exit 143` -- so an interrupted runner killed nothing.
+        runner = runner_script()
+        script = tmp_path / "t.sh"
+        script.write_text(
+            f"set -m\nJOB_PID=()\nGROUP_CHECK={check}\n"
+            + shell_function(runner, "kill_jobs")
+            + shell_function(runner, "live_group")
+            + "{ sleep 300; } &\nJOB_PID[1]=$!\necho $! > job\nsleep 0.3\n"
+            + "trap 'kill_jobs 1' EXIT\ntrap 'exit 143' TERM\nkill -TERM $$\nsleep 5\n"
+        )
+        subprocess.run(["bash", str(script)], cwd=tmp_path, timeout=30)
+        job = int((tmp_path / "job").read_text())
+        time.sleep(0.3)
+        alive = subprocess.run(["kill", "-0", str(job)], capture_output=True)
+        if alive.returncode == 0:
+            subprocess.run(["kill", "-KILL", "--", f"-{job}"])
+        assert alive.returncode != 0, "the job outlived the runner's cleanup"
 
     def test_a_second_signal_does_not_cut_the_cleanup_short(
         self, tmp_path: Path
@@ -2123,9 +2162,36 @@ class TestRunnerScript:
         # Written straight to result-N.json, it skipped the validation every other
         # reviewer's output gets -- which the loop gives it.
         runner = runner_script()
-        assert '-o "$REVIEW_TMP/codex-out-$num.txt"' in runner
+        assert '-o "$OUT_DIR/codex-out-$num.txt"' in runner
         assert '[ -f "$result" ] && continue' not in runner
         assert 'JOB_OUT[$num]="$REVIEW_TMP/codex-out-$num.txt"' in runner
+
+    def test_reviewers_write_where_no_other_reviewer_writes(
+        self, tmp_path: Path
+    ) -> None:
+        # Writing into $REVIEW_TMP, a reviewer with a file tool could overwrite another
+        # slot's output while both ran. They write to OUT_DIR, published once all stop.
+        runner = runner_script()
+        start, end = runner.index("launch_hermes() {"), runner.index("# Pre-check")
+        launchers = runner[start:end]
+        assert '>"$REVIEW_TMP/' not in launchers and '-o "$REVIEW_TMP/' not in launchers
+        sweep = runner[runner.index("# SWEEP.") : runner.index("# Post-process")]
+        assert sweep.index("kill_jobs 1 2 3 4") < sweep.index("publish_outputs")
+        script = tmp_path / "t.sh"
+        tmp, out = tmp_path / "review", tmp_path / "out"
+        tmp.mkdir()
+        out.mkdir()
+        (tmp / "codex-out-2.txt").write_text("planted")
+        (tmp / "stdout-1.txt").write_text("planted")
+        (out / "stdout-1.txt").write_text("real")
+        script.write_text(
+            f"REVIEW_TMP={shlex.quote(str(tmp))}\nOUT_DIR={shlex.quote(str(out))}\n"
+            + shell_function(runner, "publish_outputs")
+            + "publish_outputs\n"
+        )
+        subprocess.run(["bash", str(script)], check=True, timeout=30)
+        assert (tmp / "stdout-1.txt").read_text() == "real"
+        assert not (tmp / "codex-out-2.txt").exists()
 
     def test_a_slot_is_read_only_from_its_own_clis_file(self, tmp_path: Path) -> None:
         # Every slot was read from codex-out-N.txt, then claude-raw-N.json, then
@@ -2177,10 +2243,9 @@ class TestRunnerScript:
         # The gemini branch had no gate: with Hermes unavailable, a project pinned to
         # Bedrock sent slot 3 to Google through it.
         runner = runner_script()
-        assert (
-            "elif $HAS_GEMINI && { ! $PREFER_HERMES || review_helper flag REVIEW_USE_GEMINI; }"
-            in runner
-        )
+        # Nor any other: gemini is opt-in in both modes now.
+        gated = "elif $HAS_GEMINI && review_helper flag REVIEW_USE_GEMINI; then"
+        assert gated in runner
         # And the switches reach the runner, a separate script that inherits only exports.
         doc = AGENT_DOC.read_text()
         export = doc.split("export REVIEW_TMP", 1)[1].split('\n"', 1)[0]
@@ -2226,7 +2291,7 @@ class TestRunnerScript:
         script = tmp_path / "t.sh"
         script.write_text(
             f"REVIEW_ROOT={shlex.quote(str(REPO_ROOT))}\n"
-            f"REVIEW_TMP={shlex.quote(str(tmp_path))}\n"
+            f"OUT_DIR={shlex.quote(str(tmp_path))}\n"
             + shell_function(runner, "review_helper")
             + shell_function(runner, "claude_deny")
             + 'claude_deny 2 "$1"\necho "${#CLAUDE_DENY[@]}|${CLAUDE_DENY[*]}"\n'

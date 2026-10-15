@@ -17,7 +17,7 @@ import json
 import textwrap
 from typing import TYPE_CHECKING, Any
 
-from .results import agy_failure, agy_result, printable
+from .results import agy_denied, agy_failure, agy_result, printable
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -47,10 +47,10 @@ to `codex-out-N.txt`, so its raw file is empty every time it succeeds. Judge a
 slot by whether `result-N.json` exists, never by the size of its raw file: the
 loop writes it only from a validated answer, and removes any it did not write.
 
-**A file that is empty right now.** Reviewers stream output as they work and a
-round takes several minutes. A file inspected mid-run is not a finished file.
-Wait for the process to exit before drawing conclusions — the console prints
-`Reviewers finished in Ns` when they are all done.
+**A file that is not there yet.** Reviewers write to a private directory while
+they run; their `raw-N.txt`, `stderr-N.txt` and `codex-out-N.txt` are copied here
+only once every reviewer has stopped, so that none can write another's. Wait for
+`Reviewers finished in Ns` before drawing conclusions.
 
 ## Reading the findings
 
@@ -112,10 +112,18 @@ def _explain_missing(round_dir: Path, slot: int, backend: str | None) -> list[st
     was silently binned while carrying a correct finding about duplicated tests.
     Whatever it wrote goes in front of the operator either way.
     """
-    raw = round_dir / f"raw-{slot}.txt"
-    text = ""
-    if raw.exists():
-        text = raw.read_text(encoding="utf-8", errors="replace").strip()
+    # codex's answer is its -o file, read first as extraction reads it: an answer in
+    # prose there read as "NO OUTPUT" from its empty stdout.
+    names = (["codex-out-{}.txt"] if backend == "codex" else []) + ["raw-{}.txt"]
+    raw, text = round_dir / names[-1].format(slot), ""
+    for name in names:
+        path = round_dir / name.format(slot)
+        said = ""
+        if path.is_file():
+            said = path.read_text(encoding="utf-8", errors="replace").strip()
+        if said:
+            raw, text = path, said
+            break
     # Parsed once, and only when agy is the backend that wrote it.
     event = agy_result(text) if text and backend == "agy" else None
     failed = agy_failure(event) if event is not None else None
@@ -148,12 +156,7 @@ def _display_text(text: str, event: dict[str, Any] | None) -> str:
         # A failed turn has no response but says why, which is the useful part. So
         # does one cut short by a refused tool call, which otherwise reads as silence.
         said = event.get("response") or event.get("error") or ""
-        actions = event.get("denied_actions")
-        denied = [
-            str(d.get("display_name") or d.get("action"))
-            for d in (actions if isinstance(actions, list) else [])
-            if isinstance(d, dict) and (d.get("display_name") or d.get("action"))
-        ]
+        denied = agy_denied(event)
         if not said and denied:
             said = (
                 f"agy ended its turn with no answer after a refused tool call"

@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 from agy_case import _AgyCase
+from helpers import REPO_ROOT
 
 from scripts.review_loop.artifacts import describe_outputs
 from scripts.review_loop.results import _unwrap_envelope, extract_results
@@ -112,6 +116,29 @@ class TestAgyOutput(_AgyCase):
         (tmp_path / "raw-3.txt").write_text(self._stream(ok))
         (tmp_path / "backend-3.txt").write_text("agy")
         assert extract_results(tmp_path, {3: "hermes"})[2] is None
+
+    def test_an_answer_is_read_as_utf8_whatever_the_locale(
+        self, tmp_path: Path
+    ) -> None:
+        # Read with the locale's encoding, one non-ASCII character under LC_ALL=C
+        # raised, and took the whole round with it.
+        review = {**self._review(), "overall_assessment": "naïve — but fine"}
+        (tmp_path / "codex-out-2.txt").write_text(
+            json.dumps(review, ensure_ascii=False)
+        )
+        script = (
+            "import sys; sys.path.insert(0, sys.argv[1])\n"
+            "from pathlib import Path\n"
+            "from scripts.review_loop.results import extract_results\n"
+            "r = extract_results(Path(sys.argv[2]), {2: 'codex'})[1]\n"
+            "print(r['overall_assessment'].encode('ascii', 'replace').decode())\n"
+        )
+        done = subprocess.run(
+            [sys.executable, "-I", "-c", script, str(REPO_ROOT), str(tmp_path)],
+            capture_output=True, text=True, timeout=30,
+            env={**os.environ, "LC_ALL": "C", "PYTHONUTF8": "0", "PYTHONIOENCODING": "ascii"},
+        )  # fmt: skip
+        assert done.returncode == 0 and "but fine" in done.stdout, done.stderr
 
     def test_a_planted_result_file_is_not_a_slots_answer(self, tmp_path: Path) -> None:
         # A result-N.json already there was taken for any slot, before the slot's own

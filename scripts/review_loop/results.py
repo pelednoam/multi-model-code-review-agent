@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-import re
+import unicodedata
 from typing import TYPE_CHECKING, Any
 
 from .findings import validate_result
@@ -20,19 +20,23 @@ EXPECTED_REVIEWERS = {
 }
 
 
-#: Terminal control characters, which a reply decoded from JSON can carry raw: an
-#: escape sequence can rewrite or hide the lines above it, retitle the window, or on
-#: some terminals write the clipboard. A reviewer's text is shaped by the diff it read.
-#: And the invisible ones that reorder or hide text without a terminal's help: bidi
-#: controls (the "Trojan Source" trick), zero-width characters and the BOM.
-_CONTROL = re.compile(
-    r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]"
-)
+#: The Unicode categories of what does not print as itself. Control characters (Cc),
+#: which a reply decoded from JSON can carry raw: an escape sequence can rewrite or hide
+#: the lines above it, retitle the window, or on some terminals write the clipboard.
+#: Format characters (Cf): bidi controls (the "Trojan Source" trick), zero-width ones,
+#: the BOM, tag characters ("ASCII smuggling"). And line and paragraph separators (Zl,
+#: Zp). By category rather than a list of ranges, which missed some every time it was
+#: reviewed. A reviewer's text is shaped by the diff it read.
+_INVISIBLE = frozenset({"Cc", "Cf", "Zl", "Zp"})
 
 
 def printable(text: str) -> str:
-    """``text`` with its control characters made visible as ``?``, safe to print."""
-    return _CONTROL.sub("?", text)
+    """``text`` with what does not print as itself made visible as ``?``, safe to
+    print. Tabs and newlines stay."""
+    return "".join(
+        "?" if c not in "\t\n" and unicodedata.category(c) in _INVISIBLE else c
+        for c in text
+    )
 
 
 def agy_result(stdout: str) -> dict[str, Any] | None:
@@ -79,6 +83,16 @@ def agy_failure(result: dict[str, Any] | None) -> str | None:
         error = str(result.get("error") or "no error given").strip()
         return printable(f"status {result.get('status')}: {error}")
     return None
+
+
+def agy_denied(result: dict[str, Any]) -> list[str]:
+    """The tool calls agy's turn was refused, by name: one ends the turn unanswered."""
+    actions = result.get("denied_actions")
+    return [
+        str(d.get("display_name") or d.get("action"))
+        for d in (actions if isinstance(actions, list) else [])
+        if isinstance(d, dict) and (d.get("display_name") or d.get("action"))
+    ]
 
 
 def agy_answer(result: dict[str, Any] | None) -> str:
@@ -133,22 +147,26 @@ def parse_review(text: str) -> dict[str, Any] | None:
     return review if isinstance(review, dict) else None
 
 
-def _extract_from_raw(
-    round_dir: Path, slot: int, backend: str, name: str = "raw-{}.txt"
+def _extract_from(
+    output: Path, round_dir: Path, slot: int, backend: str
 ) -> dict[str, Any] | None:
     """Parse one of the slot's output files, writing result-{slot}.json on success."""
-    raw_path = round_dir / name.format(slot)
-    if not raw_path.exists():
+    try:
+        # As UTF-8 whatever the locale: under LC_ALL=C one non-ASCII character in a
+        # reviewer's answer raised, and took the whole round with it.
+        raw = output.read_text(encoding="utf-8", errors="replace")
+    except OSError:
         return None
-    text = _unwrap_envelope(raw_path.read_text(), backend == "agy")
+    text = _unwrap_envelope(raw, backend == "agy")
     d = parse_review(text)
     if d is None:
         return None
     d = validate_result(d, slot, EXPECTED_REVIEWERS)
     if d is None:
         return None
-    with open(round_dir / f"result-{slot}.json", "w") as f:
-        json.dump(d, f, indent=2)
+    (round_dir / f"result-{slot}.json").write_text(
+        json.dumps(d, indent=2), encoding="utf-8"
+    )
     return d
 
 
@@ -174,10 +192,12 @@ def extract_results(
         backend = answered_by.get(i)
         found = None
         if backend == "codex":
-            found = _extract_from_raw(round_dir, i, backend, "codex-out-{}.txt")
+            found = _extract_from(
+                round_dir / f"codex-out-{i}.txt", round_dir, i, backend
+            )
         # A slot never launched has no answer at all, whatever its files say.
         if found is None and backend is not None:
-            found = _extract_from_raw(round_dir, i, backend)
+            found = _extract_from(round_dir / f"raw-{i}.txt", round_dir, i, backend)
         results.append(found)
     return results
 

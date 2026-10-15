@@ -125,11 +125,19 @@ class TestAgyLaunch(_AgyCase):
         cmd = ["sh", "-c", "sleep 300 & echo $! > helper; exit 0"]
         tracked: list[reviewers.ReviewerProc] = []
 
-        def launch(slot: int, *a: object, **k: object) -> reviewers.ReviewerProc | None:
+        def launch(
+            slot: int, lens: object, round_: object, register: object = None
+        ) -> reviewers.ReviewerProc | None:
             if slot != 1:
                 return None
             proc, out_f, err_f = reviewers._spawn(
-                1, cmd, "sh", tmp_path, None, tmp_path
+                1,
+                cmd,
+                "sh",
+                tmp_path,
+                None,
+                tmp_path,
+                register,  # type: ignore[arg-type]
             )
             tracked.append((1, proc, "sh", out_f, err_f))
             return tracked[-1]

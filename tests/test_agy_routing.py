@@ -111,7 +111,7 @@ class TestAgyRouting(_AgyCase):
     ) -> None:
         monkeypatch.setenv("AGY_MODEL", "claude-opus-4-6-thinking")
         # The autouse fixture makes any call to `agy models` fail the test.
-        assert agy.agy_model() == "claude-opus-4-6-thinking"
+        assert agy.agy_model_choice()[0] == "claude-opus-4-6-thinking"
 
     def test_the_pick_is_made_once_per_run(
         self, monkeypatch: pytest.MonkeyPatch
@@ -123,7 +123,11 @@ class TestAgyRouting(_AgyCase):
         monkeypatch.setattr(
             agy, "agy_models", lambda: calls.append(1) or list(self.LISTED)
         )
-        assert agy.agy_model() == agy.agy_model() == "gemini-3.8-flash-high"
+        assert (
+            agy.agy_model_choice()[0]
+            == agy.agy_model_choice()[0]
+            == "gemini-3.8-flash-high"
+        )
         assert len(calls) == 1
 
     @pytest.mark.parametrize(

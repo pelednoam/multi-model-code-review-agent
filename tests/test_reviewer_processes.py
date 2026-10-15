@@ -126,3 +126,36 @@ class TestReviewerProcesses(_AgyCase):
         assert done_file.read_text() == "done", done.stderr
         # The second signal still ends the run, once the cleanup is through.
         assert done.returncode != 0
+
+    def test_a_reviewer_is_tracked_before_spawn_returns(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Tracked only once _spawn had returned, a reviewer interrupted between that and
+        # the caller's append was left running.
+        tracked: list[reviewers.ReviewerProc] = []
+
+        def register(entry: reviewers.ReviewerProc) -> None:
+            tracked.append(entry)
+            raise SystemExit(143)  # the interrupt, the moment it is handed over
+
+        with pytest.raises(SystemExit):
+            reviewers._spawn(
+                1, ["sleep", "60"], "sleep", tmp_path, None, tmp_path, register
+            )
+        (entry,) = tracked
+        # Registered, and still stopped by _spawn's own guard.
+        assert entry[1].poll() is not None
+
+    def test_a_planted_codex_answer_does_not_survive_publication(
+        self, tmp_path: Path
+    ) -> None:
+        # codex wrote no answer of its own; one planted under its name stayed, and was
+        # read as codex's.
+        out, round_dir = tmp_path / "out", tmp_path / "round"
+        out.mkdir()
+        round_dir.mkdir()
+        (round_dir / "codex-out-2.txt").write_text("planted")
+        (out / "raw-2.txt").write_text("its stdout")
+        reviewers._publish_outputs(out, round_dir)
+        assert not (round_dir / "codex-out-2.txt").exists()
+        assert (round_dir / "raw-2.txt").read_text() == "its stdout"

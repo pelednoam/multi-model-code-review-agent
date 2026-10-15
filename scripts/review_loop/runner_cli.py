@@ -16,7 +16,13 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .agy import AGY_PREAMBLE, agy_message, agy_model, agy_schema, agy_unsandboxed
+from .agy import (
+    AGY_PREAMBLE,
+    agy_message,
+    agy_model_choice,
+    agy_schema,
+    agy_unsandboxed,
+)
 from .agy_sandbox import agy_seed_state, agy_wrapper_parts
 from .agy_sandbox_check import agy_reachable
 from .backends import codex_usable, detect_backends
@@ -54,7 +60,7 @@ def _agy_detect(prefer_hermes: str = "false") -> int:
             verify_codex=False, prefer_hermes=prefer_hermes == "true"
         )
         ok = found["agy"]
-        model = agy_model() if ok else None
+        model = agy_model_choice()[0] if ok else None
     print(model or "")
     return 0
 

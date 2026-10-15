@@ -79,11 +79,6 @@ def agy_unsandboxed() -> bool:
 # -- the model -----------------------------------------------------------------
 
 
-def agy_model() -> str | None:
-    """The model agy runs, or None if there is none to run (``agy_model_choice``)."""
-    return agy_model_choice()[0]
-
-
 def agy_model_choice() -> tuple[str | None, str]:
     """The model agy runs -- ``AGY_MODEL`` if set, else the best one this account
     lists -- and how it was chosen, in words.

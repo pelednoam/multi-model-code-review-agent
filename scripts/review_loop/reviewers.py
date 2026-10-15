@@ -20,7 +20,7 @@ from .agy import (
     AGY_PREAMBLE,
     agy_command,
     agy_message,
-    agy_model,
+    agy_model_choice,
     agy_schema,
     agy_unsandboxed,
 )
@@ -39,7 +39,7 @@ from .config import (
 from .proc import signals_deferred, signals_unwind
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
 ReviewerProc = tuple[int, "subprocess.Popen[str]", str, IO[str], IO[str]]
 
@@ -384,9 +384,9 @@ def _choose_command(
     if slot == 3 and backends.get("agy") and agy_allowed:
         # Ahead of gemini: both are Google, and this one can be held to the schema.
         # backends["agy"] is only true once agy is switched on and its sandbox check
-        # has passed, and agy_model() picks once per run, so every round runs the
+        # has passed, and agy_model_choice()[0] picks once per run, so every round runs the
         # same model.
-        model = agy_model()
+        model = agy_model_choice()[0]
         if model:
             # The schema is read from this checkout, which may be the tree under
             # review; a missing or broken one costs slot 3 its backend, not the round.
@@ -463,9 +463,16 @@ class _Picked(NamedTuple):
 
 
 def _launch_one(
-    slot: int, lens_args: tuple[str, str, str, str], round_: _Round
+    slot: int,
+    lens_args: tuple[str, str, str, str],
+    round_: _Round,
+    register: Callable[[ReviewerProc], object] | None = None,
 ) -> ReviewerProc | None:
-    """Launch a single reviewer subprocess. Return tracking tuple or None."""
+    """Launch a single reviewer subprocess. Return tracking tuple or None.
+
+    ``register`` is handed the tracking tuple the moment the reviewer exists
+    (``_spawn``).
+    """
     picked = _pick_backend(slot, round_)
     if picked is None:
         print(f"  R{slot}: SKIPPED (no backend)")
@@ -490,7 +497,7 @@ def _launch_one(
     if backend in _stdin_backends():
         fed = agy_message(prompt) if backend == "agy" else prompt
     proc, out_f, err_f = _spawn(
-        slot, picked.cmd, backend, picked.workspace, fed, round_.writes_to
+        slot, picked.cmd, backend, picked.workspace, fed, round_.writes_to, register
     )
     return slot, proc, backend, out_f, err_f
 
@@ -527,13 +534,17 @@ def _spawn(
     workspace: Path | None,
     fed: str | None,
     out_dir: Path,
+    register: Callable[[ReviewerProc], object] | None = None,
 ) -> tuple[subprocess.Popen[str], IO[str], IO[str]]:
     """Start ``cmd`` with ``fed`` on its stdin, writing to the slot's output files.
 
-    Until this returns the caller cannot clean the reviewer up, so an interrupt in
+    Until the caller tracks the reviewer it cannot clean it up, so an interrupt in
     here -- SIGTERM is one -- unwinds through ``failed``, which stops the reviewer
-    from the moment it exists: closing its input is in here too. The output handles
-    outlive this function on success; launch_reviewers closes them.
+    from the moment it exists: closing its input is in here too. ``register`` hands
+    the reviewer over while ``failed`` still guards it: tracked by the time this
+    returned, it was not tracked between returning and the caller's append, and an
+    interrupt there left it running. The output handles outlive this function on
+    success; launch_reviewers closes them.
     """
     with contextlib.ExitStack() as failed:
         out_f = failed.enter_context(_output(out_dir / f"raw-{slot}.txt"))
@@ -553,6 +564,8 @@ def _spawn(
                 start_new_session=True,
             )
             failed.callback(_stop, proc)
+        if register is not None:
+            register((slot, proc, backend, out_f, err_f))
         print(f"  R{slot}: launched via {backend}")
         failed.pop_all()
     return proc, out_f, err_f
@@ -673,9 +686,7 @@ def launch_reviewers(
                 diff, audit, context, round_dir, backends, prefer_hermes, repo, out_dir
             )
             for i, lens_args in enumerate(_LENSES, 1):
-                tracked = _launch_one(i, lens_args, round_)
-                if tracked is not None:
-                    procs.append(tracked)
+                _launch_one(i, lens_args, round_, procs.append)
             _await_reviewers(procs, out_dir, diff.count("\n") + 1)
             return {slot: backend for slot, _, backend, _, _ in procs}
         finally:
@@ -710,6 +721,10 @@ def _publish_outputs(out_dir: Path, round_dir: Path) -> None:
     for slot in range(1, len(_LENSES) + 1):
         for pattern in _OUTPUTS:
             name = pattern.format(slot)
+            # Whatever is there already was not written by this round's reviewer --
+            # say, a codex answer planted for a codex that wrote none -- so it goes
+            # whether or not there is a copy to replace it.
+            (round_dir / name).unlink(missing_ok=True)
             if (out_dir / name).is_file():
                 shutil.copyfile(out_dir / name, round_dir / name)
 
@@ -780,7 +795,7 @@ def _give_up(pending: dict[int, ReviewerProc], out_dir: Path, budget: int) -> No
     waiting = {
         slot
         for slot, (_, _, backend, _, _) in pending.items()
-        if backend == "codex" and not _has_result(out_dir, slot)
+        if backend == "codex" and not _has_codex_answer(out_dir, slot)
     }
     if not waiting:
         return
@@ -788,7 +803,7 @@ def _give_up(pending: dict[int, ReviewerProc], out_dir: Path, budget: int) -> No
     until = time.monotonic() + LATE_RESULT_GRACE
     while waiting and time.monotonic() < until:
         for slot in sorted(waiting):
-            if _has_result(out_dir, slot):
+            if _has_codex_answer(out_dir, slot):
                 print(f"  R{slot}: arrived after the deadline -- kept")
                 waiting.discard(slot)
         time.sleep(POLL_INTERVAL)
@@ -801,7 +816,7 @@ def _slots(slots: set[int]) -> str:
     return ", ".join(f"R{slot}" for slot in sorted(slots))
 
 
-def _has_result(out_dir: Path, slot: int) -> bool:
+def _has_codex_answer(out_dir: Path, slot: int) -> bool:
     """Whether codex, the one reviewer that writes its answer to a file of its own
     (-o), has written it, with something in it."""
     path = out_dir / f"codex-out-{slot}.txt"

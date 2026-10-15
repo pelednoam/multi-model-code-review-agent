@@ -234,8 +234,8 @@ def agy_wrapper_parts(
     for home in user_homes():
         wrap += ["--tmpfs", str(home)]
     # The repository under review and this agent's checkout, wherever they are:
-    # outside a home (/srv, a CI checkout) they were readable whole, .env files and
-    # all, by a model that only ever needs the scrubbed diff it is sent. Not /, which
+    # outside a home (/srv, a CI checkout) they were readable whole, environment
+    # files and all, by a model that only ever needs the scrubbed diff it is sent. Not /, which
     # cannot be hidden without hiding everything.
     for directory in dict.fromkeys(p.resolve() for p in hidden):
         if directory != Path("/"):

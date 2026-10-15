@@ -513,7 +513,7 @@ class TestAgySandboxCheck(AgyCase):
         )
 
     def test_the_repository_under_review_is_hidden(self, tmp_path: Path) -> None:
-        # Outside a home (/srv, a CI checkout) it was readable whole, .env and all.
+        # Outside a home (/srv, a CI checkout) it was readable whole, secrets and all.
         repo = tmp_path / "srv" / "project"
         wrap = agy_sandbox.agy_wrapper(
             tmp_path / "ws", tmp_path / "st", [repo, Path("/")]

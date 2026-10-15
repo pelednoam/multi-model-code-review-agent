@@ -19,7 +19,7 @@ from types import SimpleNamespace
 from helpers import AGENT_DOC, REPO_ROOT, runner_script, shell_function
 from scripts.review_loop import backends
 from scripts.review_loop import reviewers as reviewers_mod
-from scripts.review_loop.artifacts import describe_outputs
+from scripts.review_loop.artifacts import describe_outputs, write_artifacts_key
 from scripts.review_loop.claude_tools import claude_denied
 
 SCRUB_SCRIPT = REPO_ROOT / "scripts" / "scrub_diff.py"
@@ -1129,6 +1129,12 @@ class TestSalvagingProse:
         assert "Individual quota reached" in summary
         assert "NOT JSON" not in summary and "readability_performance" not in summary
 
+    def test_invisible_characters_are_made_visible(self) -> None:
+        # Bidi controls reorder what the operator reads without any terminal escape.
+        from scripts.review_loop.results import printable
+
+        assert printable("ok\u202edlrow\u200b\ufeff") == "ok?dlrow??"
+
     def test_terminal_escapes_are_not_passed_to_the_terminal(
         self, tmp_path: Path
     ) -> None:
@@ -1144,8 +1150,6 @@ class TestSalvagingProse:
 
     def test_the_key_names_the_backend_marker(self, tmp_path: Path) -> None:
         # Which CLI ran a slot decides how its raw output is read.
-        from scripts.review_loop.artifacts import write_artifacts_key
-
         write_artifacts_key(tmp_path)
         key = (tmp_path / "ARTIFACTS.md").read_text(encoding="utf-8")
         assert "`backend-N.txt`" in key and "stream-json" in key
@@ -1952,8 +1956,6 @@ class TestRunnerScript:
     had happened. It cost two rounds on a downstream project before the cause was found.
     """
 
-    AGENT_DOC = AGENT_DOC
-
     def test_runner_is_valid_bash(self, tmp_path: Path) -> None:
         script = tmp_path / "run-reviewers.sh"
         script.write_text(runner_script() + "\n")
@@ -1971,7 +1973,7 @@ class TestRunnerScript:
         assert "ROUND COMPLETE" in runner
 
     def test_the_doc_tells_the_agent_to_run_it_in_the_background(self) -> None:
-        doc = self.AGENT_DOC.read_text()
+        doc = AGENT_DOC.read_text()
         assert "run_in_background: true" in doc
         # And says why, so the next person to touch it does not "simplify" it back.
         assert "120 second timeout" in doc
@@ -2020,17 +2022,16 @@ class TestRunnerScript:
         runner = runner_script()
         assert runner.count("JOB_PID[$num]=$!") == 5
         assert 'cat "$REVIEW_TMP/pid-' not in runner
-        # pgrep only to ask whether a group is still this run's (live_group).
-        assert runner.count("pgrep -s") == 1
+        # pgrep only to ask whether a group is still this run's (live_group), and once
+        # before that, whether it can.
+        assert runner.count("pgrep -s") == 2
         assert 'pgrep -s 0 -g "$1"' in shell_function(runner, "live_group")
+        assert "if pgrep -s 0 -g 0 >/dev/null 2>&1 || [ $? -eq 1 ]; then" in runner
 
     @pytest.mark.parametrize("exits", [False, True], ids=["running", "exited"])
-    @pytest.mark.parametrize(
-        "pgrep", ["", "pgrep() { return 127; }\n", "pgrep() { return 2; }\n"],
-        ids=["pgrep", "no-pgrep", "pgrep-without-g"],
-    )  # fmt: skip
+    @pytest.mark.parametrize("check", ["pgrep", "proc"])
     def test_kill_jobs_reaches_everything_a_reviewer_started(
-        self, tmp_path: Path, exits: bool, pgrep: str
+        self, tmp_path: Path, exits: bool, check: str
     ) -> None:
         # Plain timeout put itself in a process group of its own: a kill of the job's group
         # left the reviewer under it running, and a helper the reviewer left behind was out
@@ -2043,8 +2044,7 @@ class TestRunnerScript:
         then = "exit 0" if exits else "wait"
         script = tmp_path / "t.sh"
         script.write_text(
-            "set -m\nJOB_PID=()\n"
-            + pgrep
+            f"set -m\nJOB_PID=()\nGROUP_CHECK={check}\n"
             + kill_jobs
             + "{ timeout --foreground -k 10 600 sh -c 'sleep 300 & echo $! > helper; "
             + then
@@ -2090,15 +2090,14 @@ class TestRunnerScript:
         assert "mapfile -d" in runner
         assert "the runner needs bash 4.4 or later" in runner
 
-    def test_google_counts_as_a_provider_only_if_slot_3_may_go_there(self) -> None:
-        # Gemini installed in a project pinned to Bedrock counted as a third provider
-        # though the gate kept slot 3 from it.
+    def test_providers_are_counted_from_what_was_launched(self) -> None:
+        # Predicted from what was installed, the count took in codex and Google for a
+        # project pinned to Bedrock, where Hermes takes slots 2 and 3.
         runner = runner_script()
-        count = runner[runner.index("# Count provider diversity") :]
-        count = count[: count.index('echo "Provider diversity')]
-        gated = "! $PREFER_HERMES || review_helper flag REVIEW_USE_GEMINI"
-        assert "{ $HAS_GEMINI && { " + gated + "; }; }" in count
-        assert "{ $HAS_GEMINI || ${HAS_AGY:-false}; }" not in count
+        assert runner.count("JOB_PROVIDER[$num]=") == 5
+        count = runner.index("N_PROVIDERS=$(printf '%s\\n' \"${JOB_PROVIDER[@]}\"")
+        assert runner.index("# WATCHDOG") > count > runner.index("# R4: Spec-contract")
+        assert "$HAS_CODEX && N_PROVIDERS" not in runner
 
     def test_codexs_answer_is_checked_like_the_others(self) -> None:
         # Written straight to result-N.json, it skipped the validation every other
@@ -2106,18 +2105,43 @@ class TestRunnerScript:
         runner = runner_script()
         assert '-o "$REVIEW_TMP/codex-out-$num.txt"' in runner
         assert '[ -f "$result" ] && continue' not in runner
-        post = runner[runner.index("# Post-process") :]
-        assert 'for src in "$REVIEW_TMP/codex-out-$num.txt"' in post
+        assert 'JOB_OUT[$num]="$REVIEW_TMP/codex-out-$num.txt"' in runner
 
+    def test_a_slot_is_read_only_from_its_own_clis_file(self, tmp_path: Path) -> None:
+        # Every slot was read from codex-out-N.txt, then claude-raw-N.json, then
+        # stdout, whichever existed first, and a result-N.json already there was kept:
+        # a reviewer with a file tool could stand in for another slot.
+        runner = runner_script()
+        post = runner[runner.index("# Post-process") :]
+        assert 'rm -f -- "$result"' in post
+        assert 'src="${JOB_OUT[$num]:-}"' in post
+        assert "for src in" not in post
+        assert runner.count("JOB_OUT[$num]=") == 5
+
+    def test_without_pgrep_groups_are_asked_of_proc(self, tmp_path: Path) -> None:
+        # The check is decided once, before anything is launched.
+        runner = runner_script()
+        start = runner.index("if pgrep -s 0 -g 0")
+        decide = runner[start : runner.index("\nfi\n", start) + 4]
+        script = tmp_path / "t.sh"
+        script.write_text("pgrep() { return 127; }\n" + decide + "echo $GROUP_CHECK\n")
+        done = subprocess.run(
+            ["bash", str(script)], capture_output=True, text=True, timeout=30
+        )
+        assert done.stdout.strip() == "proc", done.stderr
+
+    @pytest.mark.parametrize("check", ["pgrep", "proc"])
     def test_a_group_that_is_no_longer_this_runs_is_left_alone(
-        self, tmp_path: Path
+        self, tmp_path: Path, check: str
     ) -> None:
         # bash reaps a finished job at once; once its group empties, the number can go
-        # to someone else's new session -- a shell, an ssh login -- and was killed.
+        # to someone else's new session -- a shell, an ssh login -- and was killed. The
+        # first fallback for a missing pgrep asked only whether the number existed.
         runner = runner_script()
         script = tmp_path / "t.sh"
         script.write_text(
-            shell_function(runner, "kill_jobs")
+            f"GROUP_CHECK={check}\n"
+            + shell_function(runner, "kill_jobs")
             + shell_function(runner, "live_group")
             # Another session's group leader standing in for a reused number.
             + "setsid sleep 30 & other=$!\nsleep 0.3\n"
@@ -2219,7 +2243,7 @@ class TestRunnerScript:
         runner = runner_script()
         codex = runner[runner.index("    codex)") : runner.index("    gemini)")]
         assert "-s read-only -c 'approvals_reviewer=\"user\"'" in codex
-        doc = self.AGENT_DOC.read_text()
+        doc = AGENT_DOC.read_text()
         detection = doc[doc.index("HAS_CODEX=false") : doc.index("HAS_AGY=false")]
         assert "review_helper codex-check || HAS_CODEX=false" in detection
 

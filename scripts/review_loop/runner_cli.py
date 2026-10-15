@@ -17,12 +17,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .agy import AGY_PREAMBLE, agy_message, agy_model, agy_schema, agy_unsandboxed
-from .agy_sandbox import (
-    agy_reachable,
-    agy_sandbox,
-    agy_sandbox_parts,
-    agy_seed_state,
-)
+from .agy_sandbox import agy_seed_state, agy_wrapper_parts
+from .agy_sandbox_check import agy_reachable
 from .backends import codex_usable, detect_backends
 from .claude_tools import claude_denied
 from .config import env_flag
@@ -81,19 +77,26 @@ def _agy_sandbox(workspace: str, state: str) -> int:
     if agy_unsandboxed():
         sys.stdout.write("0\0")
         return 0
-    env, bwrap = agy_sandbox_parts(Path(workspace), agy_seed_state(Path(state)))
+    env, bwrap = agy_wrapper_parts(Path(workspace), agy_seed_state(Path(state)))
     sys.stdout.write("\0".join([str(len(env)), *env, *bwrap]) + "\0")
     return 0
 
 
-def _agy_reachable(workspace: str, state: str) -> int:
+def _agy_reachable(workspace: str) -> int:
     """Exit 0 if agy's sandbox reaches nothing it must not, right now; else say what.
 
-    The startup check's last part, again before the launch (``agy.agy_reachable``).
+    The startup check's last part, again before the launch
+    (``agy_sandbox_check.agy_reachable``). The wrapper is the one agy will run under,
+    NUL-separated on stdin, as the runner holds it -- not one built again here, which
+    could differ from it.
     """
     if agy_unsandboxed():
         return 0
-    failure = agy_reachable(agy_sandbox(Path(workspace), Path(state)), Path(workspace))
+    wrap = [arg for arg in sys.stdin.buffer.read().decode().split("\0") if arg]
+    if not wrap:
+        print("no sandbox to check")
+        return 1
+    failure = agy_reachable(wrap, Path(workspace))
     if failure:
         print(failure)
         return 1

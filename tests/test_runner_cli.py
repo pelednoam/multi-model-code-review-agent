@@ -157,8 +157,26 @@ class TestRunnerCli:
         self, tmp_path: Path
     ) -> None:
         env = {"MMCRA_SKIP_AGY_SANDBOX_CHECK": "1"}
-        done = self._cli("agy-reachable", str(tmp_path), str(tmp_path), env=env)
+        done = self._cli("agy-reachable", str(tmp_path), env=env)
         assert done.returncode == 0
+
+    def test_reachable_checks_the_wrapper_it_is_handed(self, tmp_path: Path) -> None:
+        # It built a wrapper of its own to check, which could differ from the one agy
+        # was launched under. A "wrapper" that cannot start fails the check.
+        env = {"MMCRA_SKIP_AGY_SANDBOX_CHECK": "0"}
+        done = subprocess.run(
+            [sys.executable, "-I", str(REPO_ROOT / self.ENTRY), "agy-reachable",
+             str(tmp_path)],
+            input=b"/nonexistent/wrapper\0--\0", capture_output=True, timeout=60,
+            env={**os.environ, **env},
+        )  # fmt: skip
+        assert done.returncode == 1 and b"could not check" in done.stdout
+        empty = subprocess.run(
+            [sys.executable, "-I", str(REPO_ROOT / self.ENTRY), "agy-reachable",
+             str(tmp_path)],
+            input=b"", capture_output=True, timeout=60, env={**os.environ, **env},
+        )  # fmt: skip
+        assert empty.returncode == 1
 
     @pytest.mark.parametrize(
         ("value", "skipped"),

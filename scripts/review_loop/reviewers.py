@@ -24,7 +24,8 @@ from .agy import (
     agy_schema,
     agy_unsandboxed,
 )
-from .agy_sandbox import agy_reachable, agy_sandbox, agy_seed_state
+from .agy_sandbox import agy_seed_state, agy_wrapper
+from .agy_sandbox_check import agy_reachable
 from .claude_tools import claude_denied
 from .config import (
     LATE_RESULT_GRACE,
@@ -215,8 +216,10 @@ def _agy_workspace(repo: Path | None = None) -> Path | None:
     """An empty directory for agy to run in, outside the repository -- or None.
 
     The workspace is the one place the sandbox leaves writable, so it must not be the
-    repository under review (``repo``, from ``--repo``), this agent's own checkout, or
-    the directory the loop was started from -- nor inside any of them. ``mkdtemp``
+    repository under review (``repo``, from ``--repo``, or else the directory the loop
+    was started from) or this agent's own checkout -- nor inside any of them. Only
+    the repository named: a loop started from / with --repo found every workspace
+    "inside" its cwd, and agy never ran. ``mkdtemp``
     follows TMPDIR, which a project can point at a directory of its own, so the result
     is checked rather than assumed. Everything agy needs is in the prompt; empty also
     leaves nothing to wander through.
@@ -225,7 +228,8 @@ def _agy_workspace(repo: Path | None = None) -> Path | None:
         path = _scratch_dir("mmcra-agy-")
     except OSError:
         return None
-    for root in {r.resolve() for r in (repo, REPO_ROOT, Path.cwd()) if r is not None}:
+    under_review = repo if repo is not None else Path.cwd()
+    for root in {under_review.resolve(), REPO_ROOT.resolve()}:
         if path == root or root in path.parents:
             shutil.rmtree(path, ignore_errors=True)
             return None
@@ -528,7 +532,7 @@ def _prepare_agy(
         return cmd, workspace
     try:
         state = agy_seed_state(_scratch_dir("mmcra-agy-state-"))
-        sandbox = agy_sandbox(workspace, state)
+        sandbox = agy_wrapper(workspace, state)
     except OSError as exc:
         print(f"  R{slot}: could not prepare agy's sandbox ({exc})")
         return None

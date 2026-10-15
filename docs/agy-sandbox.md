@@ -9,19 +9,21 @@ choosing not to, not agy refusing.
 So the boundary is the operating system's: agy runs under
 [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`), Linux only. Under
 it, agy's own write tool got `read-only file system`. The wrapper is built in one
-place, `agy_sandbox_parts` in `scripts/review_loop/agy_sandbox.py`, and both the
+place, `agy_wrapper_parts` in `scripts/review_loop/agy_sandbox.py`, and both the
 convergence loop and the full-mode runner call it.
 
 ## What it closes
 
-- **Writes** anywhere but an empty temporary workspace outside the repository.
+- **Writes** anywhere but two throwaway directories outside the repository: an empty
+  workspace, and the copy of agy's state mounted over `~/.gemini/antigravity-cli`.
+  Both are removed when the round ends.
 - **The home directory**, read whole: `$HOME`, and the account's own where `HOME`
   points elsewhere (CI, `sudo -E`). Both are replaced by empty ones, so there is no
   `~/.ssh`, no cloud credentials and no other tools' tokens. A home of `/`, or an
   account with no passwd entry, fails the check instead.
 - **`/tmp` and `/run`**, replaced by empty ones, and with them the sockets there:
   tmux's, X11's, the session and system D-Bus, `docker.sock`, snapd's. Only the DNS
-  resolver's directory is put back.
+  resolver's file is put back, not its directory, which holds a socket too.
 - **agy's real state**, replaced by a throwaway copy holding its sign-in token, with
   its program directories (`bin`, `builtin`) mounted read-only beside it and nothing
   else of the real state: no history, no other settings. The copy is removed when

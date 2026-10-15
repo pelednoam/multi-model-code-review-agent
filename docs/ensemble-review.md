@@ -489,6 +489,8 @@ set -m
 # TERM first, then KILL for whatever ignored it.
 JOB_PID=()
 JOB_BACKEND=()   # which CLI ran each slot, for reading its output: agy's stream only from agy
+JOB_OUT=()       # the one file each slot's CLI writes its answer to, the only one read for it
+JOB_PROVIDER=()  # whose model answers each slot, for the diversity count
 AGY_SCRATCH=()
 kill_jobs() {
   local sig
@@ -503,19 +505,34 @@ kill_jobs() {
 # live_group PGID: whether the group still has a member in this runner's session. bash reaps a
 # finished job at once, and once its group has emptied, the number is free for the system to give
 # to someone else's new session -- a shell, an ssh login -- which a kill of it would reach. A group
-# of this run's always has its members in this run's session. pgrep says 1 for no such group; any
-# other failure -- no pgrep, one without -s or -g -- is not an answer, and the group is then
-# taken as live if it exists at all: a cleanup that silently killed nothing left every reviewer
-# running.
+# of this run's always has its members in this run's session. Asked of pgrep where it can answer
+# (GROUP_CHECK, decided below before anything is launched), else of /proc. A group number that
+# merely exists is never enough: a reused one exists too.
 live_group() {
   [ -n "$1" ] || return 1
-  pgrep -s 0 -g "$1" >/dev/null 2>&1
-  case $? in
-    0) return 0 ;;
-    1) return 1 ;;
-    *) kill -0 -- "-$1" 2>/dev/null ;;
-  esac
+  if [ "$GROUP_CHECK" = pgrep ]; then
+    pgrep -s 0 -g "$1" >/dev/null 2>&1
+    return
+  fi
+  local stat line pgrp sid mine=""
+  for stat in "/proc/$$/stat" /proc/[0-9]*/stat; do
+    { read -r line < "$stat"; } 2>/dev/null || continue   # gone since the glob: not a member
+    # After the command name, which can hold spaces and parentheses: state, ppid, pgrp, session.
+    read -r _ _ pgrp sid _ <<< "${line##*) }"
+    if [ -z "$mine" ]; then mine=$sid; continue; fi
+    [ "$pgrp" = "$1" ] && [ "$sid" = "$mine" ] && return 0
+  done
+  return 1
 }
+# pgrep says 0 or 1; anything else -- not installed, no -s or -g -- is not an answer. Without
+# either way to ask, a cleanup would have to guess, so the runner does not start.
+if pgrep -s 0 -g 0 >/dev/null 2>&1 || [ $? -eq 1 ]; then
+  GROUP_CHECK=pgrep
+elif [ -r "/proc/$$/stat" ]; then
+  GROUP_CHECK=proc
+else
+  echo "ERROR: the runner needs pgrep or /proc to tell its reviewers from other processes"; exit 1
+fi
 # Signals ignored first: a second Ctrl-C or TERM during the cleanup ran its trap's `exit`, which
 # cut the cleanup short and left reviewers running.
 finish_round() {
@@ -531,10 +548,11 @@ trap 'exit 131' QUIT
 
 # Per-reviewer deadline. The watchdog below allows a little more than this so that a reviewer
 # killed by its own `timeout` is still collected as a failure rather than hanging the round.
+# Each launcher below runs its CLI under `timeout` with `--foreground -k 10`: -k escalates to
+# SIGKILL 10s after the TERM, and --foreground signals only the reviewer itself, not
+# its helpers -- those are the sweep's, which kills each job's whole process group (kill_jobs).
 REVIEWER_TIMEOUT=${REVIEWER_TIMEOUT:-600}
 ROUND_DEADLINE=$((REVIEWER_TIMEOUT + 90))
-# -k escalates to SIGKILL 10s after the TERM. --foreground signals only the reviewer itself, not
-# its helpers: those are the sweep's, which kills each job's whole process group (kill_jobs).
 
 # Every reviewer runs inside a brace group that records its exit status in a done-marker when it
 # finishes. The markers are what makes progress observable from ANOTHER shell: `ps` on a recorded
@@ -556,6 +574,8 @@ launch_hermes() {
       2>"$REVIEW_TMP/stderr-$num.txt"
     echo $? > "$REVIEW_TMP/done-$num"; } &
   JOB_PID[$num]=$!
+  JOB_OUT[$num]="$REVIEW_TMP/stdout-$num.txt"
+  JOB_PROVIDER[$num]=anthropic
   echo $! > "$REVIEW_TMP/pid-$num"
   echo "R$num: Hermes ($hermes_model) [Bedrock]"
 }
@@ -599,9 +619,10 @@ prepare_agy() {
   AGY_ENVP=("${wrap[@]:1:${wrap[0]}}")
   AGY_BWRAP=("${wrap[@]:$((1 + wrap[0]))}")
   # The startup check described the host as it was then; what has appeared since -- a session
-  # bus, a socket, an X server -- is checked again here.
+  # bus, a socket, an X server -- is checked again here, against the very wrapper agy will run
+  # under, handed over on stdin.
   local why
-  why="$(review_helper agy-reachable "$AGY_WS" "$AGY_STATE")" \
+  why="$(printf '%s\0' "${AGY_ENVP[@]}" "${AGY_BWRAP[@]}" | review_helper agy-reachable "$AGY_WS")" \
     || { echo "R$num: SKIPPED (agy not launched -- $why)"; return 1; }
   review_helper agy-preamble "$prompt_file" \
     || { echo "R$num: SKIPPED (could not prepare agy's prompt)"; return 1; }
@@ -653,8 +674,10 @@ launch_cli() {
           2>"$REVIEW_TMP/stderr-$num.txt"
         echo $? > "$REVIEW_TMP/done-$num"; } &
       JOB_PID[$num]=$!
+      JOB_OUT[$num]="$REVIEW_TMP/claude-raw-$num.json"
+      JOB_PROVIDER[$num]=anthropic
       echo $! > "$REVIEW_TMP/pid-$num"
-      echo "R$num: Claude CLI ($model, tools: $tools) [free]"
+      echo "R$num: Claude CLI ($model, tools: $tools) [Claude subscription]"
       ;;
     codex)
       # Build extra flags from CODEX_* env vars.
@@ -676,10 +699,12 @@ launch_cli() {
           2>"$REVIEW_TMP/stderr-$num.txt"
         echo $? > "$REVIEW_TMP/done-$num"; } &
       JOB_PID[$num]=$!
+      JOB_OUT[$num]="$REVIEW_TMP/codex-out-$num.txt"
+      JOB_PROVIDER[$num]=openai
       echo $! > "$REVIEW_TMP/pid-$num"
       local label="${CODEX_MODEL:-gpt-5.5}"
       [ -n "${CODEX_REASONING_EFFORT:-}" ] && label="$label/$CODEX_REASONING_EFFORT"
-      echo "R$num: Codex CLI ($label) [free]"
+      echo "R$num: Codex CLI ($label) [ChatGPT subscription]"
       ;;
     gemini)
       # Gemini CLI: -p "appended to input on stdin". Omit -p flag
@@ -695,15 +720,17 @@ launch_cli() {
           2>"$REVIEW_TMP/stderr-$num.txt"
         echo $? > "$REVIEW_TMP/done-$num"; } &
       JOB_PID[$num]=$!
+      JOB_OUT[$num]="$REVIEW_TMP/stdout-$num.txt"
+      JOB_PROVIDER[$num]=google
       echo $! > "$REVIEW_TMP/pid-$num"
-      echo "R$num: Gemini CLI (${GEMINI_MODEL:-gemini-2.5-flash}) [free]"
+      echo "R$num: Gemini CLI (${GEMINI_MODEL:-gemini-2.5-flash}) [Google AI Studio free tier]"
       ;;
     agy)
       # Antigravity CLI. Only reached when HAS_AGY=true, i.e. its sandbox check passed.
       #
       # agy itself confines nothing: measured, it wrote outside its workspace by absolute path
       # with no denial. So it runs under the bubblewrap wrapper from
-      # scripts/review_loop/agy_sandbox.py (agy_sandbox_parts) -- built by calling it, so there is
+      # scripts/review_loop/agy_sandbox.py (agy_wrapper_parts) -- built by calling it, so there is
       # one copy: filesystem read-only except an empty workspace OUTSIDE the repo, home hidden, a
       # throwaway copy of agy's state, no host processes or sockets, no capabilities. The prompt -- with the preamble telling it to call no tools
       # -- goes in as one stream-json line on stdin.
@@ -723,8 +750,10 @@ launch_cli() {
         # finished, the copy is gone.
         rc=$?; rm -rf "$AGY_WS" "$AGY_STATE"; echo "$rc" > "$REVIEW_TMP/done-$num"; } &
       JOB_PID[$num]=$!
+      JOB_OUT[$num]="$REVIEW_TMP/stdout-$num.txt"
+      JOB_PROVIDER[$num]=google
       echo $! > "$REVIEW_TMP/pid-$num"
-      echo "R$num: Antigravity CLI ($AGY_MODEL) [free]"
+      echo "R$num: Antigravity CLI ($AGY_MODEL) [Google AI plan]"
       echo "R$num: agy sends the diff and audit to Google (REVIEW_USE_AGY=0 to stop)"
       ;;
     *)
@@ -740,20 +769,6 @@ if ! $HAS_CLAUDE && ! $HAS_HERMES; then
   exit 1
 fi
 
-# Count provider diversity. Google counts only if slot 3 may go there: a project pinned to Bedrock
-# gets agy only when detection let it through (REVIEW_USE_AGY=1), and gemini only with
-# REVIEW_USE_GEMINI.
-N_PROVIDERS=1  # Anthropic is always available (claude or hermes)
-$HAS_CODEX && N_PROVIDERS=$((N_PROVIDERS + 1))
-if ${HAS_AGY:-false} \
-   || { $HAS_GEMINI && { ! $PREFER_HERMES || review_helper flag REVIEW_USE_GEMINI; }; }; then
-  N_PROVIDERS=$((N_PROVIDERS + 1))
-fi
-if [ $N_PROVIDERS -eq 1 ]; then
-  echo "WARNING: single-provider mode (Anthropic only)."
-  echo "Install codex and/or agy (or gemini) for cross-provider diversity."
-fi
-echo "Provider diversity: $N_PROVIDERS provider(s)"
 
 # R1: Security (Opus) -- local CLI by default (free), Hermes only when opted in
 if $PREFER_HERMES && $HAS_HERMES; then
@@ -805,6 +820,15 @@ elif $HAS_HERMES; then
   launch_hermes 4 us.anthropic.claude-opus-4-6-v1 "$REVIEW_TMP/prompt-4.txt"
 fi
 
+# Provider diversity, counted from what was launched: predicted from what is installed, it counted
+# codex and Google for a project pinned to Bedrock, where Hermes takes slots 2 and 3.
+N_PROVIDERS=$(printf '%s\n' "${JOB_PROVIDER[@]}" | sort -u | grep -c .)
+if [ "$N_PROVIDERS" -le 1 ]; then
+  echo "WARNING: single-provider mode (Anthropic only)."
+  echo "Install codex and/or agy (or gemini) for cross-provider diversity."
+fi
+echo "Provider diversity: $N_PROVIDERS provider(s)"
+
 # WATCHDOG, not a bare `wait`. A bare wait has no deadline of its own, so one wedged reviewer holds
 # the whole round open forever and the partial results from the other three are never reported.
 # This gives up at ROUND_DEADLINE and leaves the stragglers to be recorded as timed out below.
@@ -851,13 +875,14 @@ extract_json() {
 # Post-process: normalize all output to result-N.json.
 for num in 1 2 3 4; do
   result="$REVIEW_TMP/result-$num.json"
+  # No CLI writes this file itself, so one already here was planted; only extraction writes it.
+  rm -f -- "$result"
 
-  # Try each possible output file: codex's last message (-o), Claude's raw wrapper, then stdout.
-  # Every one is checked as the loop checks it, codex's included.
-  for src in "$REVIEW_TMP/codex-out-$num.txt" "$REVIEW_TMP/claude-raw-$num.json" \
-             "$REVIEW_TMP/stdout-$num.txt"; do
-    [ -f "$src" ] && extract_json "$src" "$result" "$num" "${JOB_BACKEND[$num]:-}" && break
-  done
+  # Only the file the slot's own CLI writes, as recorded at launch: any other file there, named
+  # like another CLI's output, may have been put there by a reviewer with a file tool. Checked as
+  # the loop checks it, codex's answer included.
+  src="${JOB_OUT[$num]:-}"
+  [ -n "$src" ] && [ -f "$src" ] && extract_json "$src" "$result" "$num" "${JOB_BACKEND[$num]:-}"
 
   # If no result produced, write a synthetic error. The done-marker distinguishes the two very
   # different failures a reader needs to tell apart: a reviewer that ran and produced unparseable
@@ -940,7 +965,7 @@ Report what the status lines say rather than guessing. "Three of four are still 
 thing to tell a waiting human; silence is not.
 
 
-**Tool restriction**: Hermes uses `-t file` (best isolation). Claude CLI: `--allowedTools "Read Grep Glob"` plus `--disallowedTools` for every writing tool, since `--allowedTools` alone does not confine (a slot given writing tools on purpose with `REVIEWER_TOOLS_N` has only those taken off the deny list). Codex: both paths pin `-s read-only` and `approvals_reviewer="user"` and canary-test them before use. Gemini uses `--approval-mode plan` (read-only). agy runs under bubblewrap, verified before use (what it closes and what it does not: [agy-sandbox.md](agy-sandbox.md)), plus `--sandbox --disable-slash-commands`. Extraction errors logged to `$REVIEW_TMP/extract-N.err`.
+**Tool restriction**: Hermes uses `-t file` (best isolation). Claude CLI: `--allowedTools "Read Grep Glob"` plus `--disallowedTools` for every tool that writes, runs a command or reaches the network, and `--strict-mcp-config` (no MCP servers), since `--allowedTools` alone does not confine (a slot given writing tools on purpose with `REVIEWER_TOOLS_N` has only those taken off the deny list). Codex: both paths pin `-s read-only` and `approvals_reviewer="user"` and canary-test them before use. Gemini uses `--approval-mode plan` (read-only). agy runs under bubblewrap, verified before use (what it closes and what it does not: [agy-sandbox.md](agy-sandbox.md)), plus `--sandbox --disable-slash-commands`. Extraction errors logged to `$REVIEW_TMP/extract-N.err`.
 
 ## 7. Collect and validate results
 

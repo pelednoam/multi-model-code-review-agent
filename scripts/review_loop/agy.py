@@ -9,7 +9,7 @@ model declining, not agy refusing. And there is no deny list like claude's
 --disallowedTools; --sandbox restricts terminal commands only.
 
 So the boundary is the operating system's: agy runs under bubblewrap, built and proven
-in ``agy_sandbox``. Its stream is read in ``results``.
+in ``agy_sandbox`` and ``agy_sandbox_check``. Its stream is read in ``results``.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from .agy_sandbox import agy_sandbox, agy_seed_state
+from .agy_sandbox import agy_seed_state, agy_wrapper
 from .config import AGY_MODELS_TIMEOUT, RESULT_SCHEMA, env_flag
 from .proc import run, signals_unwind
 
@@ -136,7 +136,7 @@ def agy_models() -> list[str]:
             cmd = ["agy", "models"]
             if not agy_unsandboxed():
                 state = agy_seed_state(Path(st).resolve())
-                cmd = [*agy_sandbox(workspace, state), *cmd]
+                cmd = [*agy_wrapper(workspace, state), *cmd]
             done = run(
                 cmd,
                 cwd=workspace,

@@ -34,7 +34,11 @@ def _try_load_existing_result(result_path: Path, slot: int) -> dict[str, Any] | 
 #: Terminal control characters, which a reply decoded from JSON can carry raw: an
 #: escape sequence can rewrite or hide the lines above it, retitle the window, or on
 #: some terminals write the clipboard. A reviewer's text is shaped by the diff it read.
-_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+#: And the invisible ones that reorder or hide text without a terminal's help: bidi
+#: controls (the "Trojan Source" trick), zero-width characters and the BOM.
+_CONTROL = re.compile(
+    r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]"
+)
 
 
 def printable(text: str) -> str:
@@ -141,7 +145,7 @@ def parse_review(text: str) -> dict[str, Any] | None:
 
 
 def _extract_from_raw(
-    round_dir: Path, slot: int, backend: str | None
+    round_dir: Path, slot: int, backend: str
 ) -> dict[str, Any] | None:
     """Parse raw-{slot}.txt as JSON, writing result-{slot}.json on success."""
     raw_path = round_dir / f"raw-{slot}.txt"
@@ -171,11 +175,17 @@ def extract_results(
     """
     results: list[dict[str, Any] | None] = []
     for i in range(1, 5):
-        result_path = round_dir / f"result-{i}.json"
-        d = _try_load_existing_result(result_path, i) or _extract_from_raw(
-            round_dir, i, answered_by.get(i)
-        )
-        results.append(d)
+        backend = answered_by.get(i)
+        # Only codex writes result-N.json itself (-o). Any other slot's, there before it
+        # is parsed, was put there by something else -- a reviewer with a file tool,
+        # hermes --yolo -- and would stand in for that slot's own answer. A slot never
+        # launched has no answer at all, whatever its files say.
+        existing = None
+        if backend == "codex":
+            existing = _try_load_existing_result(round_dir / f"result-{i}.json", i)
+        if existing is None and backend is not None:
+            existing = _extract_from_raw(round_dir, i, backend)
+        results.append(existing)
     return results
 
 

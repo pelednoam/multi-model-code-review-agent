@@ -49,7 +49,10 @@ def _warn_of_vendored_changes(repo: Path, diff_range: list[str]) -> None:
     install is not spent reviewing the reviewer. But full mode runs the project's own
     copy -- its sandbox builder among them -- so a change that weakens it would run
     with no reviewer having seen it. Re-vendoring changes them too, so this warns
-    rather than refuses. ``diff_range`` is the range the diff was taken over, its
+    rather than refuses. And it is itself part of that copy: a change that removes it
+    removes the warning too. The protection is the one docs/agy-sandbox.md gives --
+    run the loop from a trusted checkout of this agent, with --repo naming the
+    project; this only makes the untrusted case visible where it is not doctored. ``diff_range`` is the range the diff was taken over, its
     fallbacks included, and new files count as they do there.
     """
     if is_agent_repo(repo):

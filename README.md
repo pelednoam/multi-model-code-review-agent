@@ -729,7 +729,7 @@ have detected it via fingerprint matching and exited with code 2
 | `scripts/review_loop/` | The convergence loop's package; also the full-mode runner's checks and extraction, through `runner_entry.py` |
 | `docs/agy-sandbox.md` | What agy's bubblewrap sandbox closes, what it does not, and its switches |
 | `docs/codex-sandbox.md` | Why codex's sandbox is verified before use, and how to fix a host where it is not read-only |
-| `tests/` | Test suite: `test_review_scripts.py`, `test_agy_*.py`, `test_reviewer_processes.py`, `test_runner_cli.py` |
+| `tests/` | Test suite: `test_review_scripts.py`, `test_agy_*.py`, `test_reviewer_processes.py`, `test_runner_cli.py`; shared: `helpers.py` (takes the full-mode runner out of the agent doc), `agy_case.py`, `conftest.py` (switches agy off for every test unless it switches it on) |
 
 ## Key design decisions
 
@@ -756,7 +756,7 @@ have detected it via fingerprint matching and exited with code 2
 | Hermes+Bedrock | Your AWS account | Data: best (stays in your AWS account). Tools: the file toolset with `--yolo`, which can write; only the convergence loop's tamper check reports writes (full mode does not check) | Bedrock pricing |
 | Claude CLI | Anthropic infrastructure | Good (`--allowedTools` + `--disallowedTools`) | Claude subscription |
 | Codex CLI | OpenAI infrastructure | Good (sandbox) | ChatGPT subscription |
-| Gemini CLI | Google infrastructure | Good (`--approval-mode plan`) | AI Studio free tier |
+| Gemini CLI | Google infrastructure | Weak: read-only by policy (`--approval-mode plan`), not sandboxed; it can read your home directory | AI Studio free tier |
 | Antigravity CLI | Google infrastructure | Good (`bwrap` read-only filesystem; home, `/tmp`, `/run` and env hidden; verified) | Google AI plan |
 
 For sensitive/FDA-path code where data-at-rest guarantees matter, use

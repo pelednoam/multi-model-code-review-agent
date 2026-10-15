@@ -106,7 +106,9 @@ class AgyCase:
                 seen.update(kw, cmd=cmd, stdin=text)
 
         monkeypatch.setattr(reviewers.subprocess, "Popen", _Proc)
-        round_ = reviewers._Round("+DIFF-MARKER", "{}", "ctx", tmp_path, self.BACKENDS)
+        round_ = reviewers._Round(
+            "+DIFF-MARKER", "{}", "ctx", tmp_path, self.BACKENDS, out_dir=tmp_path
+        )
         tracked = reviewers._launch_one(3, reviewers._LENSES[2], round_)
         if tracked is not None:
             tracked[3].close()

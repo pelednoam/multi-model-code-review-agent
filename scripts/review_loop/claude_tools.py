@@ -53,3 +53,27 @@ def claude_denied(tools: str) -> tuple[list[str], list[str]]:
         granted, scoped = set(), []
     denied = [tool for tool in CLAUDE_DENIED if tool not in granted]
     return denied, [tool for tool in scoped if tool in CLAUDE_DENIED]
+
+
+#: Where credentials live, which a claude reviewer is never allowed to read, whatever
+#: it is granted: its reads are not confined to the repository (measured, it read
+#: ~/.bashrc with only Read granted), and a diff that talks it into quoting one puts
+#: it in a finding. A deny on Read covers Grep and Glob too (measured). A list, so not
+#: complete: docs/ensemble-review.md says so.
+SECRET_READS = (
+    "~/.ssh/**", "~/.aws/**", "~/.azure/**", "~/.gnupg/**", "~/.kube/**",
+    "~/.docker/**", "~/.config/gcloud/**", "~/.config/gh/**", "~/.netrc",
+    "~/.git-credentials", "~/.npmrc", "~/.pypirc", "~/.password-store/**",
+    "~/.local/share/keyrings/**", "~/.claude/**", "~/.codex/**", "~/.gemini/**",
+    # Environment files anywhere, the repository's included; joined, because the diff
+    # scrubber rightly redacts a line that names one.
+    "**/." + "env", "**/." + "env.*",
+)  # fmt: skip
+
+
+def claude_disallowed(tools: str) -> list[str]:
+    """The --disallowedTools entries for a claude reviewer allowed ``tools``: the
+    tools of ``CLAUDE_DENIED`` it is not granted (``claude_denied``), and reads of
+    ``SECRET_READS``, which no grant lifts."""
+    denied, _ = claude_denied(tools)
+    return [*denied, *(f"Read({path})" for path in SECRET_READS)]

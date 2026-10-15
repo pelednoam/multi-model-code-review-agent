@@ -11,6 +11,26 @@ from .config import (
 )
 from .git_state import is_safe_relpath
 
+try:  # run as scripts/review_preflight.py, with scripts/ on the path
+    from scrub_diff import CREDENTIAL_PATTERNS
+except ImportError:  # imported as the scripts package
+    from scripts.scrub_diff import CREDENTIAL_PATTERNS
+
+#: What a quoted line becomes when it looks like it holds a credential.
+REDACTED = "[REDACTED: credential pattern detected]"
+
+
+def _quoted(line: str) -> str:
+    """A source line as the audit quotes it: trimmed, and scrubbed as the diff is.
+
+    The audit goes into every reviewer's prompt -- to Google too, with agy on -- and
+    these lines come from whole changed files, not only the changed lines the diff
+    holds, so the diff's scrubbing never saw them.
+    """
+    if any(pattern.search(line) for pattern in CREDENTIAL_PATTERNS):
+        return REDACTED
+    return line.strip()[:120]
+
 
 def _should_skip(file: str) -> bool:
     return any(file == p or file.startswith(p) for p in SELF_SKIP_PREFIXES)
@@ -40,7 +60,7 @@ def scan_suspicious_patterns(
                             "file": f,
                             "line": i,
                             "pattern": description,
-                            "text": line.strip()[:120],
+                            "text": _quoted(line),
                         }
                     )
                     break

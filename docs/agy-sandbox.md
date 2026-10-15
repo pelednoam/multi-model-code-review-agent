@@ -42,9 +42,11 @@ convergence loop and the full-mode runner call it.
 - **Host processes** (`--unshare-pid`), and a terminal to inject input into
   (`--new-session`).
 - **Privilege**: agy runs in a user namespace of its own with every capability
-  dropped (`--unshare-user --cap-drop ALL`), checked. Run as root, as in many CI
-  containers, bwrap otherwise keeps all of root's, and a remount would undo every
-  read-only mount.
+  dropped (`--unshare-user --cap-drop ALL`), checked: bwrap otherwise keeps all of
+  root's, and a remount would undo every read-only mount. It does not run as root
+  at all -- the check refuses -- since root inside still owns root's files
+  (`/etc/shadow`, host keys) and can read them; in a CI container that runs as root,
+  run the review as an unprivileged user.
 - **Anything that runs code outside**:
   - every writable socket left reachable, refused by the check rather than looked
     up in a list (docker's, LXD's and Incus's are masked so that they do not cost

@@ -180,7 +180,9 @@ class TestAgyLaunch(AgyCase):
 
         monkeypatch.setattr(reviewers, "print", interrupted, raising=False)
         with pytest.raises(SystemExit):
-            round_ = reviewers._Round("diff", "{}", "", tmp_path, self.BACKENDS)
+            round_ = reviewers._Round(
+                "diff", "{}", "", tmp_path, self.BACKENDS, out_dir=tmp_path
+            )
             reviewers._launch_one(1, reviewers._LENSES[0], round_)
         (proc,) = started
         assert proc.poll() is not None
@@ -197,7 +199,9 @@ class TestAgyLaunch(AgyCase):
         started = self._launch_stub(monkeypatch, ["claude"])
         begun = time.monotonic()
         diff = "+" + "x" * 300_000
-        round_ = reviewers._Round(diff, "{}", "", tmp_path, self.BACKENDS)
+        round_ = reviewers._Round(
+            diff, "{}", "", tmp_path, self.BACKENDS, out_dir=tmp_path
+        )
         tracked = reviewers._launch_one(1, reviewers._LENSES[0], round_)
         elapsed = time.monotonic() - begun
         assert tracked is not None
@@ -409,7 +413,9 @@ class TestAgyLaunch(AgyCase):
         monkeypatch.setattr(reviewers.tempfile, "tempdir", str(tmp_path))
         found = {**self.BACKENDS, "agy": False}
         repo = tmp_path / "repo"
-        round_ = reviewers._Round("d", "{}", "", tmp_path, found, False, repo, tmp_path)
+        round_ = reviewers._Round(
+            "d", "{}", "", tmp_path, found, False, repo, out_dir=tmp_path
+        )
         picked = reviewers._pick_backend(3, round_)
         assert picked is not None and picked.backend == "gemini"
         assert picked.workspace is not None and picked.workspace.is_dir()

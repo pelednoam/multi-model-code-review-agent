@@ -559,6 +559,13 @@ class TestAgySandboxCheck(AgyCase):
         wrap = agy_sandbox.agy_wrapper(tmp_path / "ws", tmp_path / "st", [inner, outer])
         assert wrap.index(str(outer.resolve())) < wrap.index(str(inner.resolve()))
 
+    def test_agy_does_not_run_as_root(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Its capabilities dropped, root inside still owns root's files (/etc/shadow,
+        # host keys) and can read them, with the network open.
+        monkeypatch.setattr(agy_sandbox_check.os, "geteuid", lambda: 0)
+        ok, reason = agy_sandbox_check.agy_is_confined()
+        assert not ok and "running as root" in reason
+
     def test_the_repository_under_review_is_hidden(self, tmp_path: Path) -> None:
         # Outside a home (/srv, a CI checkout) it was readable whole, secrets and all.
         repo = tmp_path / "srv" / "project"

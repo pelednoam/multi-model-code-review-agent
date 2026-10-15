@@ -30,7 +30,9 @@ class TestReviewerProcesses(AgyCase):
         monkeypatch.delenv("MMCRA_SKIP_AGY_SANDBOX_CHECK", raising=False)
         self._launch(monkeypatch, tmp_path)  # installs the fake Popen
         monkeypatch.setattr(reviewers, "agy_reachable", lambda *a: "a session bus")
-        round_ = reviewers._Round("+DIFF", "{}", "ctx", tmp_path, self.BACKENDS)
+        round_ = reviewers._Round(
+            "+DIFF", "{}", "ctx", tmp_path, self.BACKENDS, out_dir=tmp_path
+        )
         tracked = reviewers._launch_one(3, reviewers._LENSES[2], round_)
         assert tracked is not None and tracked[2] == "claude"
         tracked[3].close()
@@ -100,6 +102,28 @@ class TestReviewerProcesses(AgyCase):
                 assert time.monotonic() < deadline
                 time.sleep(0.05)
             assert reviewers._exit_status(proc) == 0
+        finally:
+            reviewers._stop(proc)
+            out_f.close()
+            err_f.close()
+
+    def test_without_waitid_a_finished_reviewers_helpers_are_killed(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Reaped with no group kill, its helper went on writing while the outputs
+        # were published.
+        monkeypatch.delattr(reviewers.os, "waitid", raising=False)
+        cmd = ["sh", "-c", "sleep 300 & echo $! > helper; exit 0"]
+        proc, out_f, err_f = reviewers._spawn(1, cmd, "sh", tmp_path, None, tmp_path)
+        try:
+            deadline = time.monotonic() + 10
+            while reviewers._exit_status(proc) is None:
+                assert time.monotonic() < deadline
+                time.sleep(0.05)
+            helper = int((tmp_path / "helper").read_text())
+            time.sleep(0.2)
+            stat = Path(f"/proc/{helper}/stat")
+            assert not stat.exists() or stat.read_text().split()[2] == "Z"
         finally:
             reviewers._stop(proc)
             out_f.close()

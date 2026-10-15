@@ -21,7 +21,7 @@ from helpers import AGENT_DOC, REPO_ROOT, runner_script, shell_function
 from scripts.review_loop import backends
 from scripts.review_loop import reviewers as reviewers_mod
 from scripts.review_loop.artifacts import describe_outputs, write_artifacts_key
-from scripts.review_loop.claude_tools import claude_denied
+from scripts.review_loop.claude_tools import SECRET_READS, claude_denied
 
 SCRUB_SCRIPT = REPO_ROOT / "scripts" / "scrub_diff.py"
 PREFLIGHT_SCRIPT = REPO_ROOT / "scripts" / "review_preflight.py"
@@ -1960,7 +1960,9 @@ class TestVendoredPathsMatchInstaller:
             if src is None or dst is None:
                 continue
             rel_dst = dst.split("$TARGET/", 1)[1]
-            if rel_dst.endswith("/") and not line.startswith("rsync "):
+            # cp of a directory's contents ("src/.") fills the destination itself.
+            contents = src.endswith("/.")
+            if rel_dst.endswith("/") and not line.startswith("rsync ") and not contents:
                 rel_dst += src.rsplit("/", 1)[-1]
             installed.add(rel_dst.rstrip("/"))
         return installed
@@ -2450,10 +2452,13 @@ class TestRunnerScript:
             + shell_function(runner, "claude_deny")
             + 'claude_deny 2 "$1"\necho "${#CLAUDE_DENY[@]}|${CLAUDE_DENY[*]}"\n'
         )
+        # The credential reads are denied whatever is granted.
+        reads = " ".join(f"Read({path})" for path in SECRET_READS)
         for tools, expected in [
             ("Read Grep Glob", "2|--disallowedTools Edit Write MultiEdit NotebookEdit"
-             " Bash WebFetch WebSearch ReportFindings"),
-            ("Read Edit Write MultiEdit NotebookEdit Bash WebFetch WebSearch ReportFindings", "0|"),
+             f" Bash WebFetch WebSearch ReportFindings {reads}"),
+            ("Read Edit Write MultiEdit NotebookEdit Bash WebFetch WebSearch ReportFindings",
+             f"2|--disallowedTools {reads}"),
         ]:  # fmt: skip
             done = subprocess.run(
                 ["bash", str(script), tools], capture_output=True, text=True, timeout=30
@@ -2467,8 +2472,47 @@ class TestRunnerScript:
         note, denied = done.stdout.strip().split("\n")
         assert note.startswith("R2: note: Bash is granted whole"), done.stdout
         assert denied == (
-            "2|--disallowedTools Edit Write MultiEdit NotebookEdit WebFetch WebSearch ReportFindings"
+            "2|--disallowedTools Edit Write MultiEdit NotebookEdit WebFetch WebSearch"
+            f" ReportFindings {reads}"
         )
+
+    def test_a_claude_reviewer_cannot_read_credentials(self) -> None:
+        # Its reads are not confined to the repository: measured, it read ~/.bashrc.
+        cmd = reviewers_mod._claude_cmd(1)
+        denied = cmd[cmd.index("--disallowedTools") + 1].split()
+        assert "Read(~/.ssh/**)" in denied and "Read(~/.aws/**)" in denied
+        assert claude_denied("Read Grep Glob")[0] == [
+            d for d in denied if not d.startswith("Read(")
+        ]
+
+    def test_the_audit_does_not_quote_a_credential(self, tmp_path: Path) -> None:
+        # Its quoted lines come from whole changed files, which the diff's scrubbing
+        # never saw, and the audit goes into every reviewer's prompt.
+        from scripts.preflight import patterns
+
+        # Built from parts: written out, this line would be redacted from the diff.
+        secret = "pass" + "word = " + repr("hunter2" * 3) + "  # except Exception"
+        assert patterns._quoted(secret) == patterns.REDACTED
+        assert patterns._quoted("    except Exception:  ") == "except Exception:"
+
+    def test_a_codex_that_hangs_drops_its_slot(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # With no deadline, the check held up every reviewer: it runs before any.
+        def hangs() -> tuple[bool, str]:
+            raise subprocess.TimeoutExpired(["codex", "sandbox"], 30)
+
+        monkeypatch.setattr(backends, "codex_is_confined", hangs)
+        monkeypatch.delenv("MMCRA_SKIP_CODEX_SANDBOX_CHECK", raising=False)
+        ok, reason = backends.codex_usable()
+        assert not ok and "did not finish" in reason
+
+    def test_an_inherited_out_dir_is_not_removed(self) -> None:
+        # Cargo and Android builds export OUT_DIR; the runner's early cleanup removed
+        # whatever it named if the runner stopped before setting its own.
+        runner = runner_script()
+        early_trap = runner.index("trap 'rm -rf -- \"${HELPER_ROOT")
+        assert runner.index('OUT_DIR=""') < early_trap
 
     def test_the_loops_claude_reviewer_has_no_mcp_servers(self) -> None:
         cmd = reviewers_mod._claude_cmd(1)
@@ -2617,13 +2661,23 @@ class TestCredentialShapes:
             "postgres://app" + ":hunter2pass" + "@db.internal/prod",
             "redis://" + ":hunter2pass" + "@cache:6379/0",
             "https://u" + ":p" + "@proxy:3128",
+            "postgres://u" + ":Zx9/k+Q==" + "@db/prod",
+            "postgres://u" + ":it's-me" + "@db/prod",
+            "ya" + "29." + "a" * 30,
+            "1/" + "/0" + "a" * 40,
+            "GOC" + "SPX-" + "a" * 28,
+            "hf" + "_" + "A" * 34,
+            "np" + "m_" + "A" * 36,
+            "py" + "pi-AgE" + "A" * 60,
             "AIza" + "S" * 35,
             "github" + "_pat_" + "A" * 40,
             "gh" + "s_" + "a" * 36,
             "sk" + "_live_" + "x" * 24,
             "xo" + "xb-" + "1234567890-abc",
         ],
-        ids=["url-userinfo", "url-no-user", "url-short-password", "google-api-key", "github-fine-grained", "github-app",
+        ids=["url-userinfo", "url-no-user", "url-short-password", "url-slash-password",
+             "url-quote-password", "google-oauth-access", "google-oauth-refresh",
+             "google-client-secret", "huggingface", "npm", "pypi", "google-api-key", "github-fine-grained", "github-app",
              "stripe-live", "slack"],
     )  # fmt: skip
     def test_more_credential_shapes_are_redacted(self, secret: str) -> None:
@@ -2641,7 +2695,10 @@ class TestCredentialShapes:
         assert clock.monotonic() - started < 2
 
     def test_a_url_without_a_password_is_kept(self) -> None:
-        line = "+see https://example.com/a:b and git@github.com:org/repo\n"
+        line = (
+            "+see https://example.com/a:b and git@github.com:org/repo"
+            " and http://host:8080/path?to=a@b\n"
+        )
         assert scrub_diff.scrub_line(line, False) == line
 
 

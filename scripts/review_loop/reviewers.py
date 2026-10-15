@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, NamedTuple
 
@@ -26,7 +26,7 @@ from .agy import (
 )
 from .agy_sandbox import agy_seed_state, agy_wrapper
 from .agy_sandbox_check import agy_reachable
-from .claude_tools import claude_denied
+from .claude_tools import claude_disallowed
 from .config import (
     LATE_RESULT_GRACE,
     POLL_INTERVAL,
@@ -151,7 +151,7 @@ _CLAUDE_TOOLS = "Read Grep Glob"
 
 
 #: What it is denied, which never changes.
-_CLAUDE_DENIED, _ = claude_denied(_CLAUDE_TOOLS)
+_CLAUDE_DENIED = claude_disallowed(_CLAUDE_TOOLS)
 
 
 def _claude_cmd(slot: int) -> list[str]:
@@ -464,14 +464,8 @@ class _Round:
     #: The repository under review, which no reviewer's writable directory may be in.
     repo: Path | None = None
     #: Where the reviewers write while they run: a private directory, published into
-    #: round_dir once all have stopped (``_publish_outputs``). None only in a test
-    #: that launches without one, which then writes into round_dir itself.
-    out_dir: Path | None = None
-
-    @property
-    def writes_to(self) -> Path:
-        """The directory the reviewers write to while they run (``out_dir``)."""
-        return self.out_dir or self.round_dir
+    #: round_dir once all have stopped (``_publish_outputs``).
+    out_dir: Path = field(kw_only=True)
 
 
 class _Picked(NamedTuple):
@@ -522,7 +516,7 @@ def _launch_one(
     if backend in _STDIN_BACKENDS:
         fed = agy_message(prompt) if backend == "agy" else prompt
     proc, out_f, err_f = _spawn(
-        slot, picked.cmd, backend, picked.workspace, fed, round_.writes_to, register
+        slot, picked.cmd, backend, picked.workspace, fed, round_.out_dir, register
     )
     return slot, proc, backend, out_f, err_f
 
@@ -538,7 +532,7 @@ def _pick_backend(slot: int, round_: _Round) -> _Picked | None:
     backends = dict(round_.backends)
     while True:
         choice = _choose_command(
-            slot, prompt_path, round_.writes_to, backends, round_.prefer_hermes
+            slot, prompt_path, round_.out_dir, backends, round_.prefer_hermes
         )
         if choice is None:
             return None
@@ -680,13 +674,19 @@ def _exit_status(proc: subprocess.Popen[str]) -> int | None:
     kill at the end of the round would reach that. Left a zombie until ``_stop``, the
     number stays this run's, and so does everything the kill can reach.
 
-    Where there is no ``os.waitid`` -- macOS before Python 3.13 -- it is reaped as
-    before, and the helpers of a reviewer that exited are left to finish on their own.
+    Where there is no ``os.waitid`` -- macOS before Python 3.13 -- it is reaped, and
+    its group killed in the same breath: the number is free only from the reap, so
+    the kill reaches this run's helpers -- left alone, they went on writing while the
+    outputs were published -- and not, in that instant, anyone else's.
     """
     if proc.returncode is not None:
         return proc.returncode
     if not hasattr(os, "waitid"):
-        return proc.poll()
+        status = proc.poll()
+        if status is not None:
+            with contextlib.suppress(OSError):
+                os.killpg(proc.pid, signal.SIGKILL)
+        return status
     try:
         info = os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
     except ChildProcessError:
@@ -730,8 +730,9 @@ def launch_reviewers(
         try:
             out_dir = _scratch_dir("mmcra-out-")
             round_ = _Round(
-                diff, audit, context, round_dir, backends, prefer_hermes, repo, out_dir
-            )
+                diff, audit, context, round_dir, backends, prefer_hermes, repo,
+                out_dir=out_dir,
+            )  # fmt: skip
             for i, lens_args in enumerate(_LENSES, 1):
                 _launch_one(i, lens_args, round_, procs.append)
             _await_reviewers(procs, out_dir, diff.count("\n") + 1)

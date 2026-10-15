@@ -95,16 +95,30 @@ def _probe(box: _Box, canary: Path, roots: list[Path]) -> dict[str, str]:
         " | tr '\\0' '\\n' | grep -q '^MMCRA_ENV_PROBE=' && echo LEAK",
         **{f"ls {i}": f"ls -A1 {q(str(root))}" for i, root in enumerate(roots)},
     }
-    # Each answer is followed by its exit status, ``key?`` in what this returns: an
-    # answer the probe never reached, or a listing that failed, is not one that found
-    # nothing. A probe cut short says which answer it stopped at, as ``_incomplete``.
-    script = "\n".join(
-        # On a line of its own: an answer need not end in a newline (the canary).
+    said = box.sh(
+        _probe_script(questions, mark), env={**os.environ, "MMCRA_ENV_PROBE": "x"}
+    )
+    return _parse_probe(said, mark, questions)
+
+
+def _probe_script(questions: dict[str, str], mark: str) -> str:
+    """One shell script asking every question, each answer opened by ``mark``.
+
+    Each answer is followed by its exit status: an answer the probe never reached,
+    or a listing that failed, is not one that found nothing. On a line of its own,
+    since an answer need not end in a newline (the canary).
+    """
+    q = shlex.quote
+    return "\n".join(
         f"echo {mark}{key}; {{ {ask}; }} 2>/dev/null;"
         f" status=$?; printf '\\n%s\\n' {q(f'{mark}={key}?')}\"$status\""
         for key, ask in questions.items()
     )
-    said = box.sh(script, env={**os.environ, "MMCRA_ENV_PROBE": "x"})
+
+
+def _parse_probe(said: str, mark: str, questions: dict[str, str]) -> dict[str, str]:
+    """The probe's answers by question, each status as ``key?``, and a probe cut
+    short marked by ``_incomplete``, naming the answer it stopped at."""
     answers: dict[str, list[str]] = {}
     statuses: dict[str, str] = {}
     for line in said.split("\n"):
@@ -442,6 +456,15 @@ def agy_is_confined(also_hide: tuple[Path, ...] = ()) -> tuple[bool, str]:
     This checkout, the working directory and ``also_hide`` (the repository under
     review) are hidden, and shown to be.
     """
+    if os.geteuid() == 0:
+        # Its capabilities dropped, root inside still owns root's files: /etc/shadow,
+        # host keys, whatever is mode 600 under /var/lib -- readable, with the network
+        # open. No mount hides them all.
+        return False, (
+            "agy's sandbox cannot keep root's own files from a process running as"
+            " root; run as an unprivileged user, or set MMCRA_SKIP_AGY_SANDBOX_CHECK=1"
+            " on a disposable host"
+        )
     if shutil.which("bwrap") is None:
         return False, (
             "bwrap (bubblewrap) is not installed, and nothing else can make agy"

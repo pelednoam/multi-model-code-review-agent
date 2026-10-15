@@ -131,13 +131,22 @@ SHAPE_PATTERNS = [
     re.compile(r"(?:sk|rk)_live_[0-9a-zA-Z]{20,}"),
     re.compile(r"xox[abprs]-[0-9A-Za-z-]{10,}"),
     # A password in a URL's userinfo: scheme, "://", user (redis's may be empty),
-    # ":", password, "@" -- in a postgres, redis or proxy URL. The scheme anchored and
-    # bounded, so that a long line is scanned in linear time. Written in two parts, so
-    # that this line is not one.
+    # ":", password, "@" -- in a postgres, redis or proxy URL. A password may hold
+    # ' or / (base64 often has one); a port and a path after it is not a password.
+    # The scheme anchored and bounded, the password too, so that a long line is
+    # scanned in linear time. Written in two parts, so that this line is not one.
     re.compile(
         r"(?<![a-zA-Z0-9+.-])[a-zA-Z][a-zA-Z0-9+.-]{0,31}:"
-        + r"//[^\s/:@'\"]*:[^\s/@'\"]+@"
+        + r"//[^\s/:@\"]*:(?!\d{1,5}/)[^\s@\"]{1,256}@"
     ),
+    # Google's OAuth access and refresh tokens and client secrets, and the package
+    # registries' tokens.
+    re.compile(r"ya29\.[0-9A-Za-z_-]{20,}"),
+    re.compile(r"1//0[0-9A-Za-z_-]{30,}"),
+    re.compile(r"GOCSPX-[0-9A-Za-z_-]{20,}"),
+    re.compile(r"hf_[A-Za-z0-9]{30,}"),
+    re.compile(r"npm_[A-Za-z0-9]{36}"),
+    re.compile(r"pypi-AgE[0-9A-Za-z_-]{50,}"),
     re.compile(r"glpat-[a-zA-Z0-9\-]{20,}"),
     re.compile(r"(?i)DefaultEndpointsProtocol=https;AccountName="),
     re.compile(r'"type"\s*:\s*"service_account"'),

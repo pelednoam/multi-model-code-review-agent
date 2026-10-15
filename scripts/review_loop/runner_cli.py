@@ -28,7 +28,7 @@ from .agy import (
 from .agy_sandbox import agy_seed_state, agy_wrapper_parts
 from .agy_sandbox_check import agy_reachable
 from .backends import codex_usable, detect_backends
-from .claude_tools import claude_denied
+from .claude_tools import claude_denied, claude_disallowed
 from .config import env_flag
 from .findings import validate_result
 from .results import (
@@ -177,17 +177,18 @@ def _extract(raw: str, out: str, slot: str, backend: str = "", model: str = "") 
 def _claude_deny(tools: str) -> int:
     """Print what a claude reviewer allowed ``tools`` is denied, space-separated.
 
-    ``claude_tools.claude_denied``. A tool granted with a scope is granted whole, as far
-    as the deny list goes, which stderr says.
+    ``claude_tools.claude_disallowed``: the tools it is not granted, and reads of the
+    credential paths no grant lifts. A tool granted with a scope is granted whole, as
+    far as the deny list goes, which stderr says.
     """
-    denied, scoped = claude_denied(tools)
+    _, scoped = claude_denied(tools)
     for tool in scoped:
         print(
             f"{tool} is granted whole: its scope holds only while claude asks before"
             " each use, which settings can turn off",
             file=sys.stderr,
         )
-    print(" ".join(denied))
+    print(" ".join(claude_disallowed(tools)))
     return 0
 
 
@@ -225,15 +226,30 @@ _COMMANDS: dict[str, Callable[..., int]] = {
 }
 
 
+def _usage(name: str) -> str:
+    """``name`` and its arguments in order, optional ones in brackets: bash passes
+    them by position, so the order is the interface."""
+    params = inspect.signature(_COMMANDS[name]).parameters.values()
+    shown = [
+        p.name.upper()
+        if p.default is inspect.Parameter.empty
+        else f"[{p.name.upper()}]"
+        for p in params
+    ]
+    return " ".join([name, *shown])
+
+
 def main(argv: list[str]) -> int:
     """Run the command ``argv`` names; its exit status, or 2 for a usage error."""
     command = _COMMANDS.get(argv[0]) if argv else None
     if command is None:
-        print(f"usage: runner_cli {{{','.join(_COMMANDS)}}} [args...]", file=sys.stderr)
+        print("usage: runner_cli COMMAND [ARGS...], one of:", file=sys.stderr)
+        for name in _COMMANDS:
+            print(f"  {_usage(name)}", file=sys.stderr)
         return 2
     try:
         inspect.signature(command).bind(*argv[1:])
     except TypeError as exc:
-        print(f"runner_cli {argv[0]}: {exc}", file=sys.stderr)
+        print(f"runner_cli {argv[0]}: {exc}; usage: {_usage(argv[0])}", file=sys.stderr)
         return 2
     return command(*argv[1:])

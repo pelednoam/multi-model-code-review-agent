@@ -39,8 +39,11 @@ if command -v rsync >/dev/null 2>&1; then
   rsync -a --exclude __pycache__ "$REPO_ROOT/scripts/preflight/"   "$TARGET/scripts/preflight/"
   rsync -a --exclude __pycache__ "$REPO_ROOT/scripts/review_loop/" "$TARGET/scripts/review_loop/"
 else
-  cp -R "$REPO_ROOT/scripts/preflight"   "$TARGET/scripts/preflight"
-  cp -R "$REPO_ROOT/scripts/review_loop" "$TARGET/scripts/review_loop"
+  # Into the directories, not onto them: where one exists from an earlier install,
+  # `cp -R dir target/dir` puts the new copy inside the old one.
+  mkdir -p "$TARGET/scripts/preflight" "$TARGET/scripts/review_loop"
+  cp -R "$REPO_ROOT/scripts/preflight/."   "$TARGET/scripts/preflight/"
+  cp -R "$REPO_ROOT/scripts/review_loop/." "$TARGET/scripts/review_loop/"
   find "$TARGET/scripts/preflight" "$TARGET/scripts/review_loop" \
     -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 fi

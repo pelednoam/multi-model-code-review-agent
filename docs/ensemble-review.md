@@ -1,6 +1,6 @@
 ---
 name: ensemble-review
-description: Code review with preflight audit. Two modes -- quick (free, Claude Code subagents, clean context) and full (4 parallel reviewers across providers: local CLIs by default, free beyond existing subscriptions; Hermes/Bedrock when opted in). Use after completing a feature, before merge.
+description: Code review with preflight audit. Modes -- quick (free, Claude Code subagents, clean context) and full (4 parallel reviewers across providers: local CLIs by default, free beyond existing subscriptions; Hermes/Bedrock when opted in); the convergence loop runs full mode until no blocking findings remain. Use after completing a feature, before merge.
 tools: Bash, Read, Grep, Glob, Write, Agent
 model: sonnet
 ---
@@ -492,12 +492,15 @@ REVIEW_ROOT="$PWD"
 # with a file tool (hermes -t file --yolo) can write the checkout, and the runner goes on running
 # this code -- extraction among it -- after the reviewers have.
 # Links followed (-L): copied as links, a module could still be read from the checkout.
+HELPER_ROOT=""
 HELPER_ROOT="$(mktemp -d)" && HELPER_ROOT="$(cd "$HELPER_ROOT" && pwd -P)" \
   && mkdir -p "$HELPER_ROOT/scripts" "$HELPER_ROOT/docs" \
   && cp -RL "$REVIEW_ROOT/scripts/review_loop" "$HELPER_ROOT/scripts/" \
   && cp -L "$REVIEW_ROOT/docs/ensemble_review_result_schema.json" "$HELPER_ROOT/docs/" \
   || { echo "ERROR: could not copy the runner's helpers"; rm -rf -- "${HELPER_ROOT:-}"; exit 1; }
 # Removed by finish_round from the moment it is set as the EXIT trap; until then, by this.
+# OUT_DIR emptied first: one inherited from the environment (Cargo sets one) would be removed.
+OUT_DIR=""
 trap 'rm -rf -- "${HELPER_ROOT:-}" "${OUT_DIR:-}"' EXIT
 review_helper() {
   python3 -I "$HELPER_ROOT/scripts/review_loop/runner_entry.py" "$@"
@@ -1142,7 +1145,7 @@ Report what the status lines say rather than guessing. "Three of four are still 
 thing to tell a waiting human; silence is not.
 
 
-**Tool restriction**: Hermes uses `-t file --yolo`: the file toolset, which can write -- the data stays in your AWS account, but writes are not prevented, only reported by the convergence loop's tamper check -- full mode does not check. Claude CLI: `--allowedTools "Read Grep Glob"` plus `--disallowedTools` for every tool that writes, runs a command or reaches the network, `--strict-mcp-config` (no MCP servers), `--setting-sources user` (no project hooks) and `--permission-mode dontAsk`, since `--allowedTools` alone does not confine (a slot given writing tools on purpose with `REVIEWER_TOOLS_N` has only those taken off the deny list). Codex: both paths pin `-s read-only` and `approvals_reviewer="user"` and canary-test them before use. Gemini uses `--approval-mode plan` (read-only). agy runs under bubblewrap, verified before use (what it closes and what it does not: docs/agy-sandbox.md), plus `--sandbox --disable-slash-commands`. Extraction errors logged to `$REVIEW_TMP/extract-result-N.err`.
+**Tool restriction**: Hermes uses `-t file --yolo`: the file toolset, which can write -- the data stays in your AWS account, but writes are not prevented, only reported by the convergence loop's tamper check -- full mode does not check. Claude CLI: `--allowedTools "Read Grep Glob"` plus `--disallowedTools` for every tool that writes, runs a command or reaches the network, `--strict-mcp-config` (no MCP servers), `--setting-sources user` (no project hooks) and `--permission-mode dontAsk`, and reads of well-known credential locations denied (`~/.ssh`, `~/.aws`, the CLIs' own sign-ins, environment files; `claude_tools.SECRET_READS`) -- its reads are otherwise not confined to the repository, and that list is not complete -- since `--allowedTools` alone does not confine (a slot given writing tools on purpose with `REVIEWER_TOOLS_N` has only those taken off the deny list). Codex: both paths pin `-s read-only` and `approvals_reviewer="user"` and canary-test them before use. Gemini uses `--approval-mode plan` (read-only). agy runs under bubblewrap, verified before use (what it closes and what it does not: docs/agy-sandbox.md), plus `--sandbox --disable-slash-commands`. Extraction errors logged to `$REVIEW_TMP/extract-result-N.err`.
 
 ## 7. Collect and validate results
 
@@ -1353,7 +1356,7 @@ concluding anything from a probe, and never suppress its output.
 | Hermes+Bedrock | Your AWS account | Data: best (stays in your AWS account). Tools: `-t file --yolo`, which can write; only the convergence loop's tamper check reports writes (full mode does not check) | Bedrock API pricing |
 | Claude CLI | Anthropic infrastructure | Good (`--allowedTools` + `--disallowedTools`) | Claude subscription |
 | Codex CLI | OpenAI infrastructure | Good (sandbox) | ChatGPT subscription |
-| Gemini CLI | Google infrastructure | Good (`--approval-mode plan`) | Google AI Studio (free tier) |
+| Gemini CLI | Google infrastructure | Weak: read-only by policy (`--approval-mode plan`), not sandboxed; it can read your home directory | Google AI Studio (free tier) |
 | Antigravity CLI (agy) | Google infrastructure | Good (bwrap: filesystem read-only; home, /tmp, /run and the environment hidden; verified at launch) | Google AI plan |
 
 - **Quick mode**: stays within Anthropic (Claude Code subagents).

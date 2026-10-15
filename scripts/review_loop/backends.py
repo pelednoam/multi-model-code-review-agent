@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -47,7 +48,11 @@ def codex_is_confined() -> tuple[bool, str]:
         canary.write_text("original", encoding="utf-8")
 
         # 1. does the sandbox run anything at all?
-        ran = run(["codex", "sandbox", "--", "sh", "-c", "echo SANDBOX_OK"], cwd=Path(tmp))
+        ran = run(
+            ["codex", "sandbox", "--", "sh", "-c", "echo SANDBOX_OK"],
+            cwd=Path(tmp),
+            timeout=_CODEX_CHECK_TIMEOUT,
+        )
         if "SANDBOX_OK" not in (ran.stdout or ""):
             detail = ((ran.stderr or ran.stdout or "").strip().splitlines() or [""])[-1][:200]
             hint = ""
@@ -62,12 +67,20 @@ def codex_is_confined() -> tuple[bool, str]:
         # 2. can it read? a reviewer that cannot read is useless even if it is safe.
         # The path as an argument, never spliced into the script: a TMPDIR with a space
         # in it split it in two, and a shell character in it would run.
-        rd = run(_codex_sh('cat -- "$1"', canary), cwd=Path(tmp))
+        rd = run(
+            _codex_sh('cat -- "$1"', canary),
+            cwd=Path(tmp),
+            timeout=_CODEX_CHECK_TIMEOUT,
+        )
         if "original" not in (rd.stdout or ""):
             return False, "codex sandbox could not read a file; a reviewer needs read access"
 
         # 3. the one that matters: is a write REFUSED?
-        run(_codex_sh('echo changed > "$1"', canary), cwd=Path(tmp))
+        run(
+            _codex_sh('echo changed > "$1"', canary),
+            cwd=Path(tmp),
+            timeout=_CODEX_CHECK_TIMEOUT,
+        )
         if canary.read_text(encoding="utf-8").strip() != "original":
             return False, (
                 "codex sandbox ALLOWED a write -- it is not read-only on this host."
@@ -85,7 +98,18 @@ def codex_usable() -> tuple[bool, str]:
     """
     if env_flag("MMCRA_SKIP_CODEX_SANDBOX_CHECK"):
         return True, "sandbox check skipped (MMCRA_SKIP_CODEX_SANDBOX_CHECK)"
-    return codex_is_confined()
+    try:
+        return codex_is_confined()
+    except subprocess.TimeoutExpired:
+        # A codex that hangs drops its slot; with no deadline it held up every
+        # reviewer, since the check runs before any of them starts.
+        return False, f"codex sandbox check did not finish in {_CODEX_CHECK_TIMEOUT}s"
+    except OSError as exc:
+        return False, f"codex sandbox check failed ({exc})"
+
+
+#: How long each step of codex's sandbox check may take.
+_CODEX_CHECK_TIMEOUT = 30
 
 
 def _codex_sh(script: str, path: Path) -> list[str]:

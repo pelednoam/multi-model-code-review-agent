@@ -13,13 +13,12 @@ Claude Code session) finds the findings without having to read the source.
 
 from __future__ import annotations
 
-import textwrap
-
 import json
-
+import re
+import textwrap
 from typing import TYPE_CHECKING
 
-from .backends import agy_result, ran_agy
+from .agy import agy_result, ran_agy
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -33,9 +32,10 @@ Read `result-*.json`. Everything else is intermediate.
 | File | What it is |
 |---|---|
 | `result-N.json` | **The findings.** One validated object per reviewer, matching `docs/ensemble_review_result_schema.json`. This is what you want. |
-| `raw-N.txt` | Whatever the CLI printed on stdout, before parsing. Empty for the codex slot on a *successful* run — see below. |
+| `raw-N.txt` | Whatever the CLI printed on stdout, before parsing. Empty for the codex slot on a *successful* run — see below. For agy, one stream-json event per line; the review is the final `result` event's `structured_output`, and only a turn whose status is `SUCCESS` counts. |
 | `stderr-N.txt` | Diagnostics. Read this when a slot is missing a `result-N.json`. |
-| `prompt-N.txt` | The exact prompt that reviewer received. |
+| `prompt-N.txt` | The exact prompt that reviewer received. For agy it begins with a preamble telling it to call no tools. |
+| `backend-N.txt` | Which CLI ran slot N (`agy`, `claude`, `codex`, ...). Only a slot marked `agy` has its `raw-N.txt` read as agy's stream-json; the same shape from any other reviewer is ignored. |
 | `diff.patch` | The scrubbed diff every reviewer saw. |
 | `audit.json` | Preflight audit (git state, coverage, patterns) included in each prompt. |
 
@@ -96,6 +96,16 @@ def describe_outputs(round_dir: Path, n_slots: int = 4) -> str:
 #: see whether it was a real review; the whole thing is in raw-N.txt.
 _SALVAGE_CHARS = 600
 
+#: Terminal control characters, which a reply decoded from JSON can carry raw: an
+#: escape sequence can rewrite or hide the lines above it, retitle the window, or on
+#: some terminals write the clipboard. A reviewer's text is shaped by the diff it read.
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def _printable(text: str) -> str:
+    """``text`` with its control characters made visible as ``?``."""
+    return _CONTROL.sub("?", text)
+
 
 def _explain_missing(round_dir: Path, slot: int) -> list[str]:
     """Say why a slot produced no findings, and show what it did produce.
@@ -138,10 +148,15 @@ def _agy_failure(round_dir: Path, slot: int) -> str:
     if agy is None or agy.get("status") == "SUCCESS":
         return ""
     error = str(agy.get("error") or "no error given").strip()[:_SALVAGE_CHARS]
-    return f"status {agy.get('status')}: {error}"
+    return _printable(f"status {agy.get('status')}: {error}")
 
 
 def _salvage(round_dir: Path, slot: int) -> str:
+    """Whatever this reviewer wrote, unwrapped as far as it can be, safe to print."""
+    return _printable(_unwrapped(round_dir, slot))
+
+
+def _unwrapped(round_dir: Path, slot: int) -> str:
     """Whatever this reviewer wrote, unwrapped as far as it can be."""
     raw = round_dir / f"raw-{slot}.txt"
     if not raw.exists():

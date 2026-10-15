@@ -5,7 +5,7 @@ from __future__ import annotations
 import subprocess
 from typing import TYPE_CHECKING
 
-from .backends import _run
+from .proc import _run
 from .config import TEST_TIMEOUT, interpreter, project_gate
 
 if TYPE_CHECKING:

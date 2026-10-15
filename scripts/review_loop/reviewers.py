@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import atexit
-import json
+import contextlib
 import os
 import shutil
 import signal
@@ -12,19 +12,21 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
-from typing import IO
+from typing import IO, TYPE_CHECKING
 
-from .backends import (
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+from .agy import (
     AGY_EGRESS,
     AGY_PREAMBLE,
     agy_command,
-    agy_enabled,
+    agy_message,
     agy_model,
-    agy_review_message,
     agy_sandbox,
+    agy_schema,
     agy_seed_state,
     agy_unsandboxed,
-    sigterm_unwinds,
 )
 from .config import (
     LATE_RESULT_GRACE,
@@ -34,6 +36,7 @@ from .config import (
     RESULT_SCHEMA,
     reviewer_timeout,
 )
+from .proc import signals_unwind
 
 ReviewerProc = tuple[int, "subprocess.Popen[str]", str, IO[str], IO[str]]
 
@@ -196,12 +199,7 @@ def _agy_cmd(model: str) -> list[str]:
     was answers the parser could not use; with ``--json-schema`` the shape is enforced
     by the CLI and arrives as ``structured_output``, not just requested in the prompt.
     """
-    if not RESULT_SCHEMA.is_file():
-        return agy_command(model)
-    # Inline, not a path: the sandbox hides the home directory and /tmp, where a
-    # checkout usually lives, so the file would not exist for agy.
-    schema = json.dumps(json.loads(RESULT_SCHEMA.read_text(encoding="utf-8")))
-    return agy_command(model, "--json-schema", schema)
+    return agy_command(model, "--json-schema", agy_schema(RESULT_SCHEMA))
 
 
 def _agy_workspace(repo: Path | None = None) -> Path | None:
@@ -209,9 +207,10 @@ def _agy_workspace(repo: Path | None = None) -> Path | None:
 
     The workspace is the one place the sandbox leaves writable, so it must not be the
     repository under review (``repo``, from ``--repo``), this agent's own checkout, or
-    the directory the loop was started from -- nor inside any of them. ``mkdtemp`` follows TMPDIR, which a project can point at a
-    directory of its own, so the result is checked rather than assumed. Everything agy
-    needs is in the prompt; empty also leaves nothing to wander through.
+    the directory the loop was started from -- nor inside any of them. ``mkdtemp``
+    follows TMPDIR, which a project can point at a directory of its own, so the result
+    is checked rather than assumed. Everything agy needs is in the prompt; empty also
+    leaves nothing to wander through.
     """
     try:
         path = _scratch_dir("mmcra-agy-")
@@ -330,18 +329,19 @@ def _choose_command(
             str(result_path),
             "-",
         ], None
-    if slot == 3 and agy_enabled() and backends.get("agy"):
+    if slot == 3 and backends.get("agy"):
         # Ahead of gemini: both are Google, and this one can be held to the schema.
-        # backends["agy"] is only true once its sandbox check has passed, and
-        # agy_model() picks once per run, so every round runs the same model.
+        # backends["agy"] is only true once agy is switched on and its sandbox check
+        # has passed, and agy_model() picks once per run, so every round runs the
+        # same model.
         model = agy_model()
         if model:
             # The schema is read from this checkout, which may be the tree under
-            # review; a broken one costs slot 3 its backend, not the round.
+            # review; a missing or broken one costs slot 3 its backend, not the round.
             try:
                 return _agy_cmd(model), model
             except (OSError, ValueError) as exc:
-                print(f"  agy: result schema unreadable ({exc}); trying next backend")
+                print(f"  agy: result schema unusable ({exc}); trying next backend")
     if slot == 3 and _gemini_enabled() and backends["gemini"]:
         # Opt-in, because in practice it does not review. Across eight rounds
         # on a real project this slot returned zero findings every single time,
@@ -387,94 +387,118 @@ def _launch_one(
     prefer_hermes: bool = False,
     repo: Path | None = None,
 ) -> ReviewerProc | None:
-    """Launch a single reviewer subprocess. Return tracking tuple or None."""
-    lens, focus, rv, model_label = lens_args
-    prompt = build_reviewer_prompt(lens, focus, rv, model_label, diff, audit, context)
-    prompt_path = round_dir / f"prompt-{slot}.txt"
-    prompt_path.write_text(prompt)
+    """Launch a single reviewer subprocess. Return tracking tuple or None.
 
-    choice = _choose_command(slot, prompt_path, round_dir, backends, prefer_hermes)
-    if choice is None:
-        print(f"  R{slot}: SKIPPED (no backend)")
-        return None
-    cmd, rebuild_label = choice
-    if rebuild_label is not None:
+    If agy is chosen but cannot be set up, the slot falls through to its next
+    backend, as the routing tables say -- an empty slot 3 every round never converges.
+    """
+    lens, focus, rv, model_label = lens_args
+    prompt_path = round_dir / f"prompt-{slot}.txt"
+    workspace: Path | None = None
+    while True:
         prompt = build_reviewer_prompt(
-            lens, focus, rv, rebuild_label, diff, audit, context
+            lens, focus, rv, model_label, diff, audit, context
         )
         prompt_path.write_text(prompt)
-
-    backend = cmd[0]
-    workspace: Path | None = None
-    if backend == "agy":
-        # If agy cannot be set up, the slot falls through to its next backend, as
-        # the routing tables say -- an empty slot 3 every round never converges.
-        rest = {**backends, "agy": False}
-        workspace = _agy_workspace(repo)
-        if workspace is None:
-            print(f"  R{slot}: agy has no workspace outside the repo (see TMPDIR)")
-            return _launch_one(slot, lens_args, diff, audit, context, round_dir,
-                               rest, prefer_hermes, repo)  # fmt: skip
-        if not agy_unsandboxed():
-            try:
-                state = agy_seed_state(_scratch_dir("mmcra-agy-state-"))
-            except OSError as exc:
-                print(f"  R{slot}: could not prepare agy's state ({exc})")
-                return _launch_one(slot, lens_args, diff, audit, context, round_dir,
-                                   rest, prefer_hermes, repo)  # fmt: skip
-            cmd = [*agy_sandbox(workspace, state), *cmd]
-        # What agy is actually sent, so the prompt file stays the record of it.
-        prompt_path.write_text(AGY_PREAMBLE + prompt)
-        # On by default, so said whenever it runs: this is where the diff leaves.
-        print(f"  R{slot}: {AGY_EGRESS}")
+        choice = _choose_command(slot, prompt_path, round_dir, backends, prefer_hermes)
+        if choice is None:
+            print(f"  R{slot}: SKIPPED (no backend)")
+            return None
+        cmd, label = choice
+        if label is not None:
+            prompt = build_reviewer_prompt(lens, focus, rv, label, diff, audit, context)
+        backend = cmd[0]  # before any wrapper: the CLI that answers, not env or bwrap
+        if backend != "agy":
+            break
+        prepared = _prepare_agy(slot, cmd, repo)
+        if prepared is not None:
+            cmd, workspace = prepared
+            # agy is told to call no tools; what it is sent is what the file records.
+            prompt = AGY_PREAMBLE + prompt
+            # On by default, so said whenever it runs: this is where the diff leaves.
+            print(f"  R{slot}: {AGY_EGRESS}")
+            break
+        backends = {**backends, "agy": False}
+    prompt_path.write_text(prompt)
 
     # Which backend answered, so its output is parsed as that backend's: a stream
     # that merely looks like agy's, from another reviewer, is not agy's verdict.
     (round_dir / f"backend-{slot}.txt").write_text(backend)
-    # The input as a file, not a pipe: a pipe holds 64 KB, so a large prompt
-    # blocked the launch loop until the reviewer read it -- forever, if it never
-    # did, with the deadline not yet started -- and one that exited unread raised
-    # BrokenPipeError. Unlinked already; the reviewer holds the only reference.
-    feed = None
+    fed = None
     if backend in _stdin_backends():
-        feed = tempfile.TemporaryFile("w+", encoding="utf-8")  # noqa: SIM115
-        feed.write(agy_review_message(prompt) if backend == "agy" else prompt)
-        feed.seek(0)
-    # The Popen handles intentionally outlive these open() calls; they are
-    # closed in launch_reviewers' wait loop after the subprocess finishes.
-    out_f = open(round_dir / f"raw-{slot}.txt", "w", encoding="utf-8", errors="replace")  # noqa: SIM115
-    err_f = open(
-        round_dir / f"stderr-{slot}.txt", "w", encoding="utf-8", errors="replace"
-    )  # noqa: SIM115
-    proc: subprocess.Popen[str] | None = None
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=workspace,
-            stdin=feed,
-            stdout=out_f,
-            stderr=err_f,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            # Its own process group, so a timeout can take down the helpers a CLI
-            # started rather than orphaning them to finish unread.
-            start_new_session=True,
-        )
+        fed = agy_message(prompt) if backend == "agy" else prompt
+    # Until the tuple is returned the caller cannot clean this reviewer up, so an
+    # interrupt in here -- SIGTERM is one -- unwinds through ``failed``. The output
+    # handles outlive this function on success; launch_reviewers closes them.
+    with contextlib.ExitStack() as failed:
+        out_f = failed.enter_context(_output(round_dir / f"raw-{slot}.txt"))
+        err_f = failed.enter_context(_output(round_dir / f"stderr-{slot}.txt"))
+        with _feed(fed) as feed:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=workspace,
+                stdin=feed,
+                stdout=out_f,
+                stderr=err_f,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                # Its own process group, so a timeout can take down the helpers a CLI
+                # started rather than orphaning them to finish unread.
+                start_new_session=True,
+            )
+        failed.callback(_stop, proc)
         print(f"  R{slot}: launched via {backend}")
-    except BaseException:
-        # Until the tuple below is returned, the caller cannot clean this reviewer
-        # up, so an interrupt in here -- SIGTERM is one -- has to.
-        if proc is not None:
-            _kill_group(proc)
-            proc.wait()
-        out_f.close()
-        err_f.close()
-        raise
-    finally:
-        if feed is not None:
-            feed.close()
+        failed.pop_all()
     return slot, proc, backend, out_f, err_f
+
+
+def _prepare_agy(
+    slot: int, cmd: list[str], repo: Path | None
+) -> tuple[list[str], Path] | None:
+    """agy's command inside its sandbox, and its workspace -- or None, saying why."""
+    workspace = _agy_workspace(repo)
+    if workspace is None:
+        print(f"  R{slot}: agy has no workspace outside the repo (see TMPDIR)")
+        return None
+    if agy_unsandboxed():
+        return cmd, workspace
+    try:
+        state = agy_seed_state(_scratch_dir("mmcra-agy-state-"))
+    except OSError as exc:
+        print(f"  R{slot}: could not prepare agy's state ({exc})")
+        return None
+    return [*agy_sandbox(workspace, state), *cmd], workspace
+
+
+def _output(path: Path) -> IO[str]:
+    """A reviewer's output file, open for it to write."""
+    return open(path, "w", encoding="utf-8", errors="replace")  # noqa: SIM115
+
+
+@contextlib.contextmanager
+def _feed(text: str | None) -> Iterator[IO[str] | None]:
+    """``text`` as a reviewer's stdin: an unlinked file, closed once it is handed over.
+
+    A file, not a pipe: a pipe holds 64 KB, so a large prompt blocked the launch loop
+    until the reviewer read it -- forever, if it never did, with the deadline not yet
+    started -- and one that exited unread raised BrokenPipeError.
+    """
+    if text is None:
+        yield None
+        return
+    with tempfile.TemporaryFile("w+", encoding="utf-8") as feed:
+        feed.write(text)
+        feed.seek(0)
+        yield feed
+
+
+def _stop(proc: subprocess.Popen[str]) -> None:
+    """Kill a reviewer and wait for it, but not forever: a process stuck in the kernel
+    ignores even SIGKILL, and shutdown must not hang on it."""
+    _kill_group(proc)
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        proc.wait(timeout=10)
 
 
 def launch_reviewers(
@@ -498,9 +522,9 @@ def launch_reviewers(
     wrong as often as it is right.
     """
     procs: list[ReviewerProc] = []
-    # A plain SIGTERM would skip the finally below, leaving the reviewers running
-    # and agy's token copy on disk.
-    with sigterm_unwinds():
+    # A plain SIGTERM or SIGHUP would skip the finally below, leaving the reviewers
+    # running and agy's token copy on disk.
+    with signals_unwind():
         try:
             for i, lens_args in enumerate(_LENSES, 1):
                 tracked = _launch_one(

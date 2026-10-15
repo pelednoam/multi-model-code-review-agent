@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
-from .backends import agy_result, ran_agy
+from .agy import agy_result, ran_agy
 from .findings import validate_result
 
 if TYPE_CHECKING:

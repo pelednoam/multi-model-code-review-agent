@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from .backends import _run
+from .proc import _run
 
 if TYPE_CHECKING:
     from pathlib import Path

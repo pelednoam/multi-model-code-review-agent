@@ -57,7 +57,7 @@ mode" below.
 
 # Choosing the mode
 
-- **Quick mode** (default): spawns 2 Claude Code subagents (Opus spec-contract + Sonnet correctness) with clean context. Free, ~30 seconds. Use for every commit, routine changes, rapid iteration. NOTE: quick mode uses the parent Claude Code session's API allocation for the subagents (via the `Agent()` tool) -- not the local `claude` / `codex` / `gemini` CLIs. For local-CLI reviewers, the user must say "full review".
+- **Quick mode** (default): spawns 2 Claude Code subagents (Opus spec-contract + Sonnet correctness) with clean context. Free, ~30 seconds. Use for every commit, routine changes, rapid iteration. NOTE: quick mode uses the parent Claude Code session's API allocation for the subagents (via the `Agent()` tool) -- not the local `claude` / `codex` / `agy` / `gemini` CLIs. For local-CLI reviewers, the user must say "full review".
 - **Full mode**: spawns 4 parallel reviewer subprocesses across providers. Free beyond existing subscriptions when local CLIs (`claude`, `codex`, `agy` or `gemini`) are installed and used. ~3-5 minutes. Use for pre-merge gates, high-stakes changes.
 
 If the user says "quick review", "review this", or just "ensemble review" -- use quick mode. Before spawning the quick-mode subagents, print one line: *"Quick mode (parent Claude Code's API allocation). Say 'full review' to use local CLIs instead."*
@@ -76,31 +76,24 @@ HAS_CLAUDE=false; command -v claude &>/dev/null && HAS_CLAUDE=true
 HAS_CODEX=false;  command -v codex  &>/dev/null && HAS_CODEX=true
 HAS_GEMINI=false; command -v gemini &>/dev/null && HAS_GEMINI=true
 
-# codex: only once its sandbox is shown to refuse a write (no model call), as in the convergence
-# loop. MMCRA_SKIP_CODEX_SANDBOX_CHECK=1 skips it on a host that is already a sandbox.
-if $HAS_CODEX && [ -z "${MMCRA_SKIP_CODEX_SANDBOX_CHECK:-}" ]; then
-  python3 -I -c 'import sys
-sys.path.insert(0, sys.argv[1])
-from scripts.review_loop.backends import codex_is_confined
-ok, why = codex_is_confined()
-print("  codex:", why if ok else "DISABLED for review -- " + why, file=sys.stderr)
-sys.exit(0 if ok else 1)' "$PWD" || HAS_CODEX=false
-fi
+# The convergence loop's own checks, through its one entry point for bash
+# (scripts/review_loop/runner_cli.py), so the two paths cannot disagree about what is safe to use.
+review_helper() {
+  python3 -I -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); from scripts.review_loop.runner_cli import main; sys.exit(main(sys.argv[1:]))' "$PWD" "$@"
+}
 
-# agy (Antigravity CLI): on wherever it is installed; REVIEW_USE_AGY=0 switches it off. The model is AGY_MODEL if set, else the best
-# Gemini model `agy models` lists for this sign-in (newest version, then Pro/Argon over Flash over
-# Lite, then highest effort) -- picked fresh each run, so a newer model is used once the plan has it.
-# Only true once the sandbox check has passed (no model call) -- the same check the convergence
-# loop runs, so the two paths cannot disagree about whether agy is safe to use. Status lines go to
-# stderr; the model it settled on is the only thing on stdout.
+# codex: only once its sandbox is shown to refuse a write (no model call). MMCRA_SKIP_CODEX_SANDBOX_CHECK=1
+# (or true/yes/on -- not 0) skips the check on a host that is already a sandbox.
+if $HAS_CODEX; then review_helper codex-check || HAS_CODEX=false; fi
+
+# agy (Antigravity CLI): on wherever it is installed; REVIEW_USE_AGY=0 switches it off. The model is
+# AGY_MODEL if set, else the best Gemini model `agy models` lists for this sign-in (newest version,
+# then Pro/Argon over Flash over Lite, then highest effort) -- picked fresh each run, so a newer
+# model is used once the plan has it. Only true once the sandbox check has passed (no model call).
+# Status lines go to stderr; the model it settled on is the only thing on stdout.
 HAS_AGY=false
 if [ "${REVIEW_USE_AGY:-1}" != "0" ] && command -v agy &>/dev/null; then
-  AGY_MODEL="$(python3 -I -c 'import contextlib, sys
-sys.path.insert(0, sys.argv[1])
-from scripts.review_loop.backends import agy_model, detect_backends
-with contextlib.redirect_stdout(sys.stderr):
-    ok = detect_backends(verify_codex=False)["agy"]
-print(agy_model() if ok else "")' "$PWD")"
+  AGY_MODEL="$(review_helper agy-detect)"
   [ -n "$AGY_MODEL" ] && HAS_AGY=true
 fi
 
@@ -124,7 +117,7 @@ Default precedence (PREFER_HERMES=false):
 |---|---|---|---|
 | Security (Opus) | Claude CLI opus (free) | Hermes Opus (Bedrock, paid) | -- |
 | Correctness | Codex CLI GPT-5.5 (free) | Claude CLI haiku (free) | Hermes Haiku (Bedrock) |
-| Readability | agy (verified) or Gemini CLI | Claude CLI sonnet (free) | Hermes Sonnet (Bedrock) |
+| Readability | agy (sandboxed), else Gemini CLI (in the loop: `REVIEW_USE_GEMINI=1`) | Claude CLI sonnet (free) | Hermes Sonnet (Bedrock) |
 | Spec-contract (Opus) | Claude CLI opus (free) | Hermes Opus (Bedrock, paid) | -- |
 
 Bedrock opt-in precedence (PREFER_HERMES=true), used for regulated codebases that need data-at-rest in your AWS account:
@@ -133,7 +126,7 @@ Bedrock opt-in precedence (PREFER_HERMES=true), used for regulated codebases tha
 |---|---|---|---|
 | Security (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
 | Correctness | Hermes Haiku (Bedrock) | Codex CLI GPT-5.5 (free) | Claude CLI haiku (free) |
-| Readability | Hermes Sonnet (Bedrock) | agy (verified) or Gemini CLI | Claude CLI sonnet (free) |
+| Readability | Hermes Sonnet (Bedrock) | agy (sandboxed), else Gemini CLI (in the loop: `REVIEW_USE_GEMINI=1`) | Claude CLI sonnet (free) |
 | Spec-contract (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
 
 **Why local CLIs first by default**: free (uses existing subscriptions), reliable auth (each CLI manages its own OAuth), and for most projects (open-source, non-regulated) there's no real value to paid Bedrock routing.
@@ -397,7 +390,7 @@ Lens: off-by-one, null paths, shape/dtype mismatches, contract violations, logic
 
 **Coverage gaps**: when the audit JSON contains a non-empty `coverage_gaps` array, this reviewer MUST propose specific test cases for each uncovered line/branch. Each such finding should have `category: "test"` and `suggested_fix` containing the actual test code (function name, inputs, assertions) -- not a description. The merge agent will apply these tests verbatim, so they must be runnable as-is.
 
-### Reviewer 3 -- Readability, maintainability & performance (agy/Gemini by default; Sonnet 4.6 via Bedrock when opted in)
+### Reviewer 3 -- Readability, maintainability & performance (agy by default, else Gemini or Claude Sonnet; Sonnet 4.6 via Bedrock when opted in)
 
 Output: `$REVIEW_TMP/result-3.json`
 
@@ -449,6 +442,16 @@ cat > "$REVIEW_TMP/run-reviewers.sh" <<'RUNNER'
 set -uo pipefail
 : "${REVIEW_TMP:?REVIEW_TMP must be exported by the caller}"
 
+# What bash cannot do -- agy's sandbox and input, taking a review out of a reviewer's output -- is
+# the convergence loop's own code, called through one entry point (scripts/review_loop/runner_cli.py)
+# rather than copied here. It comes from the project checkout, like everything this runner uses:
+# reviewing an untrusted branch in full mode runs that branch's code. For that, run the convergence
+# loop from a trusted checkout of this agent with --repo pointing at the branch.
+REVIEW_ROOT="$PWD"
+review_helper() {
+  python3 -I -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); from scripts.review_loop.runner_cli import main; sys.exit(main(sys.argv[1:]))' "$REVIEW_ROOT" "$@"
+}
+
 # JOB CONTROL IN A SCRIPT, deliberately. With `set -m` each background job gets its OWN process
 # group, so `kill -- -$pid` reaches the whole tree. Without it every reviewer shares the runner's
 # process group and can only be killed one process at a time - and a reviewer CLI is a tree (node
@@ -457,43 +460,47 @@ set -uo pipefail
 # whose child ignores SIGTERM survives the round entirely without this.
 set -m
 
-# agy's scratch -- its workspace and a copy of its sign-in token -- is listed in AGY_SCRATCH by its
-# launcher, which runs in this shell. Not in a file: a reviewer can write files in $REVIEW_TMP, and
-# a list this shell feeds to rm -rf must not be one. The job removes the scratch when agy exits; a
-# job killed by the watchdog or the sweep never gets there, and neither does one whose runner is
-# interrupted, so the runner removes it too: after the sweep, and on any exit. An interrupted runner also takes down the reviewers it started, each in
-# its own process group, rather than leaving them running.
+# What the runner kills and removes, it keeps in its own memory, never in a file: a reviewer can
+# write files in $REVIEW_TMP, and a planted pid-N of 1 would have the runner signal every process
+# the user owns. JOB_PID holds each reviewer's job, set by its launcher, which runs in this shell;
+# the pid-N files are written only for watching from another shell. AGY_SCRATCH lists agy's
+# scratch -- its workspace and a copy of its sign-in token -- which the job removes when agy exits;
+# a job killed by the watchdog or the sweep never gets there, and neither does one whose runner is
+# interrupted, so the runner removes it too: after the sweep, and on any exit. An interrupted runner
+# also takes down the reviewers it started rather than leaving them running.
 #
-# kill_job: a job's process group is not the whole job. GNU `timeout` puts itself in a group of its
-# own, so a kill of the job's group leaves timeout -- and the reviewer under it -- running until
-# its own deadline. Measured: agy kept running after its job was killed. So: the group of each of
-# the job's children (timeout's, which takes its command's tree with it), then the job's own.
-kill_job() {
-  local pid child
-  pid="$(cat "$REVIEW_TMP/pid-$1" 2>/dev/null)" || return 0
-  [ -n "$pid" ] || return 0
-  for child in $(pgrep -P "$pid"); do kill -- "-$child" 2>/dev/null; done
-  kill -- "-$pid" 2>/dev/null
-}
+# kill_jobs: each job is one process group (`set -m`), and everything it starts stays in it:
+# `timeout --foreground` does not move to a group of its own, as plain timeout does -- which left
+# the reviewer under it running when the job's group was killed, and a helper the reviewer left
+# behind unreachable once timeout had exited. bwrap's sandbox dies with bwrap (--die-with-parent).
+# TERM first, then KILL for whatever ignored it.
+JOB_PID=()
 AGY_SCRATCH=()
+kill_jobs() {
+  local num groups=()
+  for num in "$@"; do [ -n "${JOB_PID[$num]:-}" ] && groups+=("-${JOB_PID[$num]}"); done
+  [ "${#groups[@]}" -gt 0 ] || return 0
+  kill -TERM -- "${groups[@]}" 2>/dev/null
+  sleep 1
+  kill -KILL -- "${groups[@]}" 2>/dev/null
+  return 0
+}
 finish_round() {
-  local num
-  for num in 1 2 3 4; do
-    [ -f "$REVIEW_TMP/pid-$num" ] && [ ! -f "$REVIEW_TMP/done-$num" ] && kill_job "$num"
-  done
+  kill_jobs 1 2 3 4
   [ "${#AGY_SCRATCH[@]}" -eq 0 ] || rm -rf -- "${AGY_SCRATCH[@]}"
 }
 trap finish_round EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+trap 'exit 129' HUP   # a closed terminal or ssh session
+trap 'exit 131' QUIT
 
 # Per-reviewer deadline. The watchdog below allows a little more than this so that a reviewer
 # killed by its own `timeout` is still collected as a failure rather than hanging the round.
 REVIEWER_TIMEOUT=${REVIEWER_TIMEOUT:-600}
 ROUND_DEADLINE=$((REVIEWER_TIMEOUT + 90))
-# -k escalates to SIGKILL 10s after the TERM. A reviewer CLI is a process TREE - node spawning
-# helpers - and a TERM delivered only to the top of it can leave descendants running and writing
-# into $REVIEW_TMP after the round has closed and the report has been written.
+# -k escalates to SIGKILL 10s after the TERM. --foreground signals only the reviewer itself, not
+# its helpers: those are the sweep's, which kills each job's whole process group (kill_jobs).
 
 # Every reviewer runs inside a brace group that records its exit status in a done-marker when it
 # finishes. The markers are what makes progress observable from ANOTHER shell: `ps` on a recorded
@@ -509,11 +516,12 @@ ROUND_DEADLINE=$((REVIEWER_TIMEOUT + 90))
 # For sensitive reviews with large diffs, prefer Claude CLI.
 launch_hermes() {
   local num=$1 hermes_model=$2 prompt_file=$3
-  { timeout -k 10 "$REVIEWER_TIMEOUT" hermes -z "$(cat "$prompt_file")" \
+  { timeout --foreground -k 10 "$REVIEWER_TIMEOUT" hermes -z "$(cat "$prompt_file")" \
       -m "$hermes_model" --provider bedrock -t file --yolo \
       1>"$REVIEW_TMP/stdout-$num.txt" \
       2>"$REVIEW_TMP/stderr-$num.txt"
     echo $? > "$REVIEW_TMP/done-$num"; } &
+  JOB_PID[$num]=$!
   echo $! > "$REVIEW_TMP/pid-$num"
   echo "R$num: Hermes ($hermes_model) [Bedrock]"
 }
@@ -543,15 +551,17 @@ launch_cli() {
       # override naming only reading tools must not lift the deny list with it.
       local denied=() tool deny=()
       for tool in Edit Write MultiEdit NotebookEdit Bash; do
-        case " ${tools//,/ } " in *" $tool "*) ;; *) denied+=("$tool") ;; esac
+        # Named bare, or scoped (`Bash(git log:*)`): either way the slot was given it.
+        case " ${tools//,/ } " in *" $tool "*|*" $tool("*) ;; *) denied+=("$tool") ;; esac
       done
       [ "${#denied[@]}" -eq 0 ] || deny=(--disallowedTools "${denied[*]}")
-      { timeout -k 10 "$REVIEWER_TIMEOUT" claude -p --model "$model" \
+      { timeout --foreground -k 10 "$REVIEWER_TIMEOUT" claude -p --model "$model" \
           --allowedTools "$tools" "${deny[@]}" \
           --output-format json < "$prompt_file" \
           1>"$REVIEW_TMP/claude-raw-$num.json" \
           2>"$REVIEW_TMP/stderr-$num.txt"
         echo $? > "$REVIEW_TMP/done-$num"; } &
+      JOB_PID[$num]=$!
       echo $! > "$REVIEW_TMP/pid-$num"
       echo "R$num: Claude CLI ($model, tools: $tools) [free]"
       ;;
@@ -567,13 +577,14 @@ launch_cli() {
       [ -n "${CODEX_MODEL:-}" ] && codex_extra+=(-m "$CODEX_MODEL")
       [ -n "${CODEX_REASONING_EFFORT:-}" ] && \
         codex_extra+=(-c "model_reasoning_effort=$CODEX_REASONING_EFFORT")
-      { timeout -k 10 "$REVIEWER_TIMEOUT" codex exec \
+      { timeout --foreground -k 10 "$REVIEWER_TIMEOUT" codex exec \
           "${codex_extra[@]}" \
           -o "$REVIEW_TMP/result-$num.json" \
           - < "$prompt_file" \
           1>"$REVIEW_TMP/stdout-$num.txt" \
           2>"$REVIEW_TMP/stderr-$num.txt"
         echo $? > "$REVIEW_TMP/done-$num"; } &
+      JOB_PID[$num]=$!
       echo $! > "$REVIEW_TMP/pid-$num"
       local label="${CODEX_MODEL:-gpt-5.5}"
       [ -n "${CODEX_REASONING_EFFORT:-}" ] && label="$label/$CODEX_REASONING_EFFORT"
@@ -585,13 +596,14 @@ launch_cli() {
       # Pin to gemini-2.5-flash because gemini-2.5-pro is not in the
       # free tier (returns HTTP 429). Override with GEMINI_MODEL=... if
       # you have paid quota.
-      { timeout -k 10 "$REVIEWER_TIMEOUT" gemini \
+      { timeout --foreground -k 10 "$REVIEWER_TIMEOUT" gemini \
           --model "${GEMINI_MODEL:-gemini-2.5-flash}" \
           --approval-mode plan --skip-trust \
           < "$prompt_file" \
           1>"$REVIEW_TMP/stdout-$num.txt" \
           2>"$REVIEW_TMP/stderr-$num.txt"
         echo $? > "$REVIEW_TMP/done-$num"; } &
+      JOB_PID[$num]=$!
       echo $! > "$REVIEW_TMP/pid-$num"
       echo "R$num: Gemini CLI (${GEMINI_MODEL:-gemini-2.5-flash}) [free]"
       ;;
@@ -599,26 +611,18 @@ launch_cli() {
       # Antigravity CLI. Only reached when HAS_AGY=true, i.e. its sandbox check passed.
       #
       # agy itself confines nothing: measured, it wrote outside its workspace by absolute path
-      # with no denial. So it runs under the bubblewrap wrapper from
-      # scripts/review_loop/backends.py (agy_sandbox) -- built by calling it, so there is one
-      # copy: filesystem read-only except an empty workspace OUTSIDE the repo, home hidden, a
-      # throwaway copy of agy's state, no host processes or sockets. The prompt -- with the
-      # preamble telling it to call no tools -- goes in as one stream-json line on stdin.
+      # with no denial. So it runs under the bubblewrap wrapper from scripts/review_loop/agy.py
+      # (agy_sandbox_parts) -- built by calling it, so there is one copy: filesystem read-only
+      # except an empty workspace OUTSIDE the repo, home hidden, a throwaway copy of agy's state,
+      # no host processes or sockets. The prompt -- with the preamble telling it to call no tools
+      # -- goes in as one stream-json line on stdin.
       #
-      # The wrapper comes from the project checkout, like every helper this runner uses: reviewing
-      # an untrusted branch in full mode runs that branch's code. For that, run the convergence
-      # loop from a trusted checkout of this agent with --repo pointing at the branch. `python3 -I`
-      # keeps PYTHONPATH and the user's site directory out; the checkout's own modules come first,
-      # which trusts it no further than running its scripts already does.
-      local root="$PWD"
       # The schema inline, not as a path: the sandbox hides home and /tmp, where the file lives.
-      # Parsed first: agy refuses a malformed one, and the slot should go to the next backend.
-      local schema_args=() schema_file="$root/docs/ensemble_review_result_schema.json" schema
-      if [ -f "$schema_file" ]; then
-        schema="$(python3 -I -c 'import json, sys; print(json.dumps(json.load(open(sys.argv[1]))))' "$schema_file")" \
-          || { echo "R$num: SKIPPED (agy result schema unreadable)"; return 1; }
-        schema_args=(--json-schema "$schema")
-      fi
+      # Checked first, missing or not a schema: agy rejects a bad one only after launch, when the
+      # slot can no longer go to the next backend.
+      local schema
+      schema="$(review_helper agy-schema "$REVIEW_ROOT/docs/ensemble_review_result_schema.json")" \
+        || { echo "R$num: SKIPPED (agy result schema unusable)"; return 1; }
       # A failed mktemp leaves ws empty, `cd ""` succeeds, and agy would run in the repository.
       # Resolved, because a relative TMPDIR names a different place once the job has cd'd.
       local ws; ws="$(mktemp -d)" || return 1
@@ -634,31 +638,30 @@ launch_cli() {
       # The wrapper in two parts, `env -i VAR=val...` and bwrap's, so that timeout runs between
       # them: after env has execed it, its command line -- which any local user can read -- holds
       # none of the values. The helper writes the first part's length, then both parts.
+      # (Just "0" from a host trusted to be the sandbox itself: MMCRA_SKIP_AGY_SANDBOX_CHECK.)
       local wrap=() envp=() bwrap=()
-      case "${MMCRA_SKIP_AGY_SANDBOX_CHECK:-}" in
-        ""|0)
-          mapfile -d '' -t wrap < <(python3 -I -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); from pathlib import Path; from scripts.review_loop.backends import agy_sandbox_parts, agy_seed_state; ws, st = (Path(a) for a in sys.argv[1:3]); env, bw = agy_sandbox_parts(ws, agy_seed_state(st)); sys.stdout.write("\0".join([str(len(env)), *env, *bw]) + "\0")' "$root" "$ws" "$state")
-          if [ "${#wrap[@]}" -lt 2 ]; then
-            echo "R$num: SKIPPED (could not build agy's sandbox)"; rm -rf "$ws" "$state"; return 1
-          fi
-          envp=("${wrap[@]:1:${wrap[0]}}"); bwrap=("${wrap[@]:$((1 + wrap[0]))}") ;;
-      esac
+      mapfile -d '' -t wrap < <(review_helper agy-sandbox "$ws" "$state")
+      if [ "${#wrap[@]}" -lt 1 ]; then
+        echo "R$num: SKIPPED (could not build agy's sandbox)"; rm -rf "$ws" "$state"; return 1
+      fi
+      envp=("${wrap[@]:1:${wrap[0]}}"); bwrap=("${wrap[@]:$((1 + wrap[0]))}")
       # The preamble goes into the prompt file itself, so the file is the record of what agy was
       # sent. Last, after every way this launch can still fall through to another backend.
-      python3 -I -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); from scripts.review_loop.backends import AGY_PREAMBLE; p = sys.argv[1]; t = open(p).read(); open(p, "w").write(AGY_PREAMBLE + t)' "$root" "$prompt_file" \
+      review_helper agy-preamble "$prompt_file" \
         || { echo "R$num: SKIPPED (could not prepare agy's prompt)"; rm -rf "$ws" "$state"; return 1; }
       echo agy > "$REVIEW_TMP/backend-$num"
-      { cd "$ws" && "${envp[@]}" timeout -k 10 "$REVIEWER_TIMEOUT" "${bwrap[@]}" agy \
+      { cd "$ws" && "${envp[@]}" timeout --foreground -k 10 "$REVIEWER_TIMEOUT" "${bwrap[@]}" agy \
           --sandbox --disable-slash-commands \
           --model "$AGY_MODEL" \
           --input-format stream-json --output-format stream-json \
-          --print-timeout 0 "${schema_args[@]}" \
-          < <(python3 -I -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); from scripts.review_loop.backends import agy_message; sys.stdout.write(agy_message(open(sys.argv[1]).read()))' "$root" "$prompt_file") \
+          --print-timeout 0 --json-schema "$schema" \
+          < <(review_helper agy-message "$prompt_file") \
           1>"$REVIEW_TMP/stdout-$num.txt" \
           2>"$REVIEW_TMP/stderr-$num.txt"
         rc=$?; rm -rf "$ws" "$state"; echo "$rc" > "$REVIEW_TMP/done-$num"; } &
-      # The marker comes last: once it exists the runner may kill this job's group, and
-      # cleanup -- which removes the copy of agy's sign-in token -- must already be done.
+      # The done marker comes last: cleanup -- which removes the copy of agy's sign-in token --
+      # is done by the time the watchdog sees this slot as finished.
+      JOB_PID[$num]=$!
       echo $! > "$REVIEW_TMP/pid-$num"
       echo "R$num: Antigravity CLI ($AGY_MODEL) [subscription]"
       echo "R$num: agy sends the diff and audit to Google (REVIEW_USE_AGY=0 to stop)"
@@ -739,7 +742,7 @@ round_start=$SECONDS
 while :; do
   running=0
   for num in 1 2 3 4; do
-    [ -f "$REVIEW_TMP/pid-$num" ] || continue          # slot was skipped, never launched
+    [ -n "${JOB_PID[$num]:-}" ] || continue            # slot was skipped, never launched
     [ -f "$REVIEW_TMP/done-$num" ] && continue         # finished, status recorded
     running=$((running + 1))
   done
@@ -747,69 +750,31 @@ while :; do
   if [ $((SECONDS - round_start)) -ge "$ROUND_DEADLINE" ]; then
     echo "WATCHDOG: $running reviewer(s) still running after ${ROUND_DEADLINE}s - giving up on them"
     for num in 1 2 3 4; do
-      [ -f "$REVIEW_TMP/pid-$num" ] || continue
+      [ -n "${JOB_PID[$num]:-}" ] || continue
       [ -f "$REVIEW_TMP/done-$num" ] && continue
-      # The job's process group, which `set -m` gave it, and timeout's (see kill_job).
-      kill_job "$num"
+      kill_jobs "$num"
       echo "timeout" > "$REVIEW_TMP/done-$num"
     done
     break
   fi
-  sleep 5
+  # In the background and waited for: bash runs a trap only once the foreground command ends, so
+  # a plain `sleep 5` held off an interrupt's cleanup for up to five seconds; `wait` returns at once.
+  sleep 5 & wait $!
 done
 echo "All reviewer slots resolved after $((SECONDS - round_start))s"
 
-# SWEEP. A reviewer killed by its own `timeout` still leaves descendants: timeout signals the
-# process it started, not that process's children. Every job has its own process group, so one
-# group kill per slot collects them. Harmless when the group is already gone.
-for num in 1 2 3 4; do
-  [ -f "$REVIEW_TMP/pid-$num" ] || continue
-  kill_job "$num"
-done
+# SWEEP. A reviewer killed by its own `timeout`, or one that exited, can still leave helpers:
+# timeout signals the process it started, not that process's children. Every job is its own process
+# group, helpers included, so one group kill per slot collects them. Harmless when it is gone.
+kill_jobs 1 2 3 4
 # Now, not at exit: a killed agy job never reached its own cleanup of the token copy.
 [ "${#AGY_SCRATCH[@]}" -eq 0 ] || rm -rf -- "${AGY_SCRATCH[@]}"
 
-# Extract review JSON from raw output. Handles Claude CLI wrappers,
-# markdown fences, and preamble. Validates required schema keys.
+# Extract review JSON from raw output, as the convergence loop does: Claude's wrapper, fences and
+# preamble; agy's stream only when agy ran the slot (any reviewer can be talked into printing a line
+# shaped like agy's), and only a turn that finished. Checks the required schema keys.
 extract_json() {
-  python3 -c "
-import json, sys
-text = open(sys.argv[1]).read()
-# agy stream-json: one event per line, the answer in the last result event -- read only when agy
-# ran the slot: any reviewer can be talked into printing a line shaped like agy's result event.
-# split, not splitlines(): NDJSON is newline-separated, and JSON strings may carry U+0085 raw.
-for line in (reversed(text.split('\n')) if sys.argv[3] == 'agy' else []):
-    try:
-        ev = json.loads(line)
-    except ValueError:
-        continue
-    if isinstance(ev, dict) and ev.get('event') == 'result' and isinstance(ev.get('result'), dict):
-        r = ev['result']
-        # A turn that did not finish is not a review, however review-shaped its output.
-        if r.get('status') != 'SUCCESS':
-            print('agy turn status: ' + str(r.get('status')) + ' ' + str(r.get('error') or ''), file=sys.stderr)
-            sys.exit(1)
-        so = r.get('structured_output')
-        text = json.dumps(so) if isinstance(so, dict) else str(r.get('response') or r.get('error') or '')
-        break
-try:
-    wrapper = json.loads(text)
-    if isinstance(wrapper.get('result'), str):
-        text = wrapper['result']
-except (json.JSONDecodeError, ValueError, AttributeError):
-    pass
-start = text.find('{')
-end = text.rfind('}')
-if start < 0 or end <= start:
-    sys.exit(1)
-d = json.loads(text[start:end+1])
-required = {'reviewer', 'model', 'findings', 'overall_assessment'}
-if not required.issubset(d.keys()):
-    print(f'Missing keys: {required - set(d.keys())}', file=sys.stderr)
-    sys.exit(1)
-with open(sys.argv[2], 'w') as out:
-    json.dump(d, out, indent=2)
-" "$1" "$2" "${3:-}" 2>"$REVIEW_TMP/extract-$(basename "$2" .json).err"
+  review_helper extract "$1" "$2" "${3:-}" 2>"$REVIEW_TMP/extract-$(basename "$2" .json).err"
 }
 
 # Post-process: normalize all output to result-N.json.
@@ -833,15 +798,8 @@ for num in 1 2 3 4; do
       0)       why="no parseable JSON output (it exited cleanly, so read its stdout)" ;;
       *)       why="exited $(cat "$REVIEW_TMP/done-$num") without usable JSON" ;;
     esac
-    [ -f "$REVIEW_TMP/pid-$num" ] || why="never launched (no backend available for this slot)"
-    python3 -c "
-import json, sys
-with open(sys.argv[1], 'w') as out:
-    json.dump({
-        'reviewer': 'unknown', 'model': 'unknown', 'findings': [],
-        'overall_assessment': 'Reviewer ' + sys.argv[2] + ' failed: ' + sys.argv[3] + '. Check extract-result-' + sys.argv[2] + '.err and stderr-' + sys.argv[2] + '.txt.'
-    }, out, indent=2)
-" "$result" "$num" "$why"
+    [ -n "${JOB_PID[$num]:-}" ] || why="never launched (no backend available for this slot)"
+    review_helper placeholder "$result" "$num" "$why"
     echo "WARNING: Reviewer $num produced no result ($why)"
   fi
 done

@@ -34,15 +34,26 @@ PROGRESS_INTERVAL = 30
 #: How often to check whether a reviewer has finished. Short enough that the
 #: round does not sit idle after the last one exits.
 POLL_INTERVAL = 2
-#: ``agy models`` is a listing, not a model call, but it goes over the network.
-AGY_MODELS_TIMEOUT = 60
+
+MERGE_TIMEOUT = 900
+TEST_TIMEOUT = 300
 
 #: The reviewer schema, handed to agy's ``--json-schema`` so the shape of its
 #: answer is enforced by the CLI rather than only asked for in the prompt.
 RESULT_SCHEMA = REPO_ROOT / "docs" / "ensemble_review_result_schema.json"
 
-MERGE_TIMEOUT = 900
-TEST_TIMEOUT = 300
+#: ``agy models`` is a listing, not a model call, but it goes over the network.
+AGY_MODELS_TIMEOUT = 60
+
+
+def env_flag(name: str) -> bool:
+    """Whether the environment variable ``name`` is set to yes: 1, true, yes or on.
+
+    One reading for every switch that turns a safety check off. Anything else --
+    unset, empty, ``0``, ``false``, ``no``, a typo -- leaves the check on.
+    """
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
 
 #: Everything install.sh copies into a host project. Excluded from the review
 #: diff so that a host project's first review is not spent on the reviewer's

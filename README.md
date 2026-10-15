@@ -489,7 +489,8 @@ Anthropic reviewers. For cross-provider diversity, also install:
   workspace by absolute path with nothing denied. Its plan mode never wrote
   in testing, but that is the model choosing not to, not agy refusing. So
   agy runs under `bwrap`: the filesystem read-only except an empty temp
-  workspace outside the repo; the home directory, `/tmp` and `/run`
+  workspace outside the repo; the home directory (`$HOME`, and the
+  account's own where `HOME` points elsewhere), `/tmp` and `/run`
   replaced by empty ones (no `~/.ssh`, no cloud credentials; none of the
   sockets there -- tmux's, the session and system D-Bus, `docker.sock`,
   snapd's -- with only the DNS resolver's directory put back); the
@@ -497,7 +498,8 @@ Anthropic reviewers. For cross-provider diversity, also install:
   `bwrap` is PID 1 inside and `/proc/1/environ` would otherwise hold every
   API key the loop was started with; host processes out of reach; and a
   throwaway copy of agy's state holding only its sign-in, removed when the
-  round ends (or the runner is interrupted -- only a `SIGKILL` leaves it).
+  round ends, or the runner is stopped by Ctrl-C, `SIGTERM`, `SIGHUP` (a
+  closed terminal or ssh session) or `SIGQUIT` -- only a `SIGKILL` leaves it.
   Under that wrapper agy's own write tool got `read-only file system`. The
   wrapper is verified at startup without a model call, codex-style, and the
   slot is dropped if any of that fails. Until it passes, agy runs only as
@@ -512,6 +514,11 @@ Anthropic reviewers. For cross-provider diversity, also install:
     lets your user in without the cookie (`xhost +si:localuser:...`) takes
     keystrokes from inside. File sockets outside `/run` and `/tmp` stay
     reachable unless masked by name (docker's and LXD's are).
+  - **Anything reachable over the network from this host**: services on
+    localhost (docker's TCP API, databases, notebooks) and, on a cloud VM
+    or CI runner, the instance-metadata endpoint (`169.254.169.254`), which
+    hands out the machine's cloud credentials. Do not run agy on a host
+    whose instance role you would not give to the diff's author.
   - **agy's own credentials.** Its sign-in token (the copy) and any proxy
     URL in the allowlisted environment are readable inside, and the network
     is open, so a diff that talks agy into a network-capable tool could send
@@ -534,9 +541,11 @@ Anthropic reviewers. For cross-provider diversity, also install:
 
   **Default-on means data egress.** Wherever agy is installed and signed
   in, the scrubbed diff and audit now also go to Google, and every round
-  that sends them says so. Set `REVIEW_USE_AGY=0` where that is not acceptable. Without `bwrap`,
-  agy is skipped (`MMCRA_SKIP_AGY_SANDBOX_CHECK=1` runs it unwrapped, for
-  a host that is already a sandbox). Its answer is held to the result
+  that sends them says so. Set `REVIEW_USE_AGY=0` where that is not
+  acceptable. Without `bwrap`, agy is skipped
+  (`MMCRA_SKIP_AGY_SANDBOX_CHECK=1`, or `true`/`yes`/`on`, runs it
+  unwrapped, for a host that is already a sandbox; `0` or anything else
+  keeps the sandbox). Its answer is held to the result
   schema with `--json-schema`, and its prompt tells it to call no tools:
   headless agy refuses them, and a refused call ends its turn with no
   answer.

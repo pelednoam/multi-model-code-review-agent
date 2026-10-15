@@ -7,7 +7,8 @@ Re-exports the public API. The CLI entry point lives at
 from __future__ import annotations
 
 from .artifacts import describe_outputs, write_artifacts_key
-from .backends import _run, detect_backends
+from .backends import detect_backends
+from .proc import _run
 from .config import (
     MERGE_TIMEOUT,
     REPO_ROOT,

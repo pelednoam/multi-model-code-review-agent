@@ -6,7 +6,7 @@ import subprocess
 import sys
 from typing import TYPE_CHECKING
 
-from .backends import _run
+from .proc import _run
 from .config import SCRIPTS_DIR, diff_pathspec, is_agent_repo
 
 if TYPE_CHECKING:

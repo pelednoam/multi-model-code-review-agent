@@ -41,9 +41,10 @@ def agy_state_dir() -> Path:
     return home.resolve() / ".gemini" / "antigravity-cli"
 
 
-#: Inside agy's state directory: what a sandboxed run gets read-only (its own helper
-#: binaries -- writable, they are a place to plant a program the next *unsandboxed* agy
-#: runs) and what it gets a per-run copy of (the sign-in token, which agy refreshes).
+#: Inside agy's state directory: what a sandboxed run gets mounted read-only -- its own
+#: helper binaries, which it must not be able to change: written to, they would be a
+#: place to plant a program for the next *unsandboxed* agy -- and what it gets a
+#: per-run copy of (the sign-in token, which agy refreshes).
 _AGY_STATE_SHARED = ("bin", "builtin")
 _AGY_STATE_COPIED = ("antigravity-oauth-token",)
 

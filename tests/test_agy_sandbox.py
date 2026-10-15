@@ -24,12 +24,22 @@ from scripts.review_loop.agy_sandbox import agy_state_dir as real_agy_state_dir
 class TestAgySandboxCheck(AgyCase):
     """The startup check that proves the wrapper, with no model call."""
 
-    def test_the_real_sandbox_passes(self) -> None:
+    def test_the_real_sandbox_passes(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Not a mock: the wrapper agy runs under, against the real filesystem."""
         if not self._bwrap_works():
             pytest.skip("bwrap or agy cannot run here")
+        self._quiet_host(monkeypatch)
         ok, reason = agy_sandbox_check.agy_is_confined()
         assert ok, reason
+
+    def test_this_hosts_sockets_are_checked_without_error(self, tmp_path: Path) -> None:
+        # Whatever the verdict on this host, the real list is read and judged.
+        if not self._bwrap_works():
+            pytest.skip("bwrap or agy cannot run here")
+        (tmp_path / "st").mkdir()
+        wrap = agy_sandbox.agy_wrapper(tmp_path, tmp_path / "st")
+        reason = agy_sandbox_check.agy_reachable(wrap, tmp_path)
+        assert reason is None or "could not check" not in reason, reason
 
     @pytest.mark.parametrize(
         ("drop", "caught"),
@@ -60,6 +70,7 @@ class TestAgySandboxCheck(AgyCase):
             raise AssertionError(f"{target} is not in the wrapper")
 
         monkeypatch.setattr(agy_sandbox_check, "agy_wrapper", weakened)
+        self._quiet_host(monkeypatch)
         ok, reason = agy_sandbox_check.agy_is_confined()
         assert not ok and caught.replace("HOME", str(Path.home())) in reason
 
@@ -170,18 +181,48 @@ class TestAgySandboxCheck(AgyCase):
         # Root's daemons and another user's sockets check who connects; a client's
         # connected socket of this user's takes no connections at all. Counting any of
         # them switched the slot off on an ordinary host.
+        # As user 1000, whoever runs the tests: as root, root's sockets are this user's.
+        monkeypatch.setattr(agy_sandbox_check.os, "getuid", lambda: 1000)
         Sock = agy_sandbox_check._Sock
         self._reach(monkeypatch)
         socks = [
             Sock(b"\0/org/kernel/linux/storage/multipathd", 0),
-            Sock(b"\0/tmp/dbus-theirs", os.getuid() + 12345),
-            self._mine(b"\0c99a1981b9af149d/bus/systemd/bus-system", accepts=False),
-            Sock(b"theirs-relative.sock", os.getuid() + 12345),
+            Sock(b"\0/tmp/dbus-theirs", 2000),
+            Sock(b"\0c99a1981b9af149d/bus/systemd/bus-system", 1000, accepts=False),
+            Sock(b"theirs-relative.sock", 2000),
         ]
         assert agy_sandbox_check._check_reachable(None, socks) is None  # type: ignore[arg-type]
-        # Where the kernel does not say whose, a session bus by its usual name counts.
-        unknown = [Sock(b"\0/tmp/dbus-unknown", None)]
-        assert agy_sandbox_check._check_reachable(None, unknown)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize(
+        ("listener", "refused"), [(1000, True), (0, False), (None, False)]
+    )
+    def test_where_the_kernel_does_not_say_whose_the_listener_is_asked(
+        self, monkeypatch: pytest.MonkeyPatch, listener: int | None, refused: bool
+    ) -> None:
+        # Before 5.3 the owner is unknown: only a bus-like name counted, and any other
+        # of this user's listening sockets passed.
+        monkeypatch.setattr(agy_sandbox_check.os, "getuid", lambda: 1000)
+        monkeypatch.setattr(agy_sandbox_check, "_listener_uid", lambda name: listener)
+        self._reach(monkeypatch)
+        unknown = [agy_sandbox_check._Sock(b"\0some-daemon", None)]
+        reason = agy_sandbox_check._check_reachable(None, unknown)  # type: ignore[arg-type]
+        assert bool(reason) is refused
+
+    def test_run_as_root_roots_sockets_are_its_own(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(agy_sandbox_check.os, "getuid", lambda: 0)
+        self._reach(monkeypatch)
+        socks = [agy_sandbox_check._Sock(b"\0/org/kernel/linux/storage/multipathd", 0)]
+        assert agy_sandbox_check._check_reachable(None, socks)  # type: ignore[arg-type]
+
+    def test_the_listener_says_whose_it_is(self) -> None:
+        name = f"\0mmcra-listener-{os.getpid()}".encode()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as mine:
+            mine.bind(name)
+            mine.listen(1)
+            assert agy_sandbox_check._listener_uid(name) == os.getuid()
+        assert agy_sandbox_check._listener_uid(name) is None
 
     def test_another_users_x_server_is_still_asked(
         self, monkeypatch: pytest.MonkeyPatch

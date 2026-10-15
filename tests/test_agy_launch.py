@@ -372,6 +372,7 @@ class TestAgyLaunch(AgyCase):
         spaced.mkdir()
         monkeypatch.setenv("HOME", str(Path.home()) + "/")
         monkeypatch.setattr(agy.tempfile, "tempdir", str(spaced))
+        self._quiet_host(monkeypatch)
         ok, reason = agy_sandbox_check.agy_is_confined()
         assert ok, reason
 

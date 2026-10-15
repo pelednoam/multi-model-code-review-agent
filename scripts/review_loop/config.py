@@ -34,7 +34,6 @@ PROGRESS_INTERVAL = 30
 #: How often to check whether a reviewer has finished. Short enough that the
 #: round does not sit idle after the last one exits.
 POLL_INTERVAL = 2
-
 MERGE_TIMEOUT = 900
 TEST_TIMEOUT = 300
 

@@ -43,6 +43,10 @@ class _Box:
 
     def sh(self, script: str, **kw: Any) -> str:
         """What ``script`` printed inside the sandbox."""
+        # stdin: what the caller hands over, else nothing -- not the operator's
+        # terminal, which the sandboxed shell would otherwise inherit.
+        if "input" not in kw:
+            kw["stdin"] = subprocess.DEVNULL
         done = run(
             [*self.wrap, "sh", "-c", script], cwd=self.workspace, timeout=30, **kw
         )
@@ -200,6 +204,12 @@ _NLMSG_HDR = struct.Struct("=IHHII")
 _UNIX_DIAG_REQ = struct.Struct("=BBHIIIII")
 _UNIX_DIAG_MSG = struct.Struct("=BBBBIII")
 _RTATTR = struct.Struct("=HH")
+#: unix_diag_msg's type and state that take a connection: a stream or seqpacket socket
+#: in TCP_LISTEN, or any datagram one.
+_SOCK_DGRAM, _TCP_LISTEN = 2, 10
+
+#: An X server's abstract socket, and its display number.
+_X_DISPLAY = re.compile(rb"\0/tmp/\.X11-unix/X(\d+)")
 
 
 class _Sock(NamedTuple):
@@ -283,11 +293,6 @@ def _check_done(body: bytes) -> None:
         raise OSError("the kernel's socket list did not complete")
 
 
-#: unix_diag_msg's type and state that take a connection: a stream or seqpacket socket
-#: in TCP_LISTEN, or any datagram one.
-_SOCK_DGRAM, _TCP_LISTEN = 2, 10
-
-
 def _diag_socket(body: bytes) -> _Sock:
     """One socket's unix_diag_msg: its name (empty if it has none), owner, and
     whether it accepts anything from others."""
@@ -333,7 +338,8 @@ def _check_sockets(box: _Box, socks: list[_Sock]) -> str | None:
       which agy keeps to reach its model -- if this user's and it takes connections
       (a client's connected socket has a name too): whatever listens there admits
       this user, whatever it is called (a session bus can take any name).
-      Where the kernel does not say whose, a session bus by its usual name. Root's
+      Where the kernel does not say whose (before 5.3), the listener says, asked
+      over a connection (``_listener_uid``). Root's
       system daemons check who connects, and another user's admit that user only:
       counting those would let any local user switch the slot off by binding one.
       X servers, of any owner, are asked (``_check_x_servers``).
@@ -356,12 +362,29 @@ def _check_sockets(box: _Box, socks: list[_Sock]) -> str | None:
             or _X_DISPLAY.fullmatch(sock.name)
         ):
             continue
-        if sock.uid == me or (sock.uid is None and b"/dbus-" in sock.name):
+        owner = sock.uid if sock.uid is not None else _listener_uid(sock.name)
+        if owner == me:
             return (
                 f"bwrap sandbox can reach {_shown(sock.name)}, an abstract socket of"
                 " this user's, and whatever listens there admits this user"
             )
     return None
+
+
+def _listener_uid(name: bytes) -> int | None:
+    """Whose process listens at abstract socket ``name``, from the connection's peer
+    credentials -- or None if it takes no connection, and so admits no one."""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+            conn.settimeout(2)
+            conn.connect(name)
+            creds = conn.getsockopt(
+                socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")
+            )
+    except OSError:
+        return None
+    _, uid, _ = struct.unpack("3i", creds)
+    return uid
 
 
 def _reachable(box: _Box, paths: list[bytes]) -> list[bytes] | str:
@@ -396,9 +419,6 @@ def _reachable(box: _Box, paths: list[bytes]) -> list[bytes] | str:
         detail = (said or ["no detail"])[-1][:200]
         return f"could not check the sockets agy's sandbox can reach: {detail}"
     return [p for p in done.stdout.split(b"\0") if p]
-
-
-_X_DISPLAY = re.compile(rb"\0/tmp/\.X11-unix/X(\d+)")
 
 
 def _check_x_servers(socks: list[_Sock]) -> str | None:

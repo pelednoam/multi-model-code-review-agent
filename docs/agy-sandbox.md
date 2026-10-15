@@ -52,8 +52,9 @@ convergence loop and the full-mode runner call it.
     directory was renamed after, is not found at the path that reaches it;
   - any abstract socket of your own that takes connections, whatever its name: a
     session bus (`dbus-launch`'s, IBus's, or one at an address of its own), or
-    anything else that admits your user. Root's system daemons and other users'
-    abstract sockets check who connects, and are not counted;
+    anything else that admits your user (on a kernel before 5.3, which does not
+    say whose a socket is, the listener is asked). Root's system daemons and
+    other users' abstract sockets check who connects, and are not counted;
   - an X server, whoever runs it, that admits your user without its cookie. Stock
     GNOME and Xwayland grant `SI:localuser`, and a program inside could type into
     a terminal outside. `xhost -si:localuser:$USER` closes that.

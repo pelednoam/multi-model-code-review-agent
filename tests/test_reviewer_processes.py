@@ -159,3 +159,38 @@ class TestReviewerProcesses(AgyCase):
         reviewers._publish_outputs(out, round_dir)
         assert not (round_dir / "codex-out-2.txt").exists()
         assert (round_dir / "raw-2.txt").read_text() == "its stdout"
+
+    def test_outputs_that_cannot_be_published_are_kept(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:  # fmt: skip
+        # A failed copy ended with the private outputs -- the only copies of the
+        # round's reviews -- removed as scratch.
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / "raw-1.txt").write_text("the only copy")
+
+        def full_disk(out_dir: Path, round_dir: Path) -> None:
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(reviewers, "_ROUND_SCRATCH", [out])
+        monkeypatch.setattr(reviewers, "_publish_outputs", full_disk)
+        reviewers._publish_or_keep(out, tmp_path / "round")
+        reviewers._release_scratch()
+        assert (out / "raw-1.txt").read_text() == "the only copy"
+        assert f"kept in {out}" in capsys.readouterr().out
+
+    def test_a_reviewer_without_a_prompt_on_stdin_gets_no_terminal(
+        self, tmp_path: Path
+    ) -> None:
+        # hermes takes its prompt as a file, and inherited the loop's stdin -- usually
+        # the operator's terminal.
+        proc, out_f, err_f = reviewers._spawn(
+            1, ["sh", "-c", "cat; echo done"], "sh", tmp_path, None, tmp_path
+        )
+        try:
+            assert proc.wait(timeout=10) == 0
+        finally:
+            out_f.close()
+            err_f.close()
+        assert (tmp_path / "raw-1.txt").read_text() == "done\n"

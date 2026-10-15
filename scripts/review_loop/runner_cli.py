@@ -56,8 +56,10 @@ def _agy_detect(prefer_hermes: str = "false") -> int:
     Bedrock: agy is then not even detected unless asked for by name.
     """
     with contextlib.redirect_stdout(sys.stderr):
+        # Pinned unless plainly "false": a value read the wrong way must not send a
+        # Bedrock project's code to Google.
         found = detect_backends(
-            verify_codex=False, prefer_hermes=prefer_hermes == "true"
+            verify_codex=False, prefer_hermes=prefer_hermes != "false"
         )
         # Picked once per run (cached): detection already chose it.
         model = agy_model_choice()[0] if found["agy"] else None

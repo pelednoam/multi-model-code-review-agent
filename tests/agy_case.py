@@ -214,6 +214,16 @@ class AgyCase:
         }
 
     @staticmethod
+    def _quiet_host(monkeypatch: pytest.MonkeyPatch) -> None:
+        """This host's own sockets out of a real-sandbox test of the wrapper.
+
+        A host with an X server or a session bus of its own correctly fails the check
+        for that; these tests are about the filesystem and processes, and the socket
+        rules have tests of their own, with sockets they control.
+        """
+        monkeypatch.setattr(agy_sandbox_check, "_unix_sockets", lambda: [])
+
+    @staticmethod
     def _bwrap_works() -> bool:
         """Real-sandbox tests need bwrap that runs, and agy (the check starts it)."""
         if shutil.which("bwrap") is None or shutil.which("agy") is None:

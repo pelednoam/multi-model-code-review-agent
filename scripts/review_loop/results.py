@@ -27,8 +27,9 @@ EXPECTED_REVIEWERS = {
 #: the BOM, tag characters ("ASCII smuggling"). Line and paragraph separators (Zl,
 #: Zp). Lone surrogates (Cs), which a JSON "\\ud800" decodes to and which no terminal
 #: encoding can print: one raised UnicodeEncodeError and ended the loop. And private-use
-#: characters (Co), which show as whatever a font makes of them. By category rather than a list of ranges, which missed some every time it was
-#: reviewed. A reviewer's text is shaped by the diff it read.
+#: characters (Co), which show as whatever a font makes of them. By category rather
+#: than a list of ranges, which missed some every time it was reviewed. A reviewer's
+#: text is shaped by the diff it read.
 _INVISIBLE = frozenset({"Cc", "Cf", "Cs", "Co", "Zl", "Zp"})
 
 

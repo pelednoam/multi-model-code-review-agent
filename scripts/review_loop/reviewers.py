@@ -489,10 +489,10 @@ def _launch_one(
         # On by default, so said whenever it runs: this is where the diff leaves.
         print(f"  R{slot}: {AGY_EGRESS}")
     # The record of what the reviewer was sent.
-    (round_.round_dir / f"prompt-{slot}.txt").write_text(prompt)
+    (round_.round_dir / f"prompt-{slot}.txt").write_text(prompt, encoding="utf-8")
     # Which backend answered, for a person reading the round. The loop goes by what
     # it launched (``launch_reviewers`` returns it), not by this file.
-    (round_.round_dir / f"backend-{slot}.txt").write_text(backend)
+    (round_.round_dir / f"backend-{slot}.txt").write_text(backend, encoding="utf-8")
     fed = None
     if backend in _stdin_backends():
         fed = agy_message(prompt) if backend == "agy" else prompt
@@ -602,15 +602,17 @@ def _output(path: Path) -> IO[str]:
 
 
 @contextlib.contextmanager
-def _feed(text: str | None) -> Iterator[IO[str] | None]:
+def _feed(text: str | None) -> Iterator[IO[str] | int]:
     """``text`` as a reviewer's stdin: an unlinked file, closed once it is handed over.
 
     A file, not a pipe: a pipe holds 64 KB, so a large prompt blocked the launch loop
     until the reviewer read it -- forever, if it never did, with the deadline not yet
-    started -- and one that exited unread raised BrokenPipeError.
+    started -- and one that exited unread raised BrokenPipeError. With no text (hermes
+    takes its prompt as a file), nothing: not the loop's own stdin, which is usually
+    the operator's terminal.
     """
     if text is None:
-        yield None
+        yield subprocess.DEVNULL
         return
     with tempfile.TemporaryFile("w+", encoding="utf-8") as feed:
         feed.write(text)
@@ -659,7 +661,7 @@ def launch_reviewers(
     prefer_hermes: bool = False,
     repo: Path | None = None,
 ) -> dict[int, str]:
-    """Launch 4 reviewers in parallel, write raw outputs to round_dir.
+    """Launch 4 reviewers in parallel; their outputs land in round_dir once all stop.
 
     ``repo`` is the repository under review, which no reviewer's writable scratch
     directory may be inside.
@@ -700,12 +702,27 @@ def launch_reviewers(
                     out_f.close()
                     err_f.close()
                 if out_dir is not None:
-                    _publish_outputs(out_dir, round_dir)
+                    _publish_or_keep(out_dir, round_dir)
                 _release_scratch()
 
 
 #: What a reviewer writes while it runs, per slot: stdout, stderr, codex's answer.
 _OUTPUTS = ("raw-{}.txt", "stderr-{}.txt", "codex-out-{}.txt")
+
+
+def _publish_or_keep(out_dir: Path, round_dir: Path) -> None:
+    """``_publish_outputs``, or, if it fails, keep the private copies and say where.
+
+    They are the only copies of the round's reviews: a failed copy -- a full disk, a
+    round directory gone read-only -- must not end with them removed as scratch. The
+    rest of the round's scratch, agy's token copy included, still goes.
+    """
+    try:
+        _publish_outputs(out_dir, round_dir)
+    except OSError as exc:
+        if out_dir in _ROUND_SCRATCH:
+            _ROUND_SCRATCH.remove(out_dir)
+        print(f"  WARNING: reviewer outputs kept in {out_dir}: could not copy ({exc})")
 
 
 def _publish_outputs(out_dir: Path, round_dir: Path) -> None:

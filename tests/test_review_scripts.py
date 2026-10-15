@@ -4,18 +4,18 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field
 import re
 import shlex
 import signal
 import subprocess
-import time
 import sys
-from unittest import mock
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 import pytest
-from types import SimpleNamespace
 
 from helpers import AGENT_DOC, REPO_ROOT, runner_script, shell_function
 from scripts.review_loop import backends
@@ -2085,6 +2085,23 @@ class TestRunnerScript:
         )
         assert done.stdout.strip() == "GONE", done.stdout + done.stderr
 
+    def test_a_bedrock_pin_read_any_other_way_still_keeps_agy_out(self) -> None:
+        # Only the string "true" pinned: "1" or "yes" let agy run for such a project.
+        from scripts.review_loop import runner_cli
+
+        seen: dict[str, bool] = {}
+
+        def detect(verify_codex: bool, prefer_hermes: bool) -> dict[str, bool]:
+            seen["pinned"] = prefer_hermes
+            return {"agy": False}
+
+        with mock.patch.object(runner_cli, "detect_backends", detect):
+            for value in ("true", "1", "yes", "TRUE"):
+                runner_cli._agy_detect(value)
+                assert seen["pinned"], value
+            runner_cli._agy_detect("false")
+            assert not seen["pinned"]
+
     def test_agys_scratch_is_removed_or_named(self, tmp_path: Path) -> None:
         # The rm's failure said nothing, and a copy of agy's token could stay.
         runner = runner_script()
@@ -2159,7 +2176,9 @@ class TestRunnerScript:
         # Predicted from what was installed, the count took in codex and Google for a
         # project pinned to Bedrock, where Hermes takes slots 2 and 3.
         runner = runner_script()
-        assert runner.count("JOB_PROVIDER[$num]=") == 5
+        # One per launcher, agy's by the family of the model it runs (three cases).
+        assert runner.count("JOB_PROVIDER[$num]=") == 7
+        assert "claude-*) JOB_PROVIDER[$num]=anthropic" in runner
         count = runner.index("N_PROVIDERS=$(printf '%s\\n' \"${JOB_PROVIDER[@]}\"")
         assert runner.index("# WATCHDOG") > count > runner.index("# R4: Spec-contract")
         assert "$HAS_CODEX && N_PROVIDERS" not in runner

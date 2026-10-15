@@ -96,12 +96,20 @@ def agy_model_choice(also_hide: tuple[Path, ...] = ()) -> tuple[str | None, str]
         return explicit, f"model {explicit} (AGY_MODEL)"
     if not shutil.which("agy"):
         return None, "agy is not installed"
+    if _PICK:
+        return _PICK[0]
     picked = _picked_agy_model(also_hide)
-    if picked[0] is None:
-        # Not kept: a listing that failed once -- offline for a moment -- is asked
-        # again next time, rather than leaving agy off for the rest of a long loop.
-        _picked_agy_model.cache_clear()
+    # Kept for the run, whatever is hidden on a later call: it is made once, at
+    # detection, with the repository under review hidden, and a launch that asked
+    # again listed models with it in view. Not kept when nothing was picked: a
+    # listing that failed once -- offline for a moment -- is asked again next time.
+    if picked[0] is not None:
+        _PICK.append(picked)
     return picked
+
+
+#: The model picked this run, once there is one (``agy_model_choice``).
+_PICK: list[tuple[str | None, str]] = []
 
 
 #: What a model slug looks like. ``agy models`` is a network answer, printed and then
@@ -109,9 +117,9 @@ def agy_model_choice(also_hide: tuple[Path, ...] = ()) -> tuple[str | None, str]
 _SLUG = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")
 
 
-@functools.cache
 def _picked_agy_model(also_hide: tuple[Path, ...] = ()) -> tuple[str | None, str]:
-    """Pick once per run: the sandbox check and every round run the same model."""
+    """The best model ``agy models`` lists, and how it was picked; once per run
+    (``_PICK``): the sandbox check and every round run the same model."""
     slugs = agy_models(also_hide)
     if not slugs:
         return None, (
@@ -152,6 +160,9 @@ def agy_models(also_hide: tuple[Path, ...] = ()) -> list[str]:
                 timeout=AGY_MODELS_TIMEOUT,
             )
     except (subprocess.TimeoutExpired, OSError):
+        return []
+    if done.returncode != 0:
+        # A listing that failed is no listing, whatever it printed before failing.
         return []
     slugs = (
         line.split("\t", 1)[0].strip()
@@ -235,6 +246,14 @@ def agy_schema(path: Path = RESULT_SCHEMA) -> str:
     and ValueError if it is not a schema -- checked here, because agy rejects a bad one
     only after launch, when the slot can no longer go to another backend.
     """
+    try:
+        return _checked_schema(path)
+    except RecursionError as exc:
+        # Nested past the parser's limit: not a schema, and not a crash of the round.
+        raise ValueError(f"{path} is nested too deeply to be a schema") from exc
+
+
+def _checked_schema(path: Path) -> str:
     schema = json.loads(path.read_text(encoding="utf-8"))
     # The shape it needs, always; jsonschema, where it is installed, checks the rest.
     _check_schema_shape(schema, path)

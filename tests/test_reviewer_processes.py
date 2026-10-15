@@ -249,3 +249,17 @@ class TestReviewerProcesses(AgyCase):
         )  # fmt: skip
         assert done.returncode == 128 + signal.SIGTERM, done.stderr
         assert int(done.stdout.strip(), 16) & (1 << (signal.SIGTERM - 1)) == 0
+
+    def test_a_symlink_put_in_place_of_scratch_is_removed_not_followed(
+        self, tmp_path: Path
+    ) -> None:
+        # Followed, its target's permissions were changed and its contents walked.
+        target = tmp_path / "elsewhere"
+        target.mkdir()
+        (target / "keep").write_text("x")
+        target.chmod(0o755)
+        link = tmp_path / "scratch"
+        link.symlink_to(target)
+        assert reviewers._remove_tree(link)
+        assert not link.is_symlink() and (target / "keep").exists()
+        assert target.stat().st_mode & 0o777 == 0o755

@@ -155,7 +155,7 @@ When opted in, the precedence flips for Anthropic reviewers:
 | Reviewer | 1st choice | 2nd choice | 3rd choice |
 |---|---|---|---|
 | Security (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
-| Correctness | Hermes Haiku (Bedrock) | Codex CLI GPT-5.5 only with `REVIEW_USE_CODEX=1`, else Claude CLI haiku (free) | Claude CLI haiku (free) |
+| Correctness | Hermes Haiku (Bedrock) | Codex CLI GPT-5.5, only with `REVIEW_USE_CODEX=1` | Claude CLI haiku (free) |
 | Readability | Hermes Sonnet (Bedrock) | agy only with `REVIEW_USE_AGY=1`, else Gemini CLI only with `REVIEW_USE_GEMINI=1` (a project that pinned Bedrock never falls to Google by default) | Claude CLI sonnet (free) |
 | Spec-contract (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
 
@@ -465,11 +465,11 @@ run the runner with that one. For cross-provider diversity, also install:
   Persist it in `~/.bashrc` / `~/.zshrc` / a project `.envrc` so
   every review picks it up.
 - [Gemini CLI](https://www.npmjs.com/package/@google/gemini-cli) for
-  Gemini (uses Google AI Studio, free tier available). Opt-in: set
+  Gemini (uses Google AI Studio, free tier available). It is opt-in: set
   `REVIEW_USE_GEMINI=1` to use it in slot 3 (agy is preferred where
-  installed). The pipeline
-  pins `gemini-2.5-flash` by default -- as of 2026-05, the free tier
-  does not include quota for `gemini-2.5-pro` (it returns HTTP 429).
+  installed). The pipeline pins `gemini-2.5-flash` by default -- as of
+  2026-05, the free tier does not include quota for `gemini-2.5-pro` (it
+  returns HTTP 429).
   If you have paid quota and want Pro, set `GEMINI_MODEL=gemini-2.5-pro`
   in your shell before running the agent.
 - [Antigravity CLI](https://antigravity.google/docs/cli/headless/) (`agy`)

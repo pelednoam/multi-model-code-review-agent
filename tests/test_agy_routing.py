@@ -123,8 +123,10 @@ class TestAgyRouting(AgyCase):
         monkeypatch.setattr(
             agy, "agy_models", lambda *a: calls.append(1) or list(self.LISTED)
         )
+        # Whatever a later call hides: the launch asked again, without the
+        # repository hidden, because the pick was kept per hidden set.
         assert (
-            agy.agy_model_choice()[0]
+            agy.agy_model_choice((Path("/srv/repo"),))[0]
             == agy.agy_model_choice()[0]
             == "gemini-3.8-flash-high"
         )
@@ -184,7 +186,7 @@ class TestAgyRouting(AgyCase):
 
         def run(cmd: list[str], **kw: object) -> SimpleNamespace:
             seen.update(cmd=cmd, cwd=kw.get("cwd"))
-            return SimpleNamespace(stdout=out, stderr="")
+            return SimpleNamespace(stdout=out, stderr="", returncode=0)
 
         monkeypatch.setattr(agy, "run", run)
         assert agy.agy_models() == self.LISTED
@@ -329,9 +331,23 @@ class TestAgyCommand(AgyCase):
         monkeypatch.setattr(agy, "agy_models", real_agy_models)
         monkeypatch.setattr(agy.shutil, "which", lambda c: f"/usr/bin/{c}")
         out = f"{slug}\tDisplay\ngemini-3.8-flash-high\tGemini\n"
-        monkeypatch.setattr(agy, "run", lambda *a, **k: SimpleNamespace(stdout=out))
+        monkeypatch.setattr(
+            agy, "run", lambda *a, **k: SimpleNamespace(stdout=out, returncode=0)
+        )
         monkeypatch.setenv("MMCRA_SKIP_AGY_SANDBOX_CHECK", "1")
         assert agy.agy_models() == ["gemini-3.8-flash-high"]
+
+    def test_a_listing_that_failed_lists_nothing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # What a failing `agy models` printed before failing was taken as the list.
+        monkeypatch.setattr(agy, "agy_models", real_agy_models)
+        monkeypatch.setenv("MMCRA_SKIP_AGY_SANDBOX_CHECK", "1")
+        out = "gemini-3.8-flash-high\tGemini\n"
+        monkeypatch.setattr(
+            agy, "run", lambda *a, **k: SimpleNamespace(stdout=out, returncode=1)
+        )
+        assert agy.agy_models() == []
 
     def test_an_explicit_model_that_is_not_a_name_is_refused(
         self, monkeypatch: pytest.MonkeyPatch

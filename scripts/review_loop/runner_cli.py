@@ -54,12 +54,9 @@ def _codex_check() -> int:
 def _agy_detect(prefer_hermes: str = "false") -> int:
     """Print the model agy will run, or nothing if agy is not to be used.
 
-    ``prefer_hermes`` is read as pinned unless it is exactly ``false``: the runner
-    passes ``true`` or ``false``, and anything else -- empty included -- keeping agy
-    out is the safe misreading.
-
-    ``prefer_hermes`` is the runner's PREFER_HERMES, ``true`` for a project pinned to
-    Bedrock: agy is then not even detected unless asked for by name.
+    ``prefer_hermes`` is the runner's PREFER_HERMES. Anything but exactly ``false``
+    -- empty included -- reads as pinned to Bedrock, the safe misreading, and agy is
+    then not even detected unless asked for by name (REVIEW_USE_AGY=1).
     """
     with contextlib.redirect_stdout(sys.stderr):
         # Pinned unless plainly "false": a value read the wrong way must not send a

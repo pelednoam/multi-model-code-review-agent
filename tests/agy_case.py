@@ -67,9 +67,9 @@ class AgyCase:
         (fake_state / "bin").mkdir(parents=True)
         (fake_state / "antigravity-oauth-token").write_text("not-a-real-token")
         monkeypatch.setattr(agy_sandbox, "agy_state_dir", lambda: fake_state)
-        agy._picked_agy_model.cache_clear()
+        agy._PICK.clear()
         yield
-        agy._picked_agy_model.cache_clear()
+        agy._PICK.clear()
 
     def _listing(self, monkeypatch: pytest.MonkeyPatch, slugs: list[str]) -> None:
         monkeypatch.setattr(agy.shutil, "which", lambda c: f"/usr/bin/{c}")

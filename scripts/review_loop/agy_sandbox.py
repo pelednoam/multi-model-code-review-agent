@@ -194,7 +194,8 @@ def agy_wrapper_parts(
     of a new process namespace and session, and clears the environment to
     ``_AGY_ENV`` with ``env -i`` before bwrap starts: bwrap's own /proc/1/environ
     would otherwise hand every API key to a file read. What that closes and what it
-    does not -- the network, mainly -- is docs/agy-sandbox.md; ``agy_is_confined``
+    does not -- the network, mainly -- is docs/agy-sandbox.md;
+    ``agy_sandbox_check.agy_is_confined``
     proves it.
 
     The bash launcher in docs/ensemble-review.md builds its wrapper by calling this
@@ -231,15 +232,15 @@ def agy_wrapper_parts(
     for sock in _HOST_SOCKETS:
         if _maskable(sock):
             wrap += ["--ro-bind", "/dev/null", sock]
-    for home in user_homes():
-        wrap += ["--tmpfs", str(home)]
-    # The repository under review and this agent's checkout, wherever they are:
-    # outside a home (/srv, a CI checkout) they were readable whole, environment
-    # files and all, by a model that only ever needs the scrubbed diff it is sent. Not /, which
-    # cannot be hidden without hiding everything.
-    for directory in dict.fromkeys(p.resolve() for p in hidden):
-        if directory != Path("/"):
-            wrap += ["--tmpfs", str(directory)]
+    # The homes, and the repository under review and this agent's checkout, wherever
+    # they are: outside a home (/srv, a CI checkout) those were readable whole,
+    # environment files and all, by a model that only ever needs the scrubbed diff
+    # it is sent. Not /, which cannot be hidden without hiding everything. Parents
+    # first: one mounted over a child already hidden took the child's mount point
+    # with it, and the check found nothing where it looked.
+    emptied = {*user_homes(), *(p.resolve() for p in hidden)} - {Path("/")}
+    for directory in sorted(emptied, key=lambda d: (len(d.parts), str(d))):
+        wrap += ["--tmpfs", str(directory)]
     exe = shutil.which("agy")
     if exe:
         target = str(Path(exe).resolve())

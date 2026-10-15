@@ -1403,6 +1403,27 @@ class TestCoverageSourceSpec:
     that must find a real gap.
     """
 
+    def test_coverage_leaves_no_data_file_in_the_repository(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Left at the root, .coverage was an untracked file the next review took in.
+        import scripts.preflight.coverage as cov_mod
+
+        seen: dict[str, object] = {}
+
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+            seen["env"] = kwargs.get("env")
+            return subprocess.CompletedProcess(cmd, 1, "", "")
+
+        (tmp_path / "src").mkdir()
+        monkeypatch.setattr(cov_mod, "REPO_ROOT", tmp_path)
+        monkeypatch.setattr(cov_mod, "SOURCE_DIRS", ["src/"])
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+        monkeypatch.setattr(cov_mod.subprocess, "run", fake_run)
+        cov_mod._run_pytest_with_coverage([])
+        data_file = Path(seen["env"]["COVERAGE_FILE"])  # type: ignore[index]
+        assert not data_file.is_relative_to(tmp_path)
+
     def test_the_gate_does_not_run_inside_a_test_run(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2594,19 +2615,30 @@ class TestCredentialShapes:
         "secret",
         [
             "postgres://app" + ":hunter2pass" + "@db.internal/prod",
+            "redis://" + ":hunter2pass" + "@cache:6379/0",
+            "https://u" + ":p" + "@proxy:3128",
             "AIza" + "S" * 35,
             "github" + "_pat_" + "A" * 40,
             "gh" + "s_" + "a" * 36,
             "sk" + "_live_" + "x" * 24,
             "xo" + "xb-" + "1234567890-abc",
         ],
-        ids=["url-userinfo", "google-api-key", "github-fine-grained", "github-app",
+        ids=["url-userinfo", "url-no-user", "url-short-password", "google-api-key", "github-fine-grained", "github-app",
              "stripe-live", "slack"],
     )  # fmt: skip
     def test_more_credential_shapes_are_redacted(self, secret: str) -> None:
         # None was caught, and with agy on by default the diff goes to Google too.
         line = f"+CONFIG = {secret!r}\n"
         assert scrub_diff.scrub_line(line, False) != line
+
+    def test_a_long_line_is_scanned_quickly(self) -> None:
+        # The URL pattern took quadratic time on a long alphanumeric line.
+        import time as clock
+
+        line = "+" + "a" * 200_000 + "\n"
+        started = clock.monotonic()
+        scrub_diff.scrub_line(line, False)
+        assert clock.monotonic() - started < 2
 
     def test_a_url_without_a_password_is_kept(self) -> None:
         line = "+see https://example.com/a:b and git@github.com:org/repo\n"

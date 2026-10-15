@@ -64,7 +64,7 @@ good -- continue to "Choosing the mode" below.
 
 If the user says "quick review", "review this", or just "ensemble review" -- use quick mode. Before spawning the quick-mode subagents, print one line: *"Quick mode (parent Claude Code's API allocation). Say 'full review' to use local CLIs instead."*
 
-If the user says "full review", "full ensemble review", or "ensemble review" -- use full mode.
+If the user says "full review" or "full ensemble review" -- use full mode.
 
 If the user says "hermes review", "bedrock review", or "isolated review", or if `.use-hermes` exists in the project root, use full mode AND prefer Hermes/Bedrock over local CLIs for Anthropic reviewers (see "Bedrock opt-in" below).
 
@@ -134,7 +134,7 @@ Bedrock opt-in precedence (PREFER_HERMES=true), used for regulated codebases tha
 | Reviewer | 1st choice | 2nd choice | 3rd choice |
 |---|---|---|---|
 | Security (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
-| Correctness | Hermes Haiku (Bedrock) | Codex CLI GPT-5.5 only with `REVIEW_USE_CODEX=1`, else Claude CLI haiku (free) | Claude CLI haiku (free) |
+| Correctness | Hermes Haiku (Bedrock) | Codex CLI GPT-5.5, only with `REVIEW_USE_CODEX=1` | Claude CLI haiku (free) |
 | Readability | Hermes Sonnet (Bedrock) | agy only with `REVIEW_USE_AGY=1`, else Gemini CLI only with `REVIEW_USE_GEMINI=1` (a project that pinned Bedrock never falls to Google by default) | Claude CLI sonnet (free) |
 | Spec-contract (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
 
@@ -550,11 +550,11 @@ publish_outputs() {
 # write files in $REVIEW_TMP, and a planted pid-N of 1 would have the runner signal every process
 # the user owns. JOB_PID holds each reviewer's job, set by its launcher, which runs in this shell,
 # and JOB_BACKEND the CLI that decides how its output is read; the pid-N and backend-N.txt files
-# are written only for watching from another shell. SCRATCH lists the scratch directories --
-# agy's workspace and a copy of its sign-in token, gemini's workspace -- which the agy job removes
-# when agy exits;
-# a job killed by the watchdog or the sweep never gets there, and neither does one whose runner is
-# interrupted, so the runner removes it too: after the sweep, and on any exit. An interrupted runner
+# are written only for watching from another shell. SCRATCH lists the scratch directories: agy's
+# workspace and the copy of its sign-in token, which the agy job removes when agy exits, and
+# gemini's workspace. A job killed by the watchdog or the sweep never gets that far, and neither
+# does one whose runner is interrupted, so the runner removes them all: after the sweep, and on
+# any exit. An interrupted runner
 # also takes down the reviewers it started rather than leaving them running.
 #
 # kill_jobs: each job is one process group (`set -m`), and everything it starts stays in it:
@@ -643,9 +643,12 @@ finish_round() {
 # token, and an rm that failed said nothing. Made writable first, in case agy made it read-only.
 remove_scratch() {
   [ "${#SCRATCH[@]}" -eq 0 ] && return 0
-  chmod -R u+rwx -- "${SCRATCH[@]}" 2>/dev/null
-  rm -rf -- "${SCRATCH[@]}"
   local dir
+  # A link where a directory was is removed as a link: chmod would change its target.
+  for dir in "${SCRATCH[@]}"; do
+    if [ -L "$dir" ]; then rm -f -- "$dir"; else chmod -R u+rwx -- "$dir" 2>/dev/null; fi
+  done
+  rm -rf -- "${SCRATCH[@]}"
   for dir in "${SCRATCH[@]}"; do
     [ -e "$dir" ] && echo "WARNING: could not remove $dir (agy's scratch); remove it by hand"
   done
@@ -690,7 +693,12 @@ launch_hermes() {
   JOB_BACKEND[$num]=hermes
   echo hermes > "$REVIEW_TMP/backend-$num.txt"   # for watching
   JOB_PROVIDER[$num]=anthropic
-  JOB_MODEL[$num]="$hermes_model"
+  case "$hermes_model" in   # named as the convergence loop names them
+    *opus*)   JOB_MODEL[$num]=claude-opus-4.6 ;;
+    *sonnet*) JOB_MODEL[$num]=claude-sonnet-4.6 ;;
+    *haiku*)  JOB_MODEL[$num]=claude-haiku-4.5 ;;
+    *)        JOB_MODEL[$num]="$hermes_model" ;;
+  esac
   echo $! > "$REVIEW_TMP/pid-$num"
   echo "R$num: Hermes ($hermes_model) [Bedrock]"
 }
@@ -800,7 +808,12 @@ launch_cli() {
       JOB_BACKEND[$num]=claude
       echo claude > "$REVIEW_TMP/backend-$num.txt"   # for watching
       JOB_PROVIDER[$num]=anthropic
-      JOB_MODEL[$num]="claude-$model"
+      # Named as the convergence loop names them, so a result reads the same from either path.
+      case "$model" in
+        opus)   JOB_MODEL[$num]=claude-opus-4.6 ;;
+        sonnet) JOB_MODEL[$num]=claude-sonnet-4.6 ;;
+        haiku)  JOB_MODEL[$num]=claude-haiku-4.5 ;;
+      esac
       echo $! > "$REVIEW_TMP/pid-$num"
       echo "R$num: Claude CLI ($model, tools: $tools) [Claude subscription]"
       ;;
@@ -880,7 +893,10 @@ launch_cli() {
       echo agy > "$REVIEW_TMP/backend-$num.txt"
       # Every descriptor the runner holds beyond 0-2 closed first: bwrap would hand each into
       # the sandbox, where the check -- which runs from Python, with them closed -- never saw it.
-      { for fd in /proc/$BASHPID/fd/*; do
+      # Listed before the loop: its own 2>/dev/null saves stderr in a descriptor of its own,
+      # which a list taken inside it would include, and closing it lost the job's stderr.
+      { fds=(/proc/$BASHPID/fd/*)
+        for fd in "${fds[@]}"; do
           fd=${fd##*/}; [[ $fd =~ ^[0-9]+$ ]] && [ "$fd" -gt 2 ] && eval "exec $fd>&-"
         done 2>/dev/null
         cd "$AGY_WS" && "${AGY_ENVP[@]}" timeout --foreground -k 10 "$REVIEWER_TIMEOUT" "${AGY_BWRAP[@]}" agy \

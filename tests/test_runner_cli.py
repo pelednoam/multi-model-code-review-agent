@@ -288,6 +288,15 @@ class TestRunnerCli:
         schema.write_text(json.dumps({"type": "object", "required": ["findings"]}))
         assert self._cli("agy-schema", str(schema)).returncode == 1
 
+    def test_a_schema_nested_past_the_parsers_limit_is_unusable(
+        self, tmp_path: Path
+    ) -> None:
+        # RecursionError went past the ValueError the slot's fallback catches.
+        schema = tmp_path / "s.json"
+        schema.write_text("[" * 100_000 + "]" * 100_000)
+        done = self._cli("agy-schema", str(schema))
+        assert done.returncode == 1 and "nested too deeply" in done.stderr
+
     def test_the_real_schema_is_usable(self) -> None:
         done = self._cli("agy-schema", str(SCHEMA_PATH))
         assert done.returncode == 0 and json.loads(done.stdout)["type"] == "object"

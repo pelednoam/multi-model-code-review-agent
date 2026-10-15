@@ -279,7 +279,16 @@ def _release_scratch() -> None:
 
 
 def _remove_tree(path: Path) -> bool:
-    """Remove ``path`` and everything in it, even what was made read-only."""
+    """Remove ``path`` and everything in it, even what was made read-only.
+
+    A symlink where the directory was -- put there after it was made -- is removed
+    as a link: followed, its target's permissions were changed, and its contents
+    walked.
+    """
+    if os.path.islink(path):
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+        return not os.path.lexists(path)
     shutil.rmtree(path, ignore_errors=True)
     if os.path.lexists(path):
         # A directory made read-only -- by a reviewer, say -- refuses to give up its
@@ -454,12 +463,14 @@ class _Round:
     prefer_hermes: bool = False
     #: The repository under review, which no reviewer's writable directory may be in.
     repo: Path | None = None
-    #: Where the reviewers write while they run (``_private_outputs``); round_dir
-    #: when None.
+    #: Where the reviewers write while they run: a private directory, published into
+    #: round_dir once all have stopped (``_publish_outputs``). None only in a test
+    #: that launches without one, which then writes into round_dir itself.
     out_dir: Path | None = None
 
     @property
     def writes_to(self) -> Path:
+        """The directory the reviewers write to while they run (``out_dir``)."""
         return self.out_dir or self.round_dir
 
 

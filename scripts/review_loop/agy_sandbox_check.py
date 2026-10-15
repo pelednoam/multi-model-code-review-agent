@@ -16,16 +16,13 @@ import struct
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from .agy_sandbox import agy_wrapper, scratch_dirs, user_homes
 from .config import REPO_ROOT, env_flag
 from .proc import run, signals_unwind
 from .results import printable
 from .unix_sockets import SOCK_DGRAM, Sock, unix_sockets
-
-if TYPE_CHECKING:
-    pass
 
 
 # -- proving the sandbox -------------------------------------------------------

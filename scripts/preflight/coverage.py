@@ -6,6 +6,8 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
 from typing import Any
 
 from .config import COVERAGE_TARGET, REPO_ROOT, SOURCE_DIRS
@@ -66,27 +68,32 @@ def _run_pytest_with_coverage(warnings: list[str]) -> dict[str, Any] | None:
             f"coverage gate inoperative: no SOURCE_DIRS exist on disk: {SOURCE_DIRS}"
         )
         return None
-    try:
-        result = subprocess.run(
-            [
-                _interpreter(),
-                "-m",
-                "pytest",
-                "tests/",
-                *cov_sources,
-                "--cov-report=json:" + str(cov_json),
-                "--cov-branch",
-                "-q",
-                "--no-header",
-            ],
-            cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-        warnings.append(f"coverage measurement failed: {e}")
-        return None
+    # coverage's own data file in a directory of its own, not the repository's root:
+    # left there, it was an untracked file the next review's diff took in.
+    with tempfile.TemporaryDirectory() as data_dir:
+        env = {**os.environ, "COVERAGE_FILE": str(Path(data_dir) / ".coverage")}
+        try:
+            result = subprocess.run(
+                [
+                    _interpreter(),
+                    "-m",
+                    "pytest",
+                    "tests/",
+                    *cov_sources,
+                    "--cov-report=json:" + str(cov_json),
+                    "--cov-branch",
+                    "-q",
+                    "--no-header",
+                ],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                timeout=300,
+                env=env,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            warnings.append(f"coverage measurement failed: {e}")
+            return None
     if not cov_json.exists():
         if result.returncode != 0:
             warnings.append(

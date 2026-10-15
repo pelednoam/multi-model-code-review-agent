@@ -130,9 +130,14 @@ SHAPE_PATTERNS = [
     re.compile(r"AIza[0-9A-Za-z_-]{35}"),
     re.compile(r"(?:sk|rk)_live_[0-9a-zA-Z]{20,}"),
     re.compile(r"xox[abprs]-[0-9A-Za-z-]{10,}"),
-    # A password in a URL's userinfo: scheme, "://", user, ":", password, "@" -- in a
-    # postgres or proxy URL. Written in two parts, so that this line is not one.
-    re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*:" + r"//[^\s/:@'\"]+:[^\s/@'\"]{3,}@"),
+    # A password in a URL's userinfo: scheme, "://", user (redis's may be empty),
+    # ":", password, "@" -- in a postgres, redis or proxy URL. The scheme anchored and
+    # bounded, so that a long line is scanned in linear time. Written in two parts, so
+    # that this line is not one.
+    re.compile(
+        r"(?<![a-zA-Z0-9+.-])[a-zA-Z][a-zA-Z0-9+.-]{0,31}:"
+        + r"//[^\s/:@'\"]*:[^\s/@'\"]+@"
+    ),
     re.compile(r"glpat-[a-zA-Z0-9\-]{20,}"),
     re.compile(r"(?i)DefaultEndpointsProtocol=https;AccountName="),
     re.compile(r'"type"\s*:\s*"service_account"'),

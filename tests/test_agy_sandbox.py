@@ -549,6 +549,16 @@ class TestAgySandboxCheck(AgyCase):
         reason = agy_sandbox_check._check_reachable(None, root_daemon)  # type: ignore[arg-type]
         assert reason and "uid 0" in reason
 
+    def test_nested_hidden_directories_are_mounted_parents_first(
+        self, tmp_path: Path
+    ) -> None:
+        # A parent mounted after its child took the child's mount point with it, and
+        # the check, finding nothing where it looked, failed a good sandbox.
+        outer = tmp_path / "srv"
+        inner = outer / "checkout"
+        wrap = agy_sandbox.agy_wrapper(tmp_path / "ws", tmp_path / "st", [inner, outer])
+        assert wrap.index(str(outer.resolve())) < wrap.index(str(inner.resolve()))
+
     def test_the_repository_under_review_is_hidden(self, tmp_path: Path) -> None:
         # Outside a home (/srv, a CI checkout) it was readable whole, secrets and all.
         repo = tmp_path / "srv" / "project"

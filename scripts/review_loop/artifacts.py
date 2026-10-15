@@ -2,8 +2,8 @@
 
 The round directory holds four files per reviewer and it is not obvious which
 one carries the findings. In particular `raw-N.txt` is *empty on a successful
-run* for the codex slot, because that backend is invoked with `-o result-N.json`
-and writes straight to the result file. A reader who checks `raw-N.txt` — the
+run* for the codex slot, because that backend is invoked with `-o` and writes
+its answer to `codex-out-N.txt`. A reader who checks `raw-N.txt` — the
 obvious-looking name — can conclude a reviewer failed when it succeeded.
 
 Writing this key into the round directory, and pointing at it from the console
@@ -33,6 +33,7 @@ Read `result-*.json`. Everything else is intermediate.
 |---|---|
 | `result-N.json` | **The findings.** One validated object per reviewer, matching `docs/ensemble_review_result_schema.json`. This is what you want. |
 | `raw-N.txt` | Whatever the CLI printed on stdout, before parsing. Empty for the codex slot on a *successful* run — see below. For agy, one stream-json event per line; the review is the final `result` event's `structured_output`, and only a turn whose status is `SUCCESS` counts. |
+| `codex-out-N.txt` | The codex slot's answer, its last message (`-o`), read before its `raw-N.txt`. |
 | `stderr-N.txt` | Diagnostics. Read this when a slot is missing a `result-N.json`. |
 | `prompt-N.txt` | The exact prompt that reviewer received. For agy it begins with a preamble telling it to call no tools. |
 | `backend-N.txt` | Which CLI ran slot N (`agy`, `claude`, `codex`, ...), for reading. The loop itself goes by what it launched, not by this file: only the slot it ran agy in has its `raw-N.txt` read as agy's stream-json, and the same shape from any other reviewer is ignored. |
@@ -41,10 +42,10 @@ Read `result-*.json`. Everything else is intermediate.
 
 ## Two things that look like failures and are not
 
-**An empty `raw-N.txt`.** The codex slot runs with `-o result-N.json` and
-writes its answer directly to the result file, so its raw file is empty every
-time it succeeds. Judge a slot by whether `result-N.json` exists and validates,
-never by the size of its raw file.
+**An empty `raw-N.txt`.** The codex slot runs with `-o` and writes its answer
+to `codex-out-N.txt`, so its raw file is empty every time it succeeds. Judge a
+slot by whether `result-N.json` exists, never by the size of its raw file: the
+loop writes it only from a validated answer, and removes any it did not write.
 
 **A file that is empty right now.** Reviewers stream output as they work and a
 round takes several minutes. A file inspected mid-run is not a finished file.

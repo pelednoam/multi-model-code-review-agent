@@ -1060,13 +1060,13 @@ class TestReviewerDeadline:
         from scripts.review_loop.reviewers import _has_result
 
         assert not _has_result(tmp_path, 2)
-        (tmp_path / "result-2.json").write_text("{}")
+        (tmp_path / "codex-out-2.txt").write_text("{}")
         assert _has_result(tmp_path, 2)
 
     def test_an_empty_result_file_is_not_a_result(self, tmp_path: Path) -> None:
         from scripts.review_loop.reviewers import _has_result
 
-        (tmp_path / "result-2.json").write_text("")
+        (tmp_path / "codex-out-2.txt").write_text("")
         assert not _has_result(tmp_path, 2)
 
 
@@ -2063,6 +2063,26 @@ class TestRunnerScript:
         )
         assert done.stdout.strip() == "GONE", done.stdout + done.stderr
 
+    def test_agys_scratch_is_removed_or_named(self, tmp_path: Path) -> None:
+        # The rm's failure said nothing, and a copy of agy's token could stay.
+        runner = runner_script()
+        locked = tmp_path / "locked"
+        (locked / "inner").mkdir(parents=True)
+        (locked / "inner").chmod(0o500)
+        script = tmp_path / "t.sh"
+        script.write_text(
+            f"AGY_SCRATCH=({shlex.quote(str(locked))})\n"
+            + shell_function(runner, "remove_agy_scratch")
+            + "remove_agy_scratch\n"
+            + 'rm() { :; }\nmkdir -p "${AGY_SCRATCH[0]}"\nremove_agy_scratch\n'
+        )
+        done = subprocess.run(
+            ["bash", str(script)], capture_output=True, text=True, timeout=30
+        )
+        # Made writable and removed; then, with rm made to fail, named.
+        assert done.stdout.count("WARNING: could not remove") == 1, done.stdout
+        assert "finish_round() {" in runner and "  remove_agy_scratch\n}" in runner
+
     def test_a_second_signal_does_not_cut_the_cleanup_short(
         self, tmp_path: Path
     ) -> None:
@@ -2201,9 +2221,8 @@ class TestRunnerScript:
         # the runner's list had no network tools. Now both are claude_denied's.
         runner = runner_script()
         assert 'local tools="${!tools_var:-Read Grep Glob}"' in runner
-        assert (
-            '--allowedTools "$tools" "${CLAUDE_DENY[@]}" --strict-mcp-config' in runner
-        )
+        assert '--allowedTools "$tools" "${CLAUDE_DENY[@]}" \\\n' in runner
+        assert "--strict-mcp-config --setting-sources user \\\n" in runner
         script = tmp_path / "t.sh"
         script.write_text(
             f"REVIEW_ROOT={shlex.quote(str(REPO_ROOT))}\n"
@@ -2235,6 +2254,8 @@ class TestRunnerScript:
     def test_the_loops_claude_reviewer_has_no_mcp_servers(self) -> None:
         cmd = reviewers_mod._claude_cmd(1)
         assert "--strict-mcp-config" in cmd
+        # Nor the project's settings: measured, a project SessionStart hook ran.
+        assert cmd[cmd.index("--setting-sources") + 1] == "user"
         denied = cmd[cmd.index("--disallowedTools") + 1].split()
         assert {"Bash", "Write", "WebFetch", "WebSearch"} <= set(denied)
 

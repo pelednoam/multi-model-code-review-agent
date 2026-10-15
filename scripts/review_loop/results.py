@@ -20,17 +20,6 @@ EXPECTED_REVIEWERS = {
 }
 
 
-def _try_load_existing_result(result_path: Path, slot: int) -> dict[str, Any] | None:
-    """Return a valid result dict from a pre-written result-N.json, else None."""
-    if not result_path.exists():
-        return None
-    try:
-        d = json.loads(result_path.read_text(encoding="utf-8", errors="replace"))
-    except (json.JSONDecodeError, OSError):
-        return None
-    return validate_result(d, slot, EXPECTED_REVIEWERS)
-
-
 #: Terminal control characters, which a reply decoded from JSON can carry raw: an
 #: escape sequence can rewrite or hide the lines above it, retitle the window, or on
 #: some terminals write the clipboard. A reviewer's text is shaped by the diff it read.
@@ -145,10 +134,10 @@ def parse_review(text: str) -> dict[str, Any] | None:
 
 
 def _extract_from_raw(
-    round_dir: Path, slot: int, backend: str
+    round_dir: Path, slot: int, backend: str, name: str = "raw-{}.txt"
 ) -> dict[str, Any] | None:
-    """Parse raw-{slot}.txt as JSON, writing result-{slot}.json on success."""
-    raw_path = round_dir / f"raw-{slot}.txt"
+    """Parse one of the slot's output files, writing result-{slot}.json on success."""
+    raw_path = round_dir / name.format(slot)
     if not raw_path.exists():
         return None
     text = _unwrap_envelope(raw_path.read_text(), backend == "agy")
@@ -172,20 +161,24 @@ def extract_results(
     output is read as an agy stream. Any reviewer can be talked into printing a line
     shaped like agy's ``result`` event -- one with a failed status would silence a
     real review -- so the shape alone decides nothing.
+
+    Each slot is read from its own CLI's output, as the full-mode runner reads it:
+    codex's answer (-o, ``codex-out-N.txt``), then stdout (``raw-N.txt``). A
+    result-N.json is only ever written here, so one already present was put there by
+    something else -- a reviewer with a file tool, hermes --yolo -- and is removed, as
+    is one for a slot with no usable answer: the round's files list only real ones.
     """
     results: list[dict[str, Any] | None] = []
     for i in range(1, 5):
+        (round_dir / f"result-{i}.json").unlink(missing_ok=True)
         backend = answered_by.get(i)
-        # Only codex writes result-N.json itself (-o). Any other slot's, there before it
-        # is parsed, was put there by something else -- a reviewer with a file tool,
-        # hermes --yolo -- and would stand in for that slot's own answer. A slot never
-        # launched has no answer at all, whatever its files say.
-        existing = None
+        found = None
         if backend == "codex":
-            existing = _try_load_existing_result(round_dir / f"result-{i}.json", i)
-        if existing is None and backend is not None:
-            existing = _extract_from_raw(round_dir, i, backend)
-        results.append(existing)
+            found = _extract_from_raw(round_dir, i, backend, "codex-out-{}.txt")
+        # A slot never launched has no answer at all, whatever its files say.
+        if found is None and backend is not None:
+            found = _extract_from_raw(round_dir, i, backend)
+        results.append(found)
     return results
 
 

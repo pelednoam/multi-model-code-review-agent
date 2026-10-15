@@ -45,7 +45,6 @@ from scripts.review_loop import (  # noqa: E402
     FindingKey,
     ScrubberFailedError,
     SecretsDetectedError,
-    run as _run,
     apply_fixes,
     build_reviewer_prompt,
     collect_blocking_findings,
@@ -65,6 +64,7 @@ from scripts.review_loop import (  # noqa: E402
     tamper,
     validate_result,
 )
+from scripts.review_loop.proc import run as _run  # noqa: E402
 
 __all__ = [
     "MERGE_TIMEOUT",

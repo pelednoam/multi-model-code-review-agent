@@ -170,6 +170,11 @@ def _claude_cmd(slot: int) -> list[str]:
         # No MCP servers: the user's own, configured for their sessions, would
         # each be a tool the deny list does not name.
         "--strict-mcp-config",
+        # The user's settings only. The project's -- the repository under review,
+        # which chose them -- can hold hooks, an apiKeyHelper and env that run
+        # commands no deny list covers; measured, a project SessionStart hook ran.
+        "--setting-sources",
+        "user",
         "--output-format",
         "json",
     ]
@@ -250,10 +255,36 @@ def _scratch_dir(prefix: str) -> Path:
 
 
 def _release_scratch() -> None:
-    """Remove the round's scratch directories."""
+    """Remove the round's scratch directories, saying which could not be removed.
+
+    One that cannot be removed stays listed, for the loop's exit to try again, and is
+    named: agy's state copy holds its sign-in token, and forgetting it silently left
+    the copy on disk with nothing said.
+    """
     with signals_deferred():
-        while _ROUND_SCRATCH:
-            shutil.rmtree(_ROUND_SCRATCH.pop(), ignore_errors=True)
+        kept = []
+        for path in _ROUND_SCRATCH:
+            if not _remove_tree(path):
+                kept.append(path)
+                print(f"  WARNING: could not remove {path}; remove it by hand")
+        _ROUND_SCRATCH[:] = kept
+
+
+def _remove_tree(path: Path) -> bool:
+    """Remove ``path`` and everything in it, even what was made read-only."""
+    shutil.rmtree(path, ignore_errors=True)
+    if os.path.lexists(path):
+        # A directory made read-only -- by a reviewer, say -- refuses to give up its
+        # entries; made writable first, top down, it does.
+        with contextlib.suppress(OSError):
+            os.chmod(path, 0o700)
+        for root, dirs, _ in os.walk(path):
+            for name in [root, *(os.path.join(root, d) for d in dirs)]:
+                with contextlib.suppress(OSError):
+                    if not os.path.islink(name):
+                        os.chmod(name, 0o700)
+        shutil.rmtree(path, ignore_errors=True)
+    return not os.path.lexists(path)
 
 
 atexit.register(_release_scratch)
@@ -309,7 +340,7 @@ def _codex_extra_args() -> list[str]:
 def _choose_command(
     slot: int,
     prompt_path: Path,
-    round_dir: Path,
+    out_dir: Path,
     backends: dict[str, bool],
     prefer_hermes: bool = False,
 ) -> tuple[list[str], str | None] | None:
@@ -337,7 +368,7 @@ def _choose_command(
             return _hermes_cmd(prompt_path, _SONNET_BEDROCK), None
 
     if slot == 2 and backends["codex"]:
-        result_path = round_dir / f"result-{slot}.json"
+        result_path = out_dir / f"codex-out-{slot}.txt"
         return [
             "codex",
             "exec",
@@ -409,6 +440,13 @@ class _Round:
     prefer_hermes: bool = False
     #: The repository under review, which no reviewer's writable directory may be in.
     repo: Path | None = None
+    #: Where the reviewers write while they run (``_private_outputs``); round_dir
+    #: when None.
+    out_dir: Path | None = None
+
+    @property
+    def writes_to(self) -> Path:
+        return self.out_dir or self.round_dir
 
 
 class _Picked(NamedTuple):
@@ -452,7 +490,7 @@ def _launch_one(
     if backend in _stdin_backends():
         fed = agy_message(prompt) if backend == "agy" else prompt
     proc, out_f, err_f = _spawn(
-        slot, picked.cmd, backend, picked.workspace, fed, round_.round_dir
+        slot, picked.cmd, backend, picked.workspace, fed, round_.writes_to
     )
     return slot, proc, backend, out_f, err_f
 
@@ -468,7 +506,7 @@ def _pick_backend(slot: int, round_: _Round) -> _Picked | None:
     first, without_agy = round_.backends, {**round_.backends, "agy": False}
     for backends in (first, without_agy):
         choice = _choose_command(
-            slot, prompt_path, round_.round_dir, backends, round_.prefer_hermes
+            slot, prompt_path, round_.writes_to, backends, round_.prefer_hermes
         )
         if choice is None:
             return None
@@ -488,7 +526,7 @@ def _spawn(
     backend: str,
     workspace: Path | None,
     fed: str | None,
-    round_dir: Path,
+    out_dir: Path,
 ) -> tuple[subprocess.Popen[str], IO[str], IO[str]]:
     """Start ``cmd`` with ``fed`` on its stdin, writing to the slot's output files.
 
@@ -498,8 +536,8 @@ def _spawn(
     outlive this function on success; launch_reviewers closes them.
     """
     with contextlib.ExitStack() as failed:
-        out_f = failed.enter_context(_output(round_dir / f"raw-{slot}.txt"))
-        err_f = failed.enter_context(_output(round_dir / f"stderr-{slot}.txt"))
+        out_f = failed.enter_context(_output(out_dir / f"raw-{slot}.txt"))
+        err_f = failed.enter_context(_output(out_dir / f"stderr-{slot}.txt"))
         with _feed(fed) as feed:
             proc = subprocess.Popen(
                 cmd,
@@ -625,20 +663,24 @@ def launch_reviewers(
     wrong as often as it is right.
     """
     procs: list[ReviewerProc] = []
-    round_ = _Round(diff, audit, context, round_dir, backends, prefer_hermes, repo)
+    out_dir: Path | None = None
     # A plain SIGTERM or SIGHUP would skip the finally below, leaving the reviewers
     # running and agy's token copy on disk.
     with signals_unwind():
         try:
+            out_dir = _scratch_dir("mmcra-out-")
+            round_ = _Round(
+                diff, audit, context, round_dir, backends, prefer_hermes, repo, out_dir
+            )
             for i, lens_args in enumerate(_LENSES, 1):
                 tracked = _launch_one(i, lens_args, round_)
                 if tracked is not None:
                     procs.append(tracked)
-            _await_reviewers(procs, round_dir, diff.count("\n") + 1)
+            _await_reviewers(procs, out_dir, diff.count("\n") + 1)
             return {slot: backend for slot, _, backend, _, _ in procs}
         finally:
             # Every group, finished or not: a reviewer that exited can leave helpers
-            # running in its group, spending quota and writing into round_dir. Each
+            # running in its group, spending quota and writing its output. Each
             # leader is still unreaped (``_exit_status``), so each number is still
             # this run's group. A second signal waits until this is done.
             with signals_deferred():
@@ -646,10 +688,33 @@ def launch_reviewers(
                     _stop(proc)
                     out_f.close()
                     err_f.close()
+                if out_dir is not None:
+                    _publish_outputs(out_dir, round_dir)
                 _release_scratch()
 
 
-def _await_reviewers(procs: list[ReviewerProc], round_dir: Path, n_lines: int) -> None:
+#: What a reviewer writes while it runs, per slot: stdout, stderr, codex's answer.
+_OUTPUTS = ("raw-{}.txt", "stderr-{}.txt", "codex-out-{}.txt")
+
+
+def _publish_outputs(out_dir: Path, round_dir: Path) -> None:
+    """Copy what the reviewers wrote into round_dir, once every one has stopped.
+
+    They write into a private directory of the round's (``_scratch_dir``), not into
+    round_dir: there, one reviewer with a file tool -- hermes runs ``--yolo`` -- could
+    write another's output while both ran, and answer for it. Copied only when no
+    reviewer is left to write, and extraction reads the copies. A reviewer running as
+    the same user could still find the private directory; this takes away the
+    obvious path, and docs/ensemble-review.md says so.
+    """
+    for slot in range(1, len(_LENSES) + 1):
+        for pattern in _OUTPUTS:
+            name = pattern.format(slot)
+            if (out_dir / name).is_file():
+                shutil.copyfile(out_dir / name, round_dir / name)
+
+
+def _await_reviewers(procs: list[ReviewerProc], out_dir: Path, n_lines: int) -> None:
     """Wait for every reviewer, reporting who is still working.
 
     One deadline for the whole round, not one per reviewer. `proc.wait(timeout)`
@@ -682,15 +747,15 @@ def _await_reviewers(procs: list[ReviewerProc], round_dir: Path, n_lines: int) -
             break
         now = time.monotonic()
         if now >= deadline:
-            _give_up(pending, round_dir, budget)
+            _give_up(pending, out_dir, budget)
             return
         if now - last_report >= PROGRESS_INTERVAL:
-            print(_progress(procs, pending, round_dir, now - started, cpu))
+            print(_progress(procs, pending, out_dir, now - started, cpu))
             last_report = now
         time.sleep(POLL_INTERVAL)
 
 
-def _give_up(pending: dict[int, ReviewerProc], round_dir: Path, budget: int) -> None:
+def _give_up(pending: dict[int, ReviewerProc], out_dir: Path, budget: int) -> None:
     """Stop waiting, and take what arrives anyway.
 
     ``proc.kill()`` kills the process we started, which is not always the one
@@ -701,7 +766,7 @@ def _give_up(pending: dict[int, ReviewerProc], round_dir: Path, budget: int) -> 
     away.
 
     So: kill the process *group* where the platform has them, then keep looking
-    for a result file for a short grace period before giving up.
+    for codex's answer file for a short grace period before giving up.
     """
     for slot, tracked in pending.items():
         _, proc, _, out_f, err_f = tracked
@@ -710,14 +775,20 @@ def _give_up(pending: dict[int, ReviewerProc], round_dir: Path, budget: int) -> 
         err_f.close()
         print(f"  R{slot}: TIMEOUT after {budget}s")
 
-    waiting = {slot for slot in pending if not _has_result(round_dir, slot)}
+    # Only codex's answer is a file of its own that can still land; the others'
+    # are their stdout, which ended with them.
+    waiting = {
+        slot
+        for slot, (_, _, backend, _, _) in pending.items()
+        if backend == "codex" and not _has_result(out_dir, slot)
+    }
     if not waiting:
         return
     print(f"  ...watching {LATE_RESULT_GRACE}s for a late result from {_slots(waiting)}")
     until = time.monotonic() + LATE_RESULT_GRACE
     while waiting and time.monotonic() < until:
         for slot in sorted(waiting):
-            if _has_result(round_dir, slot):
+            if _has_result(out_dir, slot):
                 print(f"  R{slot}: arrived after the deadline -- kept")
                 waiting.discard(slot)
         time.sleep(POLL_INTERVAL)
@@ -730,9 +801,10 @@ def _slots(slots: set[int]) -> str:
     return ", ".join(f"R{slot}" for slot in sorted(slots))
 
 
-def _has_result(round_dir: Path, slot: int) -> bool:
-    """Whether this reviewer has written a result file with something in it."""
-    path = round_dir / f"result-{slot}.json"
+def _has_result(out_dir: Path, slot: int) -> bool:
+    """Whether codex, the one reviewer that writes its answer to a file of its own
+    (-o), has written it, with something in it."""
+    path = out_dir / f"codex-out-{slot}.txt"
     return path.exists() and path.stat().st_size > 0
 
 
@@ -757,7 +829,7 @@ def _kill_group(proc: subprocess.Popen[str]) -> None:
 def _progress(
     procs: list[ReviewerProc],
     pending: dict[int, ReviewerProc],
-    round_dir: Path,
+    out_dir: Path,
     elapsed: float,
     cpu: dict[int, float],
 ) -> str:
@@ -780,15 +852,15 @@ def _progress(
         if slot not in pending:
             parts.append(f"R{slot}({backend}) done")
             continue
-        parts.append(f"R{slot}({backend}) {_working(round_dir, slot, proc, cpu)}")
+        parts.append(f"R{slot}({backend}) {_working(out_dir, slot, proc, cpu)}")
     return f"  ...{_clock(elapsed)} · " + " · ".join(parts)
 
 
 def _working(
-    round_dir: Path, slot: int, proc: subprocess.Popen[str], cpu: dict[int, float]
+    out_dir: Path, slot: int, proc: subprocess.Popen[str], cpu: dict[int, float]
 ) -> str:
     """What this reviewer has to show for itself since the last report."""
-    written = _bytes_written(round_dir, slot)
+    written = _bytes_written(out_dir, slot)
     used = _cpu_seconds(proc.pid)
     if used is None:
         return _size(written)
@@ -821,11 +893,11 @@ def _cpu_seconds(pid: int) -> float | None:
     return ticks / os.sysconf("SC_CLK_TCK")
 
 
-def _bytes_written(round_dir: Path, slot: int) -> int:
+def _bytes_written(out_dir: Path, slot: int) -> int:
     """How much this reviewer has produced, on either stream."""
     total = 0
-    for name in (f"raw-{slot}.txt", f"stderr-{slot}.txt", f"result-{slot}.json"):
-        path = round_dir / name
+    for name in (pattern.format(slot) for pattern in _OUTPUTS):
+        path = out_dir / name
         if path.exists():
             total += path.stat().st_size
     return total

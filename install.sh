@@ -57,7 +57,9 @@ if command -v codex >/dev/null 2>&1; then
   echo "Checking that the codex sandbox is genuinely read-only on this host..."
   _d=$(mktemp -d); echo original > "$_d/canary.txt"
   _ran=$(codex sandbox -- sh -c "echo SANDBOX_OK" 2>&1 || true)
-  codex sandbox -- sh -c "echo changed > $_d/canary.txt" >/dev/null 2>&1 || true
+  # The path as an argument, not spliced into the script: a TMPDIR with a space or a shell
+  # character in it would split the path or run.
+  codex sandbox -- sh -c 'echo changed > "$1"' codex-check "$_d/canary.txt" >/dev/null 2>&1 || true
   _after=$(cat "$_d/canary.txt" 2>/dev/null || echo "")
   if ! printf '%s' "$_ran" | grep -q SANDBOX_OK; then
     echo "  WARNING: codex's sandbox does not start on this host."

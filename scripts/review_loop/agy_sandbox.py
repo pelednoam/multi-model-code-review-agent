@@ -1,7 +1,7 @@
 """agy's sandbox: the bubblewrap wrapper it runs under.
 
-agy cannot make itself read-only (``agy``'s docstring has the measurements), so the
-boundary is the operating system's. Measured under this wrapper with
+agy cannot make itself read-only (the measurements are in the ``agy`` module's
+docstring), so the boundary is the operating system's. Measured under this wrapper with
 --mode=accept-edits, the worst case, agy's own write_to_file failed with "read-only
 file system". ``agy_sandbox_check`` proves it. What it closes and what it does not is
 docs/agy-sandbox.md.

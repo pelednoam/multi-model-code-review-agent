@@ -14,9 +14,11 @@ convergence loop and the full-mode runner call it.
 
 ## What it closes
 
-- **Writes** anywhere but two throwaway directories outside the repository: an empty
-  workspace, and the copy of agy's state mounted over `~/.gemini/antigravity-cli`.
-  Both are removed when the round ends.
+- **Writes that outlive the sandbox**, anywhere but two throwaway directories outside
+  the repository: an empty workspace, and the copy of agy's state mounted over
+  `~/.gemini/antigravity-cli`. Both are removed when the round ends; one that
+  cannot be is named. The empty `/tmp`, `/run` and home mounts are writable inside,
+  and vanish with the sandbox.
 - **The home directory**, read whole: `$HOME`, and the account's own where `HOME`
   points elsewhere (CI, `sudo -E`). Both are replaced by empty ones, so there is no
   `~/.ssh`, no cloud credentials and no other tools' tokens. A home of `/`, or an
@@ -45,9 +47,12 @@ convergence loop and the full-mode runner call it.
     up in a list (docker's, LXD's and Incus's are masked so that they do not cost
     the slot). The check asks the kernel (`sock_diag`, over netlink) for the
     sockets of the host's network namespace, each by the exact path it was bound
-    at; if the kernel will not list them, the check fails. A socket bound in
-    another namespace (a container's), or whose directory was renamed after, is
-    not found at the path that reaches it;
+    at; if the kernel will not list them, or the list comes back interrupted, the
+    check fails. A socket bound in another namespace (a container's), or whose
+    directory was renamed after, is not found at the path that reaches it. Another
+    user's abstract socket -- a session bus or an X server, which admit their own
+    user only -- is not counted, so that no local user can switch the slot off by
+    binding one;
   - a session bus on an abstract socket (`dbus-launch`'s, IBus's);
   - an X server that admits your user without its cookie. Stock GNOME and
     Xwayland grant `SI:localuser`, and a program inside could type into a terminal
@@ -90,6 +95,10 @@ included, unless `REVIEW_USE_AGY=1`.
   pointing at the branch.
 - **agy's browser and MCP tools.** Headless agy refused the one shell command it
   tried, but whether those tools reach the network unprompted has not been tested.
+- **Kernel keyrings.** They are not namespaced: keys this user owns -- Kerberos
+  tickets, ecryptfs or fscrypt keys, anything `keyctl` stored -- are readable
+  inside, as they are to any of the user's processes. Closing that takes a seccomp
+  filter on the `keyctl` calls, which the wrapper does not install.
 - **`@path` mentions in the prompt.** Whether agy reads a file named that way in
   stream-json input, and sends its contents to the model, has not been measured. A
   diff line of that shape is passed through as it is; the file would come from

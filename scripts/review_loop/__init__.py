@@ -32,7 +32,6 @@ from .findings import (
 from .gate import run_gate, run_tests
 from .git_ops import commit_and_push
 from .merge_agent import apply_fixes
-from .proc import run
 from .results import extract_results, missing_reviewers
 from .reviewers import build_reviewer_prompt, launch_reviewers
 
@@ -46,7 +45,6 @@ __all__ = [
     "FindingKey",
     "ScrubberFailedError",
     "SecretsDetectedError",
-    "run",
     "write_artifacts_key",
     "apply_fixes",
     "build_reviewer_prompt",

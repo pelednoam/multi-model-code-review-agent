@@ -68,7 +68,7 @@ review missed.
 | Artifact/manifest audit | no | yes | yes | yes |
 | Coverage-gap detection | no | yes | yes | yes |
 | Per-reviewer attribution | no | 2 lenses | 4 lenses | 4 lenses |
-| Write isolation | no | no | `--disallowedTools`; codex and agy sandboxed | `-t file` |
+| Write isolation | no | no | `--disallowedTools`; codex and agy sandboxed | none: `-t file --yolo` can write; the loop's tamper check reports it |
 | Structured JSON schema | no | no | yes | yes |
 | Review packet persistence | no | no | yes | yes |
 | Cross-provider models | no | no | with Codex + agy/Gemini | any provider |
@@ -505,7 +505,7 @@ Anthropic reviewers. For cross-provider diversity, also install:
   prompt tells it to call no tools: headless agy refuses them, and a
   refused call ends its turn with no answer.
 - [Hermes Agent](https://github.com/NousResearch/hermes-agent) +
-  AWS Bedrock for best isolation (data stays in your AWS account)
+  AWS Bedrock for data isolation (data stays in your AWS account)
 
 ## Quick start
 
@@ -743,7 +743,7 @@ have detected it via fingerprint matching and exited with code 2
 
 | Backend | Data path | Isolation | Cost |
 |---|---|---|---|
-| Hermes+Bedrock | Your AWS account | Best (`-t file`) | Bedrock pricing |
+| Hermes+Bedrock | Your AWS account | Data: best (stays in your AWS account). Tools: the file toolset with `--yolo`, which can write; the loop's tamper check reports writes | Bedrock pricing |
 | Claude CLI | Anthropic infrastructure | Good (`--allowedTools` + `--disallowedTools`) | Claude subscription |
 | Codex CLI | OpenAI infrastructure | Good (sandbox) | ChatGPT subscription |
 | Gemini CLI | Google infrastructure | Good (`--approval-mode plan`) | AI Studio free tier |

@@ -143,9 +143,9 @@ Bedrock opt-in precedence (PREFER_HERMES=true), used for regulated codebases tha
 
 | CLI | Non-interactive | Read-only | Input | Output |
 |---|---|---|---|---|
-| `claude` | `-p` | `--allowedTools "Read Grep Glob"` **plus** `--disallowedTools "Edit Write MultiEdit NotebookEdit Bash WebFetch WebSearch"` and `--strict-mcp-config` (no MCP servers) -- `--allowedTools` alone only skips the permission prompt, it does *not* confine the agent | stdin (`< prompt.txt`) | `--output-format json` wraps in `{"result":"..."}` |
-| `codex` | `codex exec` **plus `-s read-only` and `-c approvals_reviewer="user"`** (in both the convergence loop and this runner) -- both are pinned by the tool and neither is optional: no sandbox flag was passed at all before, and `-s read-only` on its own is silently overridden by a global `approvals_reviewer = "auto_review"` (see docs/codex-sandbox.md). Codex is also canary-tested at launch and its slot is DROPPED if the sandbox does not actually refuse a write (optional `-m <model> -c model_reasoning_effort=<level>` -- override via `CODEX_MODEL`, `CODEX_REASONING_EFFORT`; `=high` is the "GPT-5.5 Pro" equivalent) | verified read-only, not assumed | stdin (pipe) | `-o <file>` writes last message |
-| `gemini` | `-p` | `--model <m> --approval-mode plan --skip-trust` (default `<m>` is `gemini-2.5-flash` for free-tier compatibility; override via `GEMINI_MODEL`) | stdin (pipe) | stdout (text, may have fences) |
+| `claude` | `-p` | `--allowedTools "Read Grep Glob"` **plus** `--disallowedTools "Edit Write MultiEdit NotebookEdit Bash WebFetch WebSearch"`, `--strict-mcp-config` (no MCP servers) and `--setting-sources user` (no project hooks) -- `--allowedTools` alone only skips the permission prompt, it does *not* confine the agent | stdin (`< prompt.txt`) | `--output-format json` wraps in `{"result":"..."}` |
+| `codex` | `codex exec` **plus `-s read-only` and `-c approvals_reviewer="user"`** (in both the convergence loop and this runner) -- both are pinned by the tool and neither is optional: no sandbox flag was passed at all before, and `-s read-only` on its own is silently overridden by a global `approvals_reviewer = "auto_review"` (see docs/codex-sandbox.md). Codex is also canary-tested at launch and its slot is DROPPED if the sandbox does not actually refuse a write (optional `-m <model> -c model_reasoning_effort=<level>` -- override via `CODEX_MODEL`, `CODEX_REASONING_EFFORT`; `=high` is the "GPT-5.5 Pro" equivalent) | verified read-only, not assumed | stdin (file) | `-o <file>` writes last message |
+| `gemini` | `-p` | `--model <m> --approval-mode plan --skip-trust` (default `<m>` is `gemini-2.5-flash` for free-tier compatibility; override via `GEMINI_MODEL`) | stdin (file) | stdout (text, may have fences) |
 | `agy` | `--input-format stream-json --output-format stream-json` (no `-p`: the prompt is one JSON line on stdin, because a single argument is capped at 128 KB) **plus `--sandbox --disable-slash-commands`**, pinned. On by default where installed; `REVIEW_USE_AGY=0` switches it off. Model: `AGY_MODEL` if set, else the best Gemini model `agy models` lists, picked each run. agy has no deny list and was measured writing outside its workspace, so it runs under **bubblewrap** (see [agy-sandbox.md](agy-sandbox.md)), verified at startup without a model call and again before each launch; the slot goes to its next backend if that fails. The prompt opens with a no-tools preamble: a refused tool call ends agy's turn with no answer | bubblewrap read-only filesystem, verified; `--sandbox --disable-slash-commands` (no `--mode=plan`: it is a slash command, so a no-op once expansion is off) | stdin (one stream-json line) | stream-json; the last `result` event carries `structured_output` (enforced by `--json-schema`) |
 | `hermes` | `-z --yolo` | `-t file` | `-z` flag (has ARG_MAX risk for large prompts) | stdout (the answer text; the prompt asks for the JSON in the reply, not in a file) |
 
@@ -173,10 +173,10 @@ for f in "$ROUND"/result-*.json; do echo "$f: $(jq '.findings | length' "$f")"; 
 **Two traps worth knowing about, because both look like a failed reviewer:**
 
 - **`raw-N.txt` is not the output.** It holds whatever the CLI printed on
-  stdout before parsing. The codex slot runs with `-o result-N.json` and writes
-  straight to the result file, so *its raw file is empty on every successful
-  run*. Judge a slot by whether `result-N.json` exists and validates, never by
-  the size of its raw file.
+  stdout before parsing. The codex slot runs with `-o` and writes its answer to
+  `codex-out-N.txt`, so *its raw file is empty on every successful run*. Judge a
+  slot by whether `result-N.json` exists, never by the size of its raw file: the
+  loop writes it only from a validated answer, and removes any it did not write.
 - **A file read mid-run is not a finished file.** Reviewers stream output over
   several minutes. Wait for `Reviewers finished in Ns` before concluding
   anything; a file inspected at 45 seconds into a five-minute round will look
@@ -185,7 +185,7 @@ for f in "$ROUND"/result-*.json; do echo "$f: $(jq '.findings | length' "$f")"; 
 When a slot genuinely produced nothing, `result-N.json` is absent and
 `stderr-N.txt` says why.
 
-All CLIs receive prompts via stdin (pipe) to avoid ARG_MAX overflow. Hermes uses `-z` which has a size limit -- for very large diffs, consider writing the prompt to a temp file and using Hermes's file-based input if available.
+claude, codex, gemini and agy get the prompt on stdin from a file, never a pipe: a pipe holds 64 KB and stalled the launch until the reviewer read it. agy's is one stream-json line. Hermes takes it with `-z`: `@file` in the convergence loop, the text itself in the full-mode runner, which is subject to the ARG_MAX limit on one argument -- for very large diffs, prefer the loop or Claude CLI.
 
 # Steps shared by both modes
 
@@ -538,7 +538,19 @@ fi
 finish_round() {
   trap '' INT TERM HUP QUIT
   kill_jobs 1 2 3 4
-  [ "${#AGY_SCRATCH[@]}" -eq 0 ] || rm -rf -- "${AGY_SCRATCH[@]}"
+  remove_agy_scratch
+}
+# remove_agy_scratch: agy's scratch gone, or named: one left behind may hold a copy of its sign-in
+# token, and an rm that failed said nothing. Made writable first, in case agy made it read-only.
+remove_agy_scratch() {
+  [ "${#AGY_SCRATCH[@]}" -eq 0 ] && return 0
+  chmod -R u+rwx -- "${AGY_SCRATCH[@]}" 2>/dev/null
+  rm -rf -- "${AGY_SCRATCH[@]}"
+  local dir
+  for dir in "${AGY_SCRATCH[@]}"; do
+    [ -e "$dir" ] && echo "WARNING: could not remove $dir (agy's scratch); remove it by hand"
+  done
+  return 0
 }
 trap finish_round EXIT
 trap 'exit 130' INT
@@ -561,7 +573,8 @@ ROUND_DEADLINE=$((REVIEWER_TIMEOUT + 90))
 # waiter - `wait` refuses a pid that is not a child of the shell calling it, so a sibling waiter
 # would fail instantly and record a bogus status for a reviewer that is still running.
 
-# Launch via Hermes (best isolation: -t file; its JSON answer is read from stdout-N.txt).
+# Launch via Hermes. Its data stays in your AWS account, but -t file --yolo can still write files:
+# its writes are not prevented, only seen afterwards. Its JSON answer is read from stdout-N.txt.
 # Hermes -z takes prompt as argument (no stdin mode). This means:
 # - Subject to ARG_MAX for very large diffs (use Claude CLI instead)
 # - Prompt content visible in /proc/PID/cmdline to local users
@@ -666,9 +679,12 @@ launch_cli() {
       claude_deny "$num" "$tools" \
         || { echo "R$num: SKIPPED (could not work out what to deny the claude reviewer)"; return 1; }
       # --strict-mcp-config with no --mcp-config: none of the user's MCP servers, each a tool the
-      # deny list does not name.
+      # deny list does not name. --setting-sources user: not the project's settings, whose hooks,
+      # apiKeyHelper and env -- chosen by the repository under review -- run commands no deny
+      # list covers.
       { timeout --foreground -k 10 "$REVIEWER_TIMEOUT" claude -p --model "$model" \
-          --allowedTools "$tools" "${CLAUDE_DENY[@]}" --strict-mcp-config \
+          --allowedTools "$tools" "${CLAUDE_DENY[@]}" \
+          --strict-mcp-config --setting-sources user \
           --output-format json < "$prompt_file" \
           1>"$REVIEW_TMP/claude-raw-$num.json" \
           2>"$REVIEW_TMP/stderr-$num.txt"
@@ -769,7 +785,6 @@ if ! $HAS_CLAUDE && ! $HAS_HERMES; then
   exit 1
 fi
 
-
 # R1: Security (Opus) -- local CLI by default (free), Hermes only when opted in
 if $PREFER_HERMES && $HAS_HERMES; then
   launch_hermes 1 us.anthropic.claude-opus-4-6-v1 "$REVIEW_TMP/prompt-1.txt"
@@ -862,7 +877,7 @@ echo "All reviewer slots resolved after $((SECONDS - round_start))s"
 # group, helpers included, so one group kill per slot collects them. Harmless when it is gone.
 kill_jobs 1 2 3 4
 # Now, not at exit: a killed agy job never reached its own cleanup of the token copy.
-[ "${#AGY_SCRATCH[@]}" -eq 0 ] || rm -rf -- "${AGY_SCRATCH[@]}"
+remove_agy_scratch
 
 # Extract review JSON from raw output, as the convergence loop does: Claude's wrapper, fences and
 # preamble; agy's stream only when agy ran the slot (any reviewer can be talked into printing a line
@@ -965,7 +980,7 @@ Report what the status lines say rather than guessing. "Three of four are still 
 thing to tell a waiting human; silence is not.
 
 
-**Tool restriction**: Hermes uses `-t file` (best isolation). Claude CLI: `--allowedTools "Read Grep Glob"` plus `--disallowedTools` for every tool that writes, runs a command or reaches the network, and `--strict-mcp-config` (no MCP servers), since `--allowedTools` alone does not confine (a slot given writing tools on purpose with `REVIEWER_TOOLS_N` has only those taken off the deny list). Codex: both paths pin `-s read-only` and `approvals_reviewer="user"` and canary-test them before use. Gemini uses `--approval-mode plan` (read-only). agy runs under bubblewrap, verified before use (what it closes and what it does not: [agy-sandbox.md](agy-sandbox.md)), plus `--sandbox --disable-slash-commands`. Extraction errors logged to `$REVIEW_TMP/extract-N.err`.
+**Tool restriction**: Hermes uses `-t file --yolo`: the file toolset, which can write -- the data stays in your AWS account, but writes are not prevented, only reported by the convergence loop's tamper check. Claude CLI: `--allowedTools "Read Grep Glob"` plus `--disallowedTools` for every tool that writes, runs a command or reaches the network, `--strict-mcp-config` (no MCP servers) and `--setting-sources user` (no project hooks), since `--allowedTools` alone does not confine (a slot given writing tools on purpose with `REVIEWER_TOOLS_N` has only those taken off the deny list). Codex: both paths pin `-s read-only` and `approvals_reviewer="user"` and canary-test them before use. Gemini uses `--approval-mode plan` (read-only). agy runs under bubblewrap, verified before use (what it closes and what it does not: [agy-sandbox.md](agy-sandbox.md)), plus `--sandbox --disable-slash-commands`. Extraction errors logged to `$REVIEW_TMP/extract-N.err`.
 
 ## 7. Collect and validate results
 
@@ -1173,7 +1188,7 @@ concluding anything from a probe, and never suppress its output.
 
 | Backend | Data path | Isolation | Cost |
 |---|---|---|---|
-| Hermes+Bedrock | Your AWS account | Best (`-t file`) | Bedrock API pricing |
+| Hermes+Bedrock | Your AWS account | Data: best (stays in your AWS account). Tools: `-t file --yolo`, which can write; the loop's tamper check reports writes | Bedrock API pricing |
 | Claude CLI | Anthropic infrastructure | Good (`--allowedTools` + `--disallowedTools`) | Claude subscription |
 | Codex CLI | OpenAI infrastructure | Good (sandbox) | ChatGPT subscription |
 | Gemini CLI | Google infrastructure | Good (`--approval-mode plan`) | Google AI Studio (free tier) |

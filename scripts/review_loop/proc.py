@@ -70,3 +70,27 @@ def signals_unwind() -> Iterator[None]:
 
 def _exit_on_signal(signum: int, _frame: object) -> None:
     raise SystemExit(128 + signum)
+
+
+@contextlib.contextmanager
+def signals_deferred() -> Iterator[None]:
+    """Inside the block, Ctrl-C and ``UNWIND_SIGNALS`` wait until it ends.
+
+    For cleanup that is already under way: a second Ctrl-C or SIGTERM -- a user
+    pressing it again, a supervisor's follow-up -- raised in the middle of it, and the
+    reviewers not yet stopped kept running. One that arrives is delivered on the way
+    out, and ends the run as before. Only where the platform can block signals, and
+    from the main thread.
+    """
+    if (
+        not hasattr(signal, "pthread_sigmask")
+        or threading.current_thread() is not threading.main_thread()
+    ):
+        yield
+        return
+    held = {signal.SIGINT, *UNWIND_SIGNALS}
+    previous = signal.pthread_sigmask(signal.SIG_BLOCK, held)
+    try:
+        yield
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)

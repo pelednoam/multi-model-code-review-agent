@@ -6,6 +6,7 @@ import json
 import os
 from dataclasses import dataclass, field
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -17,7 +18,9 @@ from types import SimpleNamespace
 
 from helpers import AGENT_DOC, REPO_ROOT, runner_script, shell_function
 from scripts.review_loop import backends
+from scripts.review_loop import reviewers as reviewers_mod
 from scripts.review_loop.artifacts import describe_outputs
+from scripts.review_loop.reviewers import claude_denied
 
 SCRUB_SCRIPT = REPO_ROOT / "scripts" / "scrub_diff.py"
 PREFLIGHT_SCRIPT = REPO_ROOT / "scripts" / "review_preflight.py"
@@ -2020,16 +2023,21 @@ class TestRunnerScript:
         assert runner.count("JOB_PID[$num]=$!") == 5
         assert 'cat "$REVIEW_TMP/pid-' not in runner
         # pgrep only to ask whether a group is still this run's (live_group).
-        assert runner.count("pgrep") == 1
+        assert runner.count("pgrep -s") == 1
         assert 'pgrep -s 0 -g "$1"' in shell_function(runner, "live_group")
 
     @pytest.mark.parametrize("exits", [False, True], ids=["running", "exited"])
+    @pytest.mark.parametrize(
+        "pgrep", ["", "pgrep() { return 127; }\n", "pgrep() { return 2; }\n"],
+        ids=["pgrep", "no-pgrep", "pgrep-without-g"],
+    )  # fmt: skip
     def test_kill_jobs_reaches_everything_a_reviewer_started(
-        self, tmp_path: Path, exits: bool
+        self, tmp_path: Path, exits: bool, pgrep: str
     ) -> None:
         # Plain timeout put itself in a process group of its own: a kill of the job's group
         # left the reviewer under it running, and a helper the reviewer left behind was out
-        # of reach once timeout had exited.
+        # of reach once timeout had exited. And with no pgrep to ask, every group read as
+        # gone, and nothing was killed at all.
         runner = runner_script()
         kill_jobs = shell_function(runner, "kill_jobs") + shell_function(
             runner, "live_group"
@@ -2038,6 +2046,7 @@ class TestRunnerScript:
         script = tmp_path / "t.sh"
         script.write_text(
             "set -m\nJOB_PID=()\n"
+            + pgrep
             + kill_jobs
             + "{ timeout --foreground -k 10 600 sh -c 'sleep 300 & echo $! > helper; "
             + then
@@ -2055,6 +2064,42 @@ class TestRunnerScript:
             timeout=30,
         )
         assert done.stdout.strip() == "GONE", done.stdout + done.stderr
+
+    def test_a_second_signal_does_not_cut_the_cleanup_short(
+        self, tmp_path: Path
+    ) -> None:
+        # The TERM trap's `exit` ran again inside the EXIT trap, ending the cleanup with
+        # reviewers still running.
+        runner = runner_script()
+        script = tmp_path / "t.sh"
+        script.write_text(
+            "AGY_SCRATCH=()\n"
+            # Stands in for the real sweep, with a second TERM arriving halfway.
+            + "kill_jobs() { kill -TERM $$; sleep 0.3; echo CLEANED; }\n"
+            + shell_function(runner, "finish_round")
+            + "trap finish_round EXIT\ntrap 'exit 143' TERM\n"
+            + "kill -TERM $$\nsleep 5\n"
+        )
+        done = subprocess.run(
+            ["bash", str(script)], capture_output=True, text=True, timeout=30
+        )
+        assert done.stdout.strip() == "CLEANED", done.stdout + done.stderr
+        assert done.returncode == 143
+
+    def test_the_runner_says_it_needs_bash_4_4(self) -> None:
+        # `mapfile -d` is 4.4's, and before it `set -u` failed on an empty array.
+        runner = runner_script()
+        assert "mapfile -d" in runner
+        assert "the runner needs bash 4.4 or later" in runner
+
+    def test_codexs_answer_is_checked_like_the_others(self) -> None:
+        # Written straight to result-N.json, it skipped the validation every other
+        # reviewer's output gets -- which the loop gives it.
+        runner = runner_script()
+        assert '-o "$REVIEW_TMP/codex-out-$num.txt"' in runner
+        assert '[ -f "$result" ] && continue' not in runner
+        post = runner[runner.index("# Post-process") :]
+        assert 'for src in "$REVIEW_TMP/codex-out-$num.txt"' in post
 
     def test_a_group_that_is_no_longer_this_runs_is_left_alone(
         self, tmp_path: Path
@@ -2089,46 +2134,77 @@ class TestRunnerScript:
         export = doc.split("export REVIEW_TMP", 1)[1].split('\n"', 1)[0]
         assert "REVIEW_USE_AGY" in export and "REVIEW_USE_GEMINI" in export
         # agy is not even detected for such a project.
-        doc = AGENT_DOC.read_text()
         detection = doc[doc.index("PREFER_HERMES=false") : doc.index("HAS_AGY=true")]
         assert 'review_helper agy-detect "$PREFER_HERMES"' in detection
 
     @pytest.mark.parametrize(
-        ("tools", "denied"),
+        ("tools", "denied", "scoped"),
         [
-            # The default list: everything that writes.
-            ("Read Grep Glob", "Edit Write MultiEdit NotebookEdit Bash"),
-            # Writing tools given on purpose come off the list, and only those.
-            ("Read Grep Glob Bash Edit Write", "MultiEdit NotebookEdit"),
-            ("Read,Bash", "Edit Write MultiEdit NotebookEdit"),
-            ("Read Edit Write MultiEdit NotebookEdit Bash", None),
-            # A scoped grant names the tool too -- and only the tool, not its scope.
-            ("Read Grep Bash(git log:*)", "Edit Write MultiEdit NotebookEdit"),
+            # The default list: everything that writes, runs a command, or goes online.
+            ("Read Grep Glob", "Edit Write MultiEdit NotebookEdit Bash WebFetch WebSearch", []),
+            # Tools given on purpose come off the list, and only those.
+            ("Read Grep Glob Bash Edit Write", "MultiEdit NotebookEdit WebFetch WebSearch", []),
+            ("Read,Bash", "Edit Write MultiEdit NotebookEdit WebFetch WebSearch", []),
+            ("Read Edit Write MultiEdit NotebookEdit Bash WebFetch WebSearch", "", []),
+            # A scoped grant names the tool too -- and only the tool, not its scope --
+            # and is said to be granted whole.
+            ("Read Grep Bash(git log:*)", "Edit Write MultiEdit NotebookEdit WebFetch WebSearch", ["Bash"]),
             (
                 "Read Bash(git log --grep Edit --all:*)",
-                "Edit Write MultiEdit NotebookEdit",
+                "Edit Write MultiEdit NotebookEdit WebFetch WebSearch", ["Bash"],
             ),
             # Unbalanced: nothing is granted.
-            ("Read Edit Bash(git", "Edit Write MultiEdit NotebookEdit Bash"),
+            ("Read Edit Bash(git", "Edit Write MultiEdit NotebookEdit Bash WebFetch WebSearch", []),
+            ("Read Edit) Bash", "Edit Write MultiEdit NotebookEdit Bash WebFetch WebSearch", []),
         ],
-    )
+    )  # fmt: skip
     def test_an_override_lifts_only_the_tools_it_names(
-        self, tmp_path: Path, tools: str, denied: str | None
+        self, tools: str, denied: str, scoped: list[str]
     ) -> None:
         # Any REVIEWER_TOOLS_N used to drop the deny list whole, read-only lists included.
+        assert claude_denied(tools) == (denied.split(), scoped)
+
+    def test_the_runner_denies_what_the_loop_denies(self, tmp_path: Path) -> None:
+        # Two parsers, one in bash and one implied by the loop's fixed list, drifted:
+        # the runner's list had no network tools. Now both are claude_denied's.
         runner = runner_script()
         assert 'local tools="${!tools_var:-Read Grep Glob}"' in runner
-        assert '--allowedTools "$tools" "${CLAUDE_DENY[@]}"' in runner
+        assert (
+            '--allowedTools "$tools" "${CLAUDE_DENY[@]}" --strict-mcp-config' in runner
+        )
         script = tmp_path / "t.sh"
         script.write_text(
-            shell_function(runner, "claude_deny")
-            + 'claude_deny "$1"\necho "${#CLAUDE_DENY[@]}|${CLAUDE_DENY[*]}"\n'
+            f"REVIEW_ROOT={shlex.quote(str(REPO_ROOT))}\n"
+            f"REVIEW_TMP={shlex.quote(str(tmp_path))}\n"
+            + shell_function(runner, "review_helper")
+            + shell_function(runner, "claude_deny")
+            + 'claude_deny 2 "$1"\necho "${#CLAUDE_DENY[@]}|${CLAUDE_DENY[*]}"\n'
         )
+        for tools, expected in [
+            ("Read Grep Glob", "2|--disallowedTools Edit Write MultiEdit NotebookEdit"
+             " Bash WebFetch WebSearch"),
+            ("Read Edit Write MultiEdit NotebookEdit Bash WebFetch WebSearch", "0|"),
+        ]:  # fmt: skip
+            done = subprocess.run(
+                ["bash", str(script), tools], capture_output=True, text=True, timeout=30
+            )
+            assert done.stdout.strip() == expected, done.stderr
         done = subprocess.run(
-            ["bash", str(script), tools], capture_output=True, text=True, timeout=10
+            ["bash", str(script), "Read Bash(git log:*)"],
+            capture_output=True, text=True, timeout=30,
+        )  # fmt: skip
+        # Said, and not taken for part of the deny list: it was, once.
+        note, denied = done.stdout.strip().split("\n")
+        assert note.startswith("R2: note: Bash is granted whole"), done.stdout
+        assert denied == (
+            "2|--disallowedTools Edit Write MultiEdit NotebookEdit WebFetch WebSearch"
         )
-        expected = "0|" if denied is None else f"2|--disallowedTools {denied}"
-        assert done.stdout.strip() == expected, done.stderr
+
+    def test_the_loops_claude_reviewer_has_no_mcp_servers(self) -> None:
+        cmd = reviewers_mod._claude_cmd(1)
+        assert "--strict-mcp-config" in cmd
+        denied = cmd[cmd.index("--disallowedTools") + 1].split()
+        assert {"Bash", "Write", "WebFetch", "WebSearch"} <= set(denied)
 
     def test_codex_is_pinned_and_checked_as_in_the_loop(self) -> None:
         # The doc said codex was sandboxed in full mode; the runner passed no flag.

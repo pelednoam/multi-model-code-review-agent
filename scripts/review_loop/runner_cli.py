@@ -28,7 +28,7 @@ from .agy import (
     agy_seed_state,
     agy_unsandboxed,
 )
-from .backends import codex_is_confined, detect_backends
+from .backends import codex_usable, detect_backends
 from .config import env_flag
 from .findings import validate_result
 from .results import (
@@ -38,20 +38,15 @@ from .results import (
     agy_failure,
     parse_review,
 )
+from .reviewers import claude_denied
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
 
 def _codex_check() -> int:
-    """Exit 0 if codex may review: its sandbox refuses a write, or the check is skipped."""
-    if env_flag("MMCRA_SKIP_CODEX_SANDBOX_CHECK"):
-        print(
-            "  codex: sandbox check skipped (MMCRA_SKIP_CODEX_SANDBOX_CHECK)",
-            file=sys.stderr,
-        )
-        return 0
-    ok, why = codex_is_confined()
+    """Exit 0 if codex may review (``backends.codex_usable``)."""
+    ok, why = codex_usable()
     print(f"  codex: {'' if ok else 'DISABLED for review -- '}{why}", file=sys.stderr)
     return 0 if ok else 1
 
@@ -148,6 +143,23 @@ def _extract(raw: str, out: str, slot: str, backend: str = "") -> int:
     return 0
 
 
+def _claude_deny(tools: str) -> int:
+    """Print what a claude reviewer allowed ``tools`` is denied, space-separated.
+
+    ``reviewers.claude_denied``. A tool granted with a scope is granted whole, as far
+    as the deny list goes, which stderr says.
+    """
+    denied, scoped = claude_denied(tools)
+    for tool in scoped:
+        print(
+            f"{tool} is granted whole: its scope holds only while claude asks before"
+            " each use, which settings can turn off",
+            file=sys.stderr,
+        )
+    print(" ".join(denied))
+    return 0
+
+
 def _flag(name: str) -> int:
     """Exit 0 if the environment variable ``name`` says yes (``config.env_flag``)."""
     return 0 if env_flag(name) else 1
@@ -178,6 +190,7 @@ _COMMANDS: dict[str, Callable[..., int]] = {
     "agy-message": _agy_message,
     "extract": _extract,
     "placeholder": _placeholder,
+    "claude-deny": _claude_deny,
     "flag": _flag,
 }
 

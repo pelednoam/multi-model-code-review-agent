@@ -22,8 +22,9 @@ convergence loop and the full-mode runner call it.
 - **`/tmp` and `/run`**, replaced by empty ones, and with them the sockets there:
   tmux's, X11's, the session and system D-Bus, `docker.sock`, snapd's. Only the DNS
   resolver's directory is put back.
-- **agy's real state**, replaced by a throwaway copy holding only its sign-in token.
-  The copy is removed when the round ends, or when the run is stopped by Ctrl-C,
+- **agy's real state**, replaced by a throwaway copy holding its sign-in token, with
+  its program directories (`bin`, `builtin`) mounted read-only beside it and nothing
+  else of the real state: no history, no other settings. The copy is removed when the round ends, or when the run is stopped by Ctrl-C,
   `SIGTERM`, `SIGHUP` or `SIGQUIT`. Only a `SIGKILL` leaves it. A run started under
   `nohup` keeps ignoring `SIGHUP`.
 - **The environment**, cleared to a short allowlist before `bwrap` starts. `bwrap`
@@ -35,7 +36,11 @@ convergence loop and the full-mode runner call it.
 - **Anything that runs code outside**:
   - every writable socket left reachable, refused by the check rather than looked
     up in a list (docker's, LXD's and Incus's are masked so that they do not cost
-    the slot);
+    the slot). The check reads `/proc/net/unix`, which lists the sockets of the
+    host's network namespace by the path each was bound at. A socket bound in
+    another namespace (a container's), or whose directory was renamed after, is
+    not found at the path that reaches it; one whose name has a line break fails
+    the check;
   - a session bus on an abstract socket (`dbus-launch`'s, IBus's);
   - an X server that admits your user without its cookie. Stock GNOME and
     Xwayland grant `SI:localuser`, and a program inside could type into a terminal
@@ -70,6 +75,8 @@ included, unless `REVIEW_USE_AGY=1`.
 - **Reads outside the home directory and `/tmp`.** A repository kept elsewhere
   (`/srv`, `/workspace`, a CI checkout) is readable unscrubbed, and so is
   `/var/tmp`.
+- **Sockets the list does not show where they are**, as above: in another network
+  namespace, or moved since they were bound.
 - **Full mode runs the project's own copy of these scripts**, the sandbox builder
   among them. Reviewing an untrusted branch that way runs that branch's code. Use the
   convergence loop from a trusted checkout of this agent instead, with `--repo`

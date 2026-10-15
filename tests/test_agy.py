@@ -6,6 +6,7 @@ import contextlib
 import json
 import os
 import pwd
+import re
 import shutil
 import signal
 import socket
@@ -192,6 +193,51 @@ class _AgyCase:
         monkeypatch.setattr(reviewers.os, "killpg", killpg)
         reviewers._stop(proc)  # type: ignore[arg-type]
 
+    def test_a_reviewer_is_seen_to_finish_without_waitid(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # macOS has no os.waitid before Python 3.13: every round raised AttributeError.
+        monkeypatch.delattr(reviewers.os, "waitid")
+        proc, out_f, err_f = reviewers._spawn(
+            1, ["true"], "true", tmp_path, None, tmp_path
+        )
+        try:
+            deadline = time.monotonic() + 10
+            while reviewers._exit_status(proc) is None:
+                assert time.monotonic() < deadline
+                time.sleep(0.05)
+            assert reviewers._exit_status(proc) == 0
+        finally:
+            reviewers._stop(proc)
+            out_f.close()
+            err_f.close()
+
+    def test_a_second_signal_waits_for_the_cleanup(self, tmp_path: Path) -> None:
+        # A second Ctrl-C or SIGTERM raised in the middle of the cleanup the first had
+        # started, and the reviewers not yet stopped kept running.
+        done_file = tmp_path / "cleaned"
+        script = (
+            "import os, signal, sys, time\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "from scripts.review_loop.proc import signals_deferred, signals_unwind\n"
+            "with signals_unwind():\n"
+            "    try:\n"
+            "        os.kill(os.getpid(), signal.SIGTERM)\n"
+            "        time.sleep(30)\n"
+            "    finally:\n"
+            "        with signals_deferred():\n"
+            "            os.kill(os.getpid(), signal.SIGINT)\n"
+            "            time.sleep(0.2)\n"
+            "            open(sys.argv[2], 'w').write('done')\n"
+        )
+        done = subprocess.run(
+            [sys.executable, "-I", "-c", script, str(REPO_ROOT), str(done_file)],
+            capture_output=True, text=True, timeout=20,
+        )  # fmt: skip
+        assert done_file.read_text() == "done", done.stderr
+        # The second signal still ends the run, once the cleanup is through.
+        assert done.returncode != 0
+
     def _launch_stub(
         self, monkeypatch: pytest.MonkeyPatch, cmd: list[str]
     ) -> list[subprocess.Popen[str]]:
@@ -305,8 +351,10 @@ class _AgyCase:
     class _Reach:
         """A box in which exactly ``reachable`` answers the socket probe."""
 
-        def __init__(self, reachable: str) -> None:
+        def __init__(self, reachable: str, returncode: int = 0) -> None:
             self.reachable = reachable
+            self.returncode = returncode
+            self.stderr = "" if returncode == 0 else "sh: 1: xargs: not found"
 
         def sh(self, script: str, input: str = "") -> str:
             return self.reachable + "\0" if self.reachable + "\0" in input else ""
@@ -1082,7 +1130,9 @@ class TestAgySandboxCheck(_AgyCase):
             agy,
             "run",
             lambda *a, **k: SimpleNamespace(
-                stdout="", stderr="bwrap: setting up uid map: Permission denied"
+                stdout="",
+                stderr="bwrap: setting up uid map: Permission denied",
+                returncode=1,
             ),
         )
         ok, reason = agy.agy_is_confined()
@@ -1121,13 +1171,18 @@ class TestAgySandboxCheck(_AgyCase):
 
     def test_any_abstract_session_bus_is_refused(self) -> None:
         # Not only dbus-launch's under /tmp: IBus keeps one under ~/.cache.
-        unix = self.UNIX + "0: 2 0 10000 0001 01 3 @/home/u/.cache/ibus/dbus-AbCd\n"
+        unix = (
+            self.UNIX
+            + "0: 00000002 00000000 00010000 0001 01 3 @/home/u/.cache/ibus/dbus-AbCd\n"
+        )
         reason = agy._check_reachable(self._Reach("nothing"), unix)  # type: ignore[arg-type]
         assert reason and "session bus" in reason
 
     def test_a_socket_path_with_a_space_is_checked_whole(self) -> None:
         # Split on whitespace, "/var/tmp/my app.sock" was probed as "/var/tmp/my".
-        unix = self.UNIX + "0: 2 0 10000 0001 01 4 /var/tmp/my app.sock\n"
+        unix = (
+            self.UNIX + "0: 00000002 00000000 00010000 0001 01 4 /var/tmp/my app.sock\n"
+        )
         reason = agy._check_reachable(self._Reach("/var/tmp/my app.sock"), unix)  # type: ignore[arg-type]
         assert reason and "/var/tmp/my app.sock" in reason
 
@@ -1137,8 +1192,49 @@ class TestAgySandboxCheck(_AgyCase):
         reason = agy._check_reachable(self._Reach("x"), unix)  # type: ignore[arg-type]
         assert reason and "socket list" in reason
 
+    def test_a_socket_probe_that_failed_is_not_a_pass(self) -> None:
+        # No xargs inside, or a sandbox that did not start: nothing printed, and
+        # nothing printed read as nothing reachable.
+        reason = agy._check_reachable(self._Reach("", returncode=127), self.UNIX)  # type: ignore[arg-type]
+        assert reason and "could not check the sockets" in reason and "xargs" in reason
+
+    def test_a_socket_name_with_a_line_break_is_not_a_pass(self) -> None:
+        # The kernel prints a name raw: cut at its line break, the half probed was not
+        # the socket that exists.
+        unix = (
+            self.UNIX + "0: 00000002 00000000 00010000 0001 01 7 /var/tmp/a\nb.sock\n"
+        )
+        reason = agy._check_reachable(self._Reach("x"), unix)  # type: ignore[arg-type]
+        assert reason and "line break" in reason
+
+    def test_the_real_socket_list_parses(self) -> None:
+        unix = Path("/proc/net/unix")
+        if not unix.exists():
+            pytest.skip("no /proc/net/unix")
+        assert isinstance(agy._unix_names(unix.read_text(errors="replace")), list)
+
+    def test_the_probes_marks_cannot_be_forged(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # A fixed mark: a name in a listing the sandbox failed to hide, holding a line
+        # break and the mark, opened an answer of its own and rewrote the ones after.
+        scripts: list[str] = []
+
+        class Box:
+            workspace = tmp_path
+
+            def sh(self, script: str, **kw: object) -> str:
+                scripts.append(script)
+                return ""
+
+        for _ in range(2):
+            agy._probe(Box(), tmp_path / "canary", [])  # type: ignore[arg-type]
+        marks = [re.search(r"echo (@@\S+@@)agy", s).group(1) for s in scripts]  # type: ignore[union-attr]
+        assert marks[0] != marks[1]
+        assert all("cat /proc/net/unix" not in s for s in scripts)
+
     def test_a_socket_with_a_relative_name_is_not_a_pass(self) -> None:
-        unix = self.UNIX + "0: 2 0 10000 0001 01 5 relative.sock\n"
+        unix = self.UNIX + "0: 00000002 00000000 00010000 0001 01 5 relative.sock\n"
         reason = agy._check_reachable(self._Reach("x"), unix)  # type: ignore[arg-type]
         assert reason and "relative" in reason
 
@@ -1163,7 +1259,7 @@ class TestAgySandboxCheck(_AgyCase):
         thread.start()
         try:
             unix = "Num RefCount Protocol Flags Type St Inode Path\n"
-            unix += f"0: 2 0 10000 0001 01 6 {name}\n"
+            unix += f"0: 00000002 00000000 00010000 0001 01 6 {name}\n"
             reason = agy._check_reachable(self._Reach("x"), unix)  # type: ignore[arg-type]
         finally:
             thread.join(timeout=5)
@@ -1219,7 +1315,7 @@ class TestAgySandboxCheck(_AgyCase):
 
         def record(cmd: list[str], **kw: object) -> SimpleNamespace:
             calls.append(cmd)
-            return SimpleNamespace(stdout="", stderr="")
+            return SimpleNamespace(stdout="", stderr="", returncode=1)
 
         monkeypatch.setattr(agy.shutil, "which", lambda c: f"/usr/bin/{c}")
         monkeypatch.setattr(agy, "run", record)

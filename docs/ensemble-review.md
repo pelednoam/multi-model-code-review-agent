@@ -142,7 +142,7 @@ Bedrock opt-in precedence (PREFER_HERMES=true), used for regulated codebases tha
 
 | CLI | Non-interactive | Read-only | Input | Output |
 |---|---|---|---|---|
-| `claude` | `-p` | `--allowedTools "Read Grep Glob"` **plus** `--disallowedTools "Edit Write MultiEdit NotebookEdit Bash"` -- `--allowedTools` alone only skips the permission prompt, it does *not* confine the agent | stdin (`< prompt.txt`) | `--output-format json` wraps in `{"result":"..."}` |
+| `claude` | `-p` | `--allowedTools "Read Grep Glob"` **plus** `--disallowedTools "Edit Write MultiEdit NotebookEdit Bash WebFetch WebSearch"` and `--strict-mcp-config` (no MCP servers) -- `--allowedTools` alone only skips the permission prompt, it does *not* confine the agent | stdin (`< prompt.txt`) | `--output-format json` wraps in `{"result":"..."}` |
 | `codex` | `codex exec` **plus `-s read-only` and `-c approvals_reviewer="user"`** (in both the convergence loop and this runner) -- both are pinned by the tool and neither is optional: no sandbox flag was passed at all before, and `-s read-only` on its own is silently overridden by a global `approvals_reviewer = "auto_review"` (see docs/codex-sandbox.md). Codex is also canary-tested at launch and its slot is DROPPED if the sandbox does not actually refuse a write (optional `-m <model> -c model_reasoning_effort=<level>` -- override via `CODEX_MODEL`, `CODEX_REASONING_EFFORT`; `=high` is the "GPT-5.5 Pro" equivalent) | verified read-only, not assumed | stdin (pipe) | `-o <file>` writes last message |
 | `gemini` | `-p` | `--model <m> --approval-mode plan --skip-trust` (default `<m>` is `gemini-2.5-flash` for free-tier compatibility; override via `GEMINI_MODEL`) | stdin (pipe) | stdout (text, may have fences) |
 | `agy` | `--input-format stream-json --output-format stream-json` (no `-p`: the prompt is one JSON line on stdin, because a single argument is capped at 128 KB) **plus `--sandbox --disable-slash-commands`**, pinned. On by default where installed; `REVIEW_USE_AGY=0` switches it off. Model: `AGY_MODEL` if set, else the best Gemini model `agy models` lists, picked each run. agy has no deny list and was measured writing outside its workspace, so it runs under **bubblewrap** (see [agy-sandbox.md](agy-sandbox.md)), verified at startup without a model call and again before each launch; the slot goes to its next backend if that fails. The prompt opens with a no-tools preamble: a refused tool call ends agy's turn with no answer | bubblewrap read-only filesystem, verified; `--sandbox --disable-slash-commands` (no `--mode=plan`: it is a slash command, so a no-op once expansion is off) | stdin (one stream-json line) | stream-json; the last `result` event carries `structured_output` (enforced by `--json-schema`) |
@@ -387,7 +387,7 @@ Lens: injection vectors, auth gaps, unsafe deserialization, secrets, race condit
 
 Output: `$REVIEW_TMP/result-2.json`
 
-If Codex CLI is installed and its sandbox check passes (`review_helper codex-check`), this reviewer runs via `codex exec -s read-only -c 'approvals_reviewer="user"' -o $REVIEW_TMP/result-2.json - < prompt-2.txt`: both safety flags pinned, the prompt on stdin. The `-o` flag captures the last agent message as the result file. The prompt must end with: "Output ONLY the JSON result object, no other text." Otherwise falls back to Hermes+Haiku on Bedrock (whose answer is read from `stdout-2.txt`).
+If Codex CLI is installed and its sandbox check passes (`review_helper codex-check`), this reviewer runs via `codex exec -s read-only -c 'approvals_reviewer="user"' -o $REVIEW_TMP/codex-out-2.txt - < prompt-2.txt`: both safety flags pinned, the prompt on stdin. The `-o` flag captures the last agent message, which is checked like every other reviewer's output before it becomes `result-2.json`. The prompt must end with: "Output ONLY the JSON result object, no other text." Otherwise it falls back to Claude CLI Haiku (free), then Hermes Haiku on Bedrock (whose answer is read from `stdout-2.txt`). A project pinned to Bedrock (`.use-hermes`) runs Hermes Haiku first.
 
 Lens: off-by-one, null paths, shape/dtype mismatches, contract violations, logic errors, missing test coverage. For numpy/torch: shape broadcasting, device placement, gradient flow.
 
@@ -443,6 +443,11 @@ cat > "$REVIEW_TMP/run-reviewers.sh" <<'RUNNER'
 # Launch, wait, and normalize - one shell, start to finish.
 # Written to a file rather than run inline so that `wait` sees the children it launched.
 set -uo pipefail
+# bash 4.4 or later: `mapfile -d` reads agy's sandbox, and before 4.4 `set -u` failed on an empty
+# array. macOS's /bin/bash is 3.2; install a newer one (Homebrew) to run this.
+if [ "${BASH_VERSINFO[0]}" -lt 4 ] || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -lt 4 ]; }; then
+  echo "ERROR: the runner needs bash 4.4 or later (this is $BASH_VERSION)"; exit 1
+fi
 : "${REVIEW_TMP:?REVIEW_TMP must be exported by the caller}"
 # Absolute: the agy job changes into its workspace before its redirections are opened, and a
 # relative REVIEW_TMP would then put its output inside a directory deleted after the run.
@@ -497,11 +502,23 @@ kill_jobs() {
 # live_group PGID: whether the group still has a member in this runner's session. bash reaps a
 # finished job at once, and once its group has emptied, the number is free for the system to give
 # to someone else's new session -- a shell, an ssh login -- which a kill of it would reach. A group
-# of this run's always has its members in this run's session.
+# of this run's always has its members in this run's session. pgrep says 1 for no such group; any
+# other failure -- no pgrep, one without -s or -g -- is not an answer, and the group is then
+# taken as live if it exists at all: a cleanup that silently killed nothing left every reviewer
+# running.
 live_group() {
-  [ -n "$1" ] && pgrep -s 0 -g "$1" >/dev/null
+  [ -n "$1" ] || return 1
+  pgrep -s 0 -g "$1" >/dev/null 2>&1
+  case $? in
+    0) return 0 ;;
+    1) return 1 ;;
+    *) kill -0 -- "-$1" 2>/dev/null ;;
+  esac
 }
+# Signals ignored first: a second Ctrl-C or TERM during the cleanup ran its trap's `exit`, which
+# cut the cleanup short and left reviewers running.
 finish_round() {
+  trap '' INT TERM HUP QUIT
   kill_jobs 1 2 3 4
   [ "${#AGY_SCRATCH[@]}" -eq 0 ] || rm -rf -- "${AGY_SCRATCH[@]}"
 }
@@ -585,28 +602,19 @@ prepare_agy() {
     || { echo "R$num: SKIPPED (could not prepare agy's prompt)"; return 1; }
 }
 
-# claude_deny TOOLS: the --disallowedTools arguments for a claude reviewer allowed TOOLS, in
-# CLAUDE_DENY. --allowedTools only skips the permission prompt; it does not confine. So every writing
-# tool TOOLS does not grant is denied, as the convergence loop does -- an override naming only
-# reading tools must not lift the deny list with it. Only the tool names count, not what is inside
-# a scope: `Bash(git log --grep Edit:*)` grants Bash, not Edit. An unbalanced spec grants nothing.
+# claude_deny N TOOLS: the --disallowedTools arguments for a claude reviewer allowed TOOLS, in
+# CLAUDE_DENY, or 1 if they could not be worked out. --allowedTools only skips the permission
+# prompt; it does not confine. So every tool that writes, runs a command or reaches the network,
+# and that TOOLS does not name, is denied -- the convergence loop's list and its parsing
+# (reviewers.claude_denied), so the two cannot drift. A tool granted with a scope is granted whole
+# as far as the deny list goes, which the helper says.
 CLAUDE_DENY=()
 claude_deny() {
-  local tools=$1 granted="" depth=0 i c tool denied=()
-  for ((i = 0; i < ${#tools}; i++)); do
-    c="${tools:i:1}"
-    case "$c" in
-      "(") depth=$((depth + 1)) ;;
-      ")") depth=$((depth - 1)) ;;
-      *) [ "$depth" -eq 0 ] && granted+="$c" ;;
-    esac
-  done
-  [ "$depth" -eq 0 ] || granted=""
-  for tool in Edit Write MultiEdit NotebookEdit Bash; do
-    case " ${granted//,/ } " in *" $tool "*) ;; *) denied+=("$tool") ;; esac
-  done
+  local num=$1 tools=$2 denied
   CLAUDE_DENY=()
-  [ "${#denied[@]}" -eq 0 ] || CLAUDE_DENY=(--disallowedTools "${denied[*]}")
+  denied="$(review_helper claude-deny "$tools" 2>"$REVIEW_TMP/claude-deny-$num.err")" || return 1
+  sed "s/^/R$num: note: /" "$REVIEW_TMP/claude-deny-$num.err"
+  [ -z "$denied" ] || CLAUDE_DENY=(--disallowedTools "$denied")
 }
 
 # Launch via a coding agent CLI (free, stdin-based).
@@ -629,9 +637,12 @@ launch_cli() {
       # isolated git worktree so its edits cannot reach the working tree.
       local tools_var="REVIEWER_TOOLS_$num"
       local tools="${!tools_var:-Read Grep Glob}"
-      claude_deny "$tools"
+      claude_deny "$num" "$tools" \
+        || { echo "R$num: SKIPPED (could not work out what to deny the claude reviewer)"; return 1; }
+      # --strict-mcp-config with no --mcp-config: none of the user's MCP servers, each a tool the
+      # deny list does not name.
       { timeout --foreground -k 10 "$REVIEWER_TIMEOUT" claude -p --model "$model" \
-          --allowedTools "$tools" "${CLAUDE_DENY[@]}" \
+          --allowedTools "$tools" "${CLAUDE_DENY[@]}" --strict-mcp-config \
           --output-format json < "$prompt_file" \
           1>"$REVIEW_TMP/claude-raw-$num.json" \
           2>"$REVIEW_TMP/stderr-$num.txt"
@@ -654,7 +665,7 @@ launch_cli() {
         codex_extra+=(-c "model_reasoning_effort=$CODEX_REASONING_EFFORT")
       { timeout --foreground -k 10 "$REVIEWER_TIMEOUT" codex exec \
           "${codex_extra[@]}" \
-          -o "$REVIEW_TMP/result-$num.json" \
+          -o "$REVIEW_TMP/codex-out-$num.txt" \
           - < "$prompt_file" \
           1>"$REVIEW_TMP/stdout-$num.txt" \
           2>"$REVIEW_TMP/stderr-$num.txt"
@@ -830,10 +841,11 @@ extract_json() {
 # Post-process: normalize all output to result-N.json.
 for num in 1 2 3 4; do
   result="$REVIEW_TMP/result-$num.json"
-  [ -f "$result" ] && continue  # already produced (Codex -o path)
 
-  # Try each possible output file (Claude raw wrapper, then stdout)
-  for src in "$REVIEW_TMP/claude-raw-$num.json" "$REVIEW_TMP/stdout-$num.txt"; do
+  # Try each possible output file: codex's last message (-o), Claude's raw wrapper, then stdout.
+  # Every one is checked as the loop checks it, codex's included.
+  for src in "$REVIEW_TMP/codex-out-$num.txt" "$REVIEW_TMP/claude-raw-$num.json" \
+             "$REVIEW_TMP/stdout-$num.txt"; do
     [ -f "$src" ] && extract_json "$src" "$result" "$num" "${JOB_BACKEND[$num]:-}" && break
   done
 

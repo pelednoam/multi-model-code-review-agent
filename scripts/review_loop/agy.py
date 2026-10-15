@@ -21,6 +21,7 @@ import json
 import os
 import pwd
 import re
+import secrets
 import shlex
 import shutil
 import socket
@@ -428,31 +429,33 @@ class _Box:
         self.wrap = wrap
         self.workspace = workspace
         self.stderr = ""
+        self.returncode = 0
 
     def sh(self, script: str, **kw: Any) -> str:
-        """What ``script`` printed inside the sandbox."""
+        """What ``script`` printed inside the sandbox; its status is ``returncode``."""
         done = run(
             [*self.wrap, "sh", "-c", script], cwd=self.workspace, timeout=30, **kw
         )
         self.stderr = done.stderr or ""
+        self.returncode = done.returncode
         return done.stdout or ""
 
     def mounted_under(self, root: Path) -> set[str]:
         """The names directly under ``root`` that the wrapper mounted there."""
         # Mount destinations only -- an environment value such as a PATH under HOME is
         # not a mount. Paths, not strings: HOME=/home/user/ is the same directory.
-        indexed = list(enumerate(self.wrap))
-        dests = [Path(self.wrap[i + 1]) for i, a in indexed if a == "--tmpfs"]
-        dests += [Path(self.wrap[i + 2]) for i, a in indexed if a.endswith("-bind")]
+        # --tmpfs DEST, and --bind/--ro-bind SRC DEST (and their -try forms).
+        dests = []
+        for i, arg in enumerate(self.wrap):
+            if arg == "--tmpfs":
+                dests.append(Path(self.wrap[i + 1]))
+            elif arg.endswith("-bind"):
+                dests.append(Path(self.wrap[i + 2]))
         return {
             d.relative_to(root).parts[0]
             for d in dests
             if d.is_relative_to(root) and d != root
         }
-
-
-#: Opens each answer in the probe's output; what follows, up to the next mark, is it.
-_MARK = "@@mmcra-probe@@"
 
 
 def _probe(box: _Box, canary: Path, roots: list[Path]) -> dict[str, str]:
@@ -462,6 +465,10 @@ def _probe(box: _Box, canary: Path, roots: list[Path]) -> dict[str, str]:
     start bwrap a dozen times. The two writes are in it too; whether they landed is
     read from outside.
     """
+    # Opens each answer; what follows, up to the next mark, is it. New each run: a file
+    # name the sandbox fails to hide can hold a line break and a mark of its own, and
+    # one that could be guessed would rewrite the answers after it.
+    mark = f"@@mmcra-probe-{secrets.token_hex(16)}@@"
     q = shlex.quote
     questions = {
         "agy": "agy --version >/dev/null 2>&1 && echo AGY_OK",
@@ -472,17 +479,16 @@ def _probe(box: _Box, canary: Path, roots: list[Path]) -> dict[str, str]:
         # Every process's environment, not only the shell's: bwrap is PID 1 inside.
         "env": 'printf %s "$MMCRA_ENV_PROBE"; cat /proc/[0-9]*/environ'
         " | tr '\\0' '\\n' | grep -q '^MMCRA_ENV_PROBE=' && echo LEAK",
-        "unix": "cat /proc/net/unix",
         **{f"ls {i}": f"ls -A1 {q(str(root))}" for i, root in enumerate(roots)},
     }
     script = "\n".join(
-        f"echo {_MARK}{key}; {{ {ask}; }} 2>/dev/null" for key, ask in questions.items()
+        f"echo {mark}{key}; {{ {ask}; }} 2>/dev/null" for key, ask in questions.items()
     )
     said = box.sh(script, env={**os.environ, "MMCRA_ENV_PROBE": "x"})
     answers: dict[str, list[str]] = {}
     for line in said.split("\n"):
-        if line.startswith(_MARK):
-            answers[line[len(_MARK) :]] = []
+        if line.startswith(mark):
+            answers[line[len(mark) :]] = []
         elif answers:
             answers[next(reversed(answers))].append(line)
     return {key: "\n".join(lines) for key, lines in answers.items()}
@@ -554,27 +560,48 @@ def _check_environment(seen: dict[str, str]) -> str | None:
     return None
 
 
+#: One socket in /proc/net/unix, as the kernel prints it: ``%pK: %08X %08X %08X %04X
+#: %02X %5lu``, then a space and the name if it has one, to the end of the line.
+_UNIX_LINE = re.compile(
+    r"[0-9A-Fa-f]+: [0-9A-F]{8} [0-9A-F]{8} [0-9A-F]{8} [0-9A-F]{4} [0-9A-F]{2} +\d+"
+    r"(?: (.*))?"
+)
+
+
 def _unix_names(unix: str) -> list[str]:
     """Every name bound in /proc/net/unix, paths and ``@abstract`` ones, whole.
 
     Raises ValueError if ``unix`` is not that file: an empty or unreadable list would
-    pass every check that reads it.
+    pass every check that reads it. And for a line that is not a socket's: the kernel
+    prints a name's bytes raw, so a name with a line break in it is cut in two, and
+    the half checked would not be the socket that exists.
     """
     lines = unix.split("\n")
     if not lines[0].startswith("Num "):
         raise ValueError("could not read the socket list (/proc/net/unix)")
-    # The name is the eighth field to the end of the line, spaces and all.
-    fields = (line.split(None, 7) for line in lines[1:])
-    return [f[7] for f in fields if len(f) == 8]
+    names = []
+    for line in filter(None, lines[1:]):
+        match = _UNIX_LINE.fullmatch(line)
+        if match is None:
+            # repr: the line is a name someone else chose, escapes and all.
+            raise ValueError(
+                "a socket's name has a line break in it, so the socket list cannot be"
+                f" read ({line[:80]!r})"
+            )
+        if match.group(1):
+            names.append(match.group(1))
+    return names
 
 
 def _check_sockets(box: _Box, names: list[str]) -> str | None:
     """No socket ``names`` lists can be connected to from inside, but DNS's.
 
-    /proc/net/unix lists every socket on the host: the sandbox shares the network
-    namespace. Every path socket the sandbox can still reach is refused, not a list of
-    known ones, which always lags what is installed. The resolver's directory is put
-    back on purpose, for DNS.
+    /proc/net/unix lists the sockets of this network namespace, which the sandbox
+    shares, by the path each was bound at. Every one of those the sandbox can still
+    reach is refused, not a list of known ones, which always lags what is installed.
+    The resolver's directory is put back on purpose, for DNS. A socket bound in
+    another namespace (a container's), or whose directory has since moved, is not
+    listed at its reachable path: docs/agy-sandbox.md says so.
     """
     relative = [n for n in names if not n.startswith(("/", "@"))]
     if relative:
@@ -582,8 +609,20 @@ def _check_sockets(box: _Box, names: list[str]) -> str | None:
     paths = sorted({n for n in names if n.startswith("/")})
     # On stdin, one NUL-terminated path each: not in the script, which a busy host's
     # list would push past the 128 KB limit on one argument.
-    probe = 'xargs -0 sh -c \'for s; do [ -S "$s" ] && [ -w "$s" ] && printf "%s\\0" "$s"; done\' sh'
-    reached = box.sh(probe, input="".join(f"{p}\0" for p in paths)) if paths else ""
+    # Each batch exits 0 whatever it found, so a status of anything else is the probe
+    # failing -- no xargs, a sandbox that did not start -- which must not read as a
+    # sandbox that reaches nothing.
+    probe = (
+        "xargs -0 sh -c 'for s; do"
+        ' [ -S "$s" ] && [ -w "$s" ] && printf "%s\\0" "$s";'
+        " done; exit 0' sh"
+    )
+    reached = ""
+    if paths:
+        reached = box.sh(probe, input="".join(f"{p}\0" for p in paths))
+        if box.returncode != 0:
+            detail = (box.stderr.strip().splitlines() or ["no detail"])[-1][:200]
+            return f"could not check the sockets agy's sandbox can reach: {detail}"
     allowed = _resolver_dir()
     for path in reached.split("\0"):
         if path and not (allowed and Path(path).is_relative_to(allowed)):
@@ -697,13 +736,16 @@ def agy_is_confined() -> tuple[bool, str]:
                 return False, failure
             roots = [*_homes(), Path("/tmp"), Path("/run")]
             seen = _probe(box, canary, roots)
+            # Read here, not inside: the sandbox shares this network namespace, so it
+            # is the same list, and a name in it cannot reach the probe's answers.
+            unix = Path("/proc/net/unix").read_text(encoding="utf-8", errors="replace")
             failure = (
                 _check_agy_starts(seen)
                 or _check_files(seen, canary, workspace)
                 or _check_hidden(seen, box, roots)
                 or _check_processes(seen)
                 or _check_environment(seen)
-                or _check_reachable(box, seen.get("unix", ""))
+                or _check_reachable(box, unix)
             )
             if failure:
                 return False, failure

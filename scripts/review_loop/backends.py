@@ -76,6 +76,17 @@ def codex_is_confined() -> tuple[bool, str]:
     return True, "codex sandbox verified read-only (runs, reads, refuses writes)"
 
 
+def codex_usable() -> tuple[bool, str]:
+    """Whether codex may review, and why: its sandbox is proven, or the check skipped.
+
+    ``MMCRA_SKIP_CODEX_SANDBOX_CHECK=1`` (or true, yes, on; not ``0``) skips it, for
+    hosts that are already externally sandboxed, e.g. a disposable container.
+    """
+    if env_flag("MMCRA_SKIP_CODEX_SANDBOX_CHECK"):
+        return True, "sandbox check skipped (MMCRA_SKIP_CODEX_SANDBOX_CHECK)"
+    return codex_is_confined()
+
+
 def _codex_sh(script: str, path: Path) -> list[str]:
     """``script`` run by sh inside codex's sandbox, with ``path`` as its ``$1``."""
     return ["codex", "sandbox", "--", "sh", "-c", script, "codex-check", str(path)]
@@ -86,10 +97,9 @@ def detect_backends(
 ) -> dict[str, bool]:
     """Detect which CLI backends are installed.
 
-    Codex additionally has to PROVE it is confined. An unconfined codex is worse than
-    no codex: the whole contract of this tool is that reviewers report and never edit.
-    Set ``MMCRA_SKIP_CODEX_SANDBOX_CHECK=1`` (or true, yes, on; not ``0``) to bypass,
-    for hosts that are already externally sandboxed, e.g. a disposable container.
+    Codex additionally has to PROVE it is confined (``codex_usable``). An unconfined
+    codex is worse than no codex: the whole contract of this tool is that reviewers
+    report and never edit.
 
     agy is held to the same standard whenever it is installed and not switched off
     (``REVIEW_USE_AGY=0``): its sandbox is proven by ``agy.agy_is_confined``. A project
@@ -101,32 +111,40 @@ def detect_backends(
         cli: shutil.which(cli) is not None
         for cli in ("hermes", "claude", "codex", "gemini", "agy")
     }
-    skip_codex = env_flag("MMCRA_SKIP_CODEX_SANDBOX_CHECK")
-    if found["codex"] and verify_codex and not skip_codex:
-        ok, reason = codex_is_confined()
+    if found["codex"] and verify_codex:
+        ok, reason = codex_usable()
         if not ok:
             print(f"  codex: DISABLED for review -- {reason}")
             found["codex"] = False
-    if found["agy"] and prefer_hermes and not env_flag("REVIEW_USE_AGY"):
+    if found["agy"]:
+        found["agy"] = _agy_usable(prefer_hermes)
+    return found
+
+
+def _agy_usable(prefer_hermes: bool) -> bool:
+    """Whether the installed agy is to review -- wanted here, its sandbox proven, a
+    model to run -- saying why not."""
+    if prefer_hermes and not env_flag("REVIEW_USE_AGY"):
         # Pinned to Bedrock to keep the code with providers it chose: agy is not run at
         # all -- not its check, not a signed-in listing of its models -- unless asked
         # for by name.
-        print("  agy: not used, the project is pinned to Bedrock (REVIEW_USE_AGY=1 uses it)")
-        found["agy"] = False
-    if found["agy"] and not agy_enabled():
+        print(
+            "  agy: not used, the project is pinned to Bedrock (REVIEW_USE_AGY=1 uses it)"
+        )
+        return False
+    if not agy_enabled():
+        # Installed is not the same as in use.
         print(f"  agy: switched off (REVIEW_USE_AGY={os.environ['REVIEW_USE_AGY']!r})")
-        found["agy"] = False  # installed is not the same as in use
-    if found["agy"]:
-        # The sandbox first: picking a model runs agy, and a host that will drop agy
-        # should not run it at all.
-        if agy_unsandboxed():
-            print("  agy: running WITHOUT its sandbox (MMCRA_SKIP_AGY_SANDBOX_CHECK)")
-        else:
-            ok, reason = agy_is_confined()
-            print(f"  agy: {'' if ok else 'DISABLED for review -- '}{reason}")
-            found["agy"] = ok
-    if found["agy"]:
-        model, how = agy_model_choice()
-        print(f"  agy: {how}" if model else f"  agy: DISABLED -- {how}")
-        found["agy"] = model is not None
-    return found
+        return False
+    # The sandbox first: picking a model runs agy, and a host that will drop agy should
+    # not run it at all.
+    if agy_unsandboxed():
+        print("  agy: running WITHOUT its sandbox (MMCRA_SKIP_AGY_SANDBOX_CHECK)")
+    else:
+        ok, reason = agy_is_confined()
+        print(f"  agy: {'' if ok else 'DISABLED for review -- '}{reason}")
+        if not ok:
+            return False
+    model, how = agy_model_choice()
+    print(f"  agy: {how}" if model else f"  agy: DISABLED -- {how}")
+    return model is not None

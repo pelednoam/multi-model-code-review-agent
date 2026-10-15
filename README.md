@@ -489,8 +489,8 @@ Anthropic reviewers. For cross-provider diversity, also install:
   (`bwrap`), so Linux only.** agy cannot make itself read-only, so it runs
   under `bwrap`: the filesystem read-only outside an empty workspace; your
   home directory, `/tmp`, `/run` and the environment hidden; and nothing
-  reachable that runs code outside (sockets, a session bus, an X server
-  that admits you without its cookie). The wrapper is proven at startup
+  reachable that runs code outside (sockets this host lists, a session
+  bus, an X server that admits you without its cookie). The wrapper is proven at startup
   with no model call and checked again before each launch, and the slot
   goes to its next backend if it fails. It is not network isolation:
   localhost services and a cloud metadata endpoint stay reachable.

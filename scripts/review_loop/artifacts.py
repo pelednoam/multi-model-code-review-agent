@@ -111,8 +111,8 @@ def _explain_missing(round_dir: Path, slot: int) -> list[str]:
     if raw.exists():
         text = raw.read_text(encoding="utf-8", errors="replace").strip()
     # Parsed once, and only when agy is the backend that wrote it.
-    agy = agy_result(text) if text and ran_agy(round_dir, slot) else None
-    failed = agy_failure(agy) if agy is not None else None
+    event = agy_result(text) if text and ran_agy(round_dir, slot) else None
+    failed = agy_failure(event) if event is not None else None
     if failed:
         # Whatever it drafted first is not a review it gave: the turn did not finish.
         return [
@@ -120,7 +120,7 @@ def _explain_missing(round_dir: Path, slot: int) -> list[str]:
             *[f"                {line}" for line in textwrap.wrap(failed, 74)],
             f"                (in full: {raw})",
         ]
-    said = printable(_display_text(text, agy))
+    said = printable(_display_text(text, event))
     if not said:
         return [f"  NO OUTPUT  -> R{slot} produced nothing; see stderr-{slot}.txt"]
     return [
@@ -131,18 +131,18 @@ def _explain_missing(round_dir: Path, slot: int) -> list[str]:
     ]
 
 
-def _display_text(text: str, agy: dict[str, Any] | None) -> str:
+def _display_text(text: str, event: dict[str, Any] | None) -> str:
     """What to show of a reviewer's unusable reply: ``text``, unwrapped as far as it can
-    be, and trimmed. ``agy`` is its result event, if agy wrote it.
+    be, and trimmed. ``event`` is agy's result event, if agy wrote it.
 
     For showing, not parsing (that is ``results._unwrap_envelope``): it keeps what a
     failed turn says, and a refused tool call, where parsing keeps nothing.
     """
-    if agy is not None:
+    if event is not None:
         # A failed turn has no response but says why, which is the useful part. So
         # does one cut short by a refused tool call, which otherwise reads as silence.
-        said = agy.get("response") or agy.get("error") or ""
-        actions = agy.get("denied_actions")
+        said = event.get("response") or event.get("error") or ""
+        actions = event.get("denied_actions")
         denied = [
             str(d.get("display_name") or d.get("action"))
             for d in (actions if isinstance(actions, list) else [])

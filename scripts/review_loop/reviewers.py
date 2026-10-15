@@ -13,7 +13,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, TYPE_CHECKING
+from typing import IO, TYPE_CHECKING, NamedTuple
 
 from .agy import (
     AGY_EGRESS,
@@ -36,7 +36,7 @@ from .config import (
     env_flag,
     reviewer_timeout,
 )
-from .proc import signals_unwind
+from .proc import signals_deferred, signals_unwind
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -146,22 +146,71 @@ def _hermes_cmd(prompt_path: Path, model: str) -> list[str]:
     ]
 
 
+#: The tools a claude reviewer is denied unless it is granted them by name: each one
+#: writes, runs a command, or reaches the network.
+CLAUDE_DENIED = ("Edit", "Write", "MultiEdit", "NotebookEdit", "Bash", "WebFetch", "WebSearch")  # fmt: skip
+
+
+def claude_denied(tools: str) -> tuple[list[str], list[str]]:
+    """What a claude reviewer allowed ``tools`` is denied, and what it is granted scoped.
+
+    ``tools`` is an --allowedTools spec. That flag only skips the permission prompt;
+    it does not confine. So every tool in ``CLAUDE_DENIED`` the spec does not name is
+    denied -- a spec naming only reading tools must not lift the deny list with it.
+    Only the names count, not what is inside a scope: ``Bash(git log --grep Edit:*)``
+    names Bash, not Edit. An unbalanced spec grants nothing.
+
+    The second list is the tools granted with a scope. A deny cannot keep a scope,
+    which only the permission prompt enforces, and settings can turn that prompt off:
+    the caller says so.
+    """
+    granted: set[str] = set()
+    scoped: list[str] = []
+    depth, name = 0, ""
+    for c in tools + " ":
+        if c == "(":
+            if depth == 0 and name:
+                scoped.append(name)
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth < 0:
+                break
+        elif depth == 0 and c in ", \t\n":
+            granted.add(name)
+            name = ""
+        elif depth == 0:
+            name += c
+    if depth != 0:
+        granted, scoped = set(), []
+    denied = [tool for tool in CLAUDE_DENIED if tool not in granted]
+    return denied, [tool for tool in scoped if tool in CLAUDE_DENIED]
+
+
+#: What a claude reviewer is allowed, when nothing overrides it.
+_CLAUDE_TOOLS = "Read Grep Glob"
+
+
 def _claude_cmd(slot: int) -> list[str]:
     model = "opus" if slot in (1, 4) else "sonnet" if slot == 3 else "haiku"
+    denied, _ = claude_denied(_CLAUDE_TOOLS)
     return [
         "claude",
         "-p",
         "--model",
         model,
         "--allowedTools",
-        "Read Grep Glob",
+        _CLAUDE_TOOLS,
         # --allowedTools only exempts these from the permission prompt; it
         # does not confine the agent to them, so a reviewer can Edit/Write
         # the very tree it is reviewing. Verified with a canary file: under
         # --allowedTools alone the reviewer rewrote it; with this deny in
         # place it declines.
         "--disallowedTools",
-        "Edit Write MultiEdit NotebookEdit Bash",
+        " ".join(denied),
+        # No MCP servers: the user's own, configured for their sessions, would
+        # each be a tool the deny list does not name.
+        "--strict-mcp-config",
         "--output-format",
         "json",
     ]
@@ -188,11 +237,10 @@ def _gemini_enabled() -> bool:
     """Whether to use the gemini CLI for slot 3.
 
     Off by default. See ``_choose_command``: it has never produced a finding.
-    Set ``REVIEW_USE_GEMINI=1`` to try it again.
+    Set ``REVIEW_USE_GEMINI=1`` (or true, yes, on) to try it again: read as the
+    full-mode runner reads it.
     """
-    import os
-
-    return os.environ.get("REVIEW_USE_GEMINI", "") == "1"
+    return env_flag("REVIEW_USE_GEMINI")
 
 
 def _agy_cmd(model: str) -> list[str]:
@@ -241,8 +289,9 @@ def _scratch_dir(prefix: str) -> Path:
 
 def _release_scratch() -> None:
     """Remove the round's scratch directories."""
-    while _ROUND_SCRATCH:
-        shutil.rmtree(_ROUND_SCRATCH.pop(), ignore_errors=True)
+    with signals_deferred():
+        while _ROUND_SCRATCH:
+            shutil.rmtree(_ROUND_SCRATCH.pop(), ignore_errors=True)
 
 
 atexit.register(_release_scratch)
@@ -408,9 +457,9 @@ def _launch_one(
     if picked is None:
         print(f"  R{slot}: SKIPPED (no backend)")
         return None
-    cmd, backend, label, workspace = picked
+    backend = picked.backend
     lens, focus, rv, default_label = lens_args
-    model = label or default_label
+    model = picked.label or default_label
     prompt = build_reviewer_prompt(
         lens, focus, rv, model, round_.diff, round_.audit, round_.context
     )
@@ -427,16 +476,27 @@ def _launch_one(
     fed = None
     if backend in _stdin_backends():
         fed = agy_message(prompt) if backend == "agy" else prompt
-    proc, out_f, err_f = _spawn(slot, cmd, backend, workspace, fed, round_.round_dir)
+    proc, out_f, err_f = _spawn(
+        slot, picked.cmd, backend, picked.workspace, fed, round_.round_dir
+    )
     return slot, proc, backend, out_f, err_f
 
 
-def _pick_backend(
-    slot: int, round_: _Round
-) -> tuple[list[str], str, str | None, Path | None] | None:
-    """The command for ``slot``, the CLI that answers it, the model the prompt should
-    name (None for the lens's own), and its working directory -- or None if no
-    backend is available.
+class _Picked(NamedTuple):
+    """The backend that answers a slot, ready to launch."""
+
+    #: The command, wrapper included.
+    cmd: list[str]
+    #: The CLI that answers, which decides how its output is read.
+    backend: str
+    #: The model the prompt should name; None for the lens's own.
+    label: str | None
+    #: Its working directory; None for the round's.
+    workspace: Path | None
+
+
+def _pick_backend(slot: int, round_: _Round) -> _Picked | None:
+    """The backend for ``slot`` -- or None if none is available.
 
     If agy is chosen but cannot be set up, the slot gets the backend it would have had
     without agy, as the routing tables say: an empty slot 3 every round never
@@ -452,11 +512,11 @@ def _pick_backend(
             return None
         cmd, label = choice
         if cmd[0] != "agy":
-            return cmd, cmd[0], label, None
+            return _Picked(cmd, cmd[0], label, None)
         prepared = _prepare_agy(slot, cmd, round_.repo)
         if prepared is not None:
             wrapped, workspace = prepared
-            return wrapped, "agy", label, workspace
+            return _Picked(wrapped, "agy", label, workspace)
     return None
 
 
@@ -560,9 +620,14 @@ def _exit_status(proc: subprocess.Popen[str]) -> int | None:
     to hand to someone else's new session -- a shell, an ssh login -- and the group
     kill at the end of the round would reach that. Left a zombie until ``_stop``, the
     number stays this run's, and so does everything the kill can reach.
+
+    Where there is no ``os.waitid`` -- macOS before Python 3.13 -- it is reaped as
+    before, and the helpers of a reviewer that exited are left to finish on their own.
     """
     if proc.returncode is not None:
         return proc.returncode
+    if not hasattr(os, "waitid"):
+        return proc.poll()
     try:
         info = os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
     except ChildProcessError:
@@ -607,12 +672,13 @@ def launch_reviewers(
             # Every group, finished or not: a reviewer that exited can leave helpers
             # running in its group, spending quota and writing into round_dir. Each
             # leader is still unreaped (``_exit_status``), so each number is still
-            # this run's group.
-            for _, proc, _, out_f, err_f in procs:
-                _stop(proc)
-                out_f.close()
-                err_f.close()
-            _release_scratch()
+            # this run's group. A second signal waits until this is done.
+            with signals_deferred():
+                for _, proc, _, out_f, err_f in procs:
+                    _stop(proc)
+                    out_f.close()
+                    err_f.close()
+                _release_scratch()
 
 
 def _await_reviewers(procs: list[ReviewerProc], round_dir: Path, n_lines: int) -> None:

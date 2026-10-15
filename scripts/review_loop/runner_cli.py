@@ -79,15 +79,18 @@ def _agy_schema(path: str) -> int:
     return 0
 
 
-def _agy_sandbox(workspace: str, state: str) -> int:
+def _agy_sandbox(workspace: str, state: str, review_root: str) -> int:
     """NUL-separated: the length of the env part, the env part, bwrap's part.
 
-    ``0`` and nothing else when the host is trusted to be the sandbox itself.
+    ``review_root``, the repository under review, is hidden inside, as the loop hides
+    it. ``0`` and nothing else when the host is trusted to be the sandbox itself.
     """
     if agy_unsandboxed():
         sys.stdout.write("0\0")
         return 0
-    env, bwrap = agy_wrapper_parts(Path(workspace), agy_seed_state(Path(state)))
+    env, bwrap = agy_wrapper_parts(
+        Path(workspace), agy_seed_state(Path(state)), (Path(review_root),)
+    )
     sys.stdout.write("\0".join([str(len(env)), *env, *bwrap]) + "\0")
     return 0
 

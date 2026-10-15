@@ -18,7 +18,8 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from .agy_sandbox import agy_wrapper, user_homes
+from .agy_sandbox import agy_wrapper, scratch_dirs, user_homes
+from .config import REPO_ROOT
 from .proc import run, signals_unwind
 from .results import printable
 
@@ -552,16 +553,22 @@ def agy_is_confined() -> tuple[bool, str]:
     try:
         with (
             signals_unwind(),
-            tempfile.TemporaryDirectory() as ws,
+            scratch_dirs() as (workspace, state),
             tempfile.TemporaryDirectory(dir=parent) as out,
-            tempfile.TemporaryDirectory() as st,
         ):
-            workspace, canary = Path(ws).resolve(), Path(out) / "canary.txt"
+            canary = Path(out) / "canary.txt"
             canary.write_bytes(b"original")
             # An empty state: this checks the mounts, which need no sign-in, so there
             # is no reason for a copy of the token to exist while it runs.
-            box = _Box(agy_wrapper(workspace, Path(st).resolve()), workspace)
-            roots = [*user_homes(), Path("/tmp"), Path("/run")]
+            # This checkout and the directory it runs from, hidden as a review hides
+            # them -- but not one that holds the canary, which must stay readable.
+            hidden = [
+                path
+                for path in dict.fromkeys(p.resolve() for p in (Path.cwd(), REPO_ROOT))
+                if path != Path("/") and not canary.is_relative_to(path)
+            ]
+            box = _Box(agy_wrapper(workspace, state, hidden), workspace)
+            roots = [*user_homes(), *hidden, Path("/tmp"), Path("/run")]
             seen = _probe(box, canary, roots)
             failure = _check_runs(seen, box)
             if failure:

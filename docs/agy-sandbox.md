@@ -23,6 +23,9 @@ convergence loop and the full-mode runner call it.
   points elsewhere (CI, `sudo -E`). Both are replaced by empty ones, so there is no
   `~/.ssh`, no cloud credentials and no other tools' tokens. A home of `/`, or an
   account with no passwd entry, fails the check instead.
+- **The repository under review, and this agent's checkout**, wherever they are,
+  replaced by empty ones too: agy is sent the scrubbed diff, and has no need of the
+  tree, `.env` files and all. The startup check proves it for the checkout.
 - **`/tmp` and `/run`**, replaced by empty ones, and with them the sockets there:
   tmux's, X11's, the session and system D-Bus, `docker.sock`, snapd's. Only the DNS
   resolver's file is put back, not its directory, which holds a socket too.
@@ -89,9 +92,9 @@ check included, unless `REVIEW_USE_AGY=1`.
 - **agy's own credentials.** Its sign-in token (the copy) and any proxy URL in the
   allowlisted environment are readable inside. With the network open, a diff that
   talks agy into a network-capable tool could send them out.
-- **Reads outside the home directory and `/tmp`.** A repository kept elsewhere
-  (`/srv`, `/workspace`, a CI checkout) is readable unscrubbed, and so is
-  `/var/tmp`.
+- **Reads of everything else.** Outside the homes, `/tmp`, `/run` and the
+  repository under review, the filesystem is readable: another checkout kept in
+  `/srv` or `/workspace`, say, and `/var/tmp`.
 - **Sockets the list does not show where they are**, as above: in another network
   namespace, or moved since they were bound.
 - **Full mode runs the project's own copy of these scripts**, the sandbox builder
@@ -113,9 +116,9 @@ check included, unless `REVIEW_USE_AGY=1`.
   diff line of that shape is passed through as it is; the file would come from
   outside the scrubbed diff, though only from what the sandbox can read.
 
-Treat the sandbox as stopping file writes, reads of your home directory, and code
-running outside it through local sockets. It is not network isolation, and it does
-not hide a repository that lives outside the home directory.
+Treat the sandbox as stopping file writes, reads of your home directory and of the
+repository under review, and code running outside it through local sockets. It is
+not network isolation, and it does not hide the rest of the filesystem.
 
 ## If bwrap cannot start
 

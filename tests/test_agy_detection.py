@@ -130,7 +130,9 @@ class TestAgyRunner(AgyCase):
         # One copy of the sandbox, the schema and the preamble: the runner calls the
         # loop's own code through runner_cli, not one-liners of its own.
         prepare = shell_function(runner, "prepare_agy")
-        assert 'review_helper agy-sandbox "$AGY_WS" "$AGY_STATE"' in prepare
+        assert (
+            'review_helper agy-sandbox "$AGY_WS" "$AGY_STATE" "$REVIEW_ROOT"' in prepare
+        )
         assert "review_helper agy-schema" in prepare
         # The preamble written into the prompt file, which then goes in as one line.
         assert 'review_helper agy-input "$prompt_file" "$AGY_IN"' in prepare

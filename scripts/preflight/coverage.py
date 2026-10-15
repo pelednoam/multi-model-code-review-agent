@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from typing import Any
@@ -38,7 +39,14 @@ def _run_pytest_with_coverage(warnings: list[str]) -> dict[str, Any] | None:
 
     Returns None on failure. Sources are the configured directories rather than
     the changed files: coverage.py cannot use a .py path as a source.
+
+    Not from inside a test run (PYTEST_CURRENT_TEST, which pytest sets and every
+    process it starts inherits): a project whose tests run the preflight -- this
+    one's do -- would have it run the suite, which runs the preflight again.
     """
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        warnings.append("coverage gate skipped: the preflight is running inside a test")
+        return None
     cov_json = REPO_ROOT / ".coverage.json"
     cov_json.unlink(missing_ok=True)
     # coverage.py resolves a --cov value as an importable package name or a

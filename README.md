@@ -155,7 +155,7 @@ When opted in, the precedence flips for Anthropic reviewers:
 | Reviewer | 1st choice | 2nd choice | 3rd choice |
 |---|---|---|---|
 | Security (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
-| Correctness | Hermes Haiku (Bedrock) | Codex CLI GPT-5.5 (free) | Claude CLI haiku (free) |
+| Correctness | Hermes Haiku (Bedrock) | Codex CLI GPT-5.5 only with `REVIEW_USE_CODEX=1`, else Claude CLI haiku (free) | Claude CLI haiku (free) |
 | Readability | Hermes Sonnet (Bedrock) | agy only with `REVIEW_USE_AGY=1`, else Gemini CLI only with `REVIEW_USE_GEMINI=1` (a project that pinned Bedrock never falls to Google by default) | Claude CLI sonnet (free) |
 | Spec-contract (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
 

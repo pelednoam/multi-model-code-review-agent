@@ -98,3 +98,35 @@ def signals_deferred() -> Iterator[None]:
         yield
     finally:
         signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+
+
+@contextlib.contextmanager
+def signals_held() -> Iterator[None]:
+    """Inside the block, Ctrl-C and ``UNWIND_SIGNALS`` are noted, not acted on; each is
+    raised again on the way out.
+
+    For starting a process and registering its cleanup as one step. Unlike
+    ``signals_deferred`` it leaves the signal mask alone: a process started inside
+    inherits the mask, and one started with SIGTERM blocked would never answer it. A
+    signal the caller ignores stays ignored; only the main thread can do this.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    caught: list[int] = []
+
+    def note(signum: int, _frame: object) -> None:
+        caught.append(signum)
+
+    previous = {
+        sig: signal.signal(sig, note)
+        for sig in (signal.SIGINT, *UNWIND_SIGNALS)
+        if signal.getsignal(sig) is not signal.SIG_IGN
+    }
+    try:
+        yield
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, signal.SIG_DFL if handler is None else handler)
+        for sig in dict.fromkeys(caught):
+            signal.raise_signal(sig)

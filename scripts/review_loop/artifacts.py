@@ -1,6 +1,6 @@
 """Make a round's output files discoverable.
 
-The round directory holds four files per reviewer and it is not obvious which
+The round directory holds several files per reviewer and it is not obvious which
 one carries the findings. In particular `raw-N.txt` is *empty on a successful
 run* for the codex slot, because that backend is invoked with `-o` and writes
 its answer to `codex-out-N.txt`. A reader who checks `raw-N.txt` — the

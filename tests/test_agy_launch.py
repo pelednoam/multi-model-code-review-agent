@@ -7,6 +7,7 @@ import os
 import shutil
 import signal
 import subprocess
+import tempfile
 import sys
 import time
 from pathlib import Path
@@ -37,7 +38,8 @@ class TestAgyLaunch(AgyCase):
         assert isinstance(cmd, list)
         wrap = cmd[: cmd.index("--") + 1]
         state = Path(wrap[wrap.index(str(agy_sandbox.agy_state_dir())) - 1])
-        assert wrap == agy_sandbox.agy_wrapper(workspace, state)
+        hidden = reviewers._under_review(None)  # the repository, and this checkout
+        assert wrap == agy_sandbox.agy_wrapper(workspace, state, hidden)
         assert cmd[len(wrap)] == "agy"
         # A throwaway copy of agy's state, holding the sign-in and nothing else.
         assert sorted(p.name for p in state.iterdir()) == ["antigravity-oauth-token"]
@@ -223,7 +225,7 @@ class TestAgyLaunch(AgyCase):
             "import os, signal, sys, time\n"
             "sys.path.insert(0, sys.argv[1])\n"
             "from scripts.review_loop import agy, agy_sandbox_check\n"
-            "agy.tempfile.tempdir = sys.argv[2]\n"
+            "import tempfile; tempfile.tempdir = sys.argv[2]\n"
             "agy_sandbox_check._canary_parent = lambda: sys.argv[2]\n"
             # Nothing real runs (run is replaced), so bwrap need not be installed.
             "agy.shutil.which = lambda c: '/usr/bin/' + c\n"
@@ -373,7 +375,7 @@ class TestAgyLaunch(AgyCase):
         spaced = tmp_path / "review scratch"
         spaced.mkdir()
         monkeypatch.setenv("HOME", str(Path.home()) + "/")
-        monkeypatch.setattr(agy.tempfile, "tempdir", str(spaced))
+        monkeypatch.setattr(tempfile, "tempdir", str(spaced))
         self._quiet_host(monkeypatch)
         ok, reason = agy_sandbox_check.agy_is_confined()
         assert ok, reason

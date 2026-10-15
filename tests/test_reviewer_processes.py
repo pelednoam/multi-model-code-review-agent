@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -89,7 +90,7 @@ class TestReviewerProcesses(AgyCase):
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         # macOS has no os.waitid before Python 3.13: every round raised AttributeError.
-        monkeypatch.delattr(reviewers.os, "waitid")
+        monkeypatch.delattr(reviewers.os, "waitid", raising=False)
         proc, out_f, err_f = reviewers._spawn(
             1, ["true"], "true", tmp_path, None, tmp_path
         )
@@ -220,3 +221,31 @@ class TestReviewerProcesses(AgyCase):
         (out / "raw-1.txt").symlink_to(tmp_path / "secret")
         reviewers._publish_outputs(out, round_dir)
         assert not (round_dir / "raw-1.txt").exists()
+
+    def test_a_signal_while_a_reviewer_starts_still_stops_it(
+        self, tmp_path: Path
+    ) -> None:
+        # Between starting the process and registering its stop, a SIGTERM left it
+        # running. Held, it is raised once the stop is registered -- and the child is
+        # not left with SIGTERM blocked, as holding it in the signal mask would.
+        script = (
+            "import os, signal, subprocess, sys, time\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "from scripts.review_loop.proc import signals_held, signals_unwind\n"
+            "with signals_unwind():\n"
+            "    try:\n"
+            "        with signals_held():\n"
+            "            child = subprocess.Popen(['sleep', '60'])\n"
+            "            os.kill(os.getpid(), signal.SIGTERM)\n"
+            "            blocked = open(f'/proc/{child.pid}/status').read()\n"
+            "    finally:\n"
+            "        line = [l for l in blocked.splitlines() if l.startswith('SigBlk')]\n"
+            "        print(line[0].split()[1], flush=True)\n"
+            "        child.kill()\n"
+        )
+        done = subprocess.run(
+            [sys.executable, "-I", "-c", script, str(REPO_ROOT)],
+            capture_output=True, text=True, timeout=30,
+        )  # fmt: skip
+        assert done.returncode == 128 + signal.SIGTERM, done.stderr
+        assert int(done.stdout.strip(), 16) & (1 << (signal.SIGTERM - 1)) == 0

@@ -50,6 +50,14 @@ class AgyCase:
     ) -> object:
         # The pick is cached per run; each test is a run. And no test may reach the
         # real `agy models` -- it is installed on some machines that run this suite.
+        # The switch that runs agy unsandboxed is for hosts that are a sandbox; set
+        # where the suite runs, it changed what every wrapper test saw. Tests of it
+        # set it themselves.
+        monkeypatch.delenv("MMCRA_SKIP_AGY_SANDBOX_CHECK", raising=False)
+        # What the installed bwrap supports, asked once now: asked later, the question
+        # would go to whatever fake process a test has put in place.
+        agy_sandbox._bwrap_supports("--disable-userns")
+
         def unreachable() -> list[str]:
             raise AssertionError("a test reached the real `agy models`")
 

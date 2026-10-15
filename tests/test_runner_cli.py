@@ -215,7 +215,9 @@ class TestRunnerCli:
         home = tmp_path / "home"
         home.mkdir()
         env = {"HOME": str(home), "MMCRA_SKIP_AGY_SANDBOX_CHECK": value}
-        done = self._cli("agy-sandbox", str(tmp_path), str(tmp_path / "st"), env=env)
+        done = self._cli(
+            "agy-sandbox", str(tmp_path), str(tmp_path / "st"), str(home), env=env
+        )
         parts = done.stdout.split("\0")
         assert (parts == ["0", ""]) is bare, done.stdout
 
@@ -252,8 +254,19 @@ class TestRunnerCli:
             {"type": "object", "properties": {"a": "not a schema"}},
             {"type": "object", "properties": {"a": {}}, "required": ["b"]},
             {"type": "object", "properties": []},
+            # Valid, but agy's answer need not be a review the loop can read.
+            {
+                "type": "object",
+                "properties": {"reviewer": {}},
+                "required": ["reviewer"],
+            },
         ],
-        ids=["property-not-a-schema", "requires-undefined", "properties-not-a-map"],
+        ids=[
+            "property-not-a-schema",
+            "requires-undefined",
+            "properties-not-a-map",
+            "review-keys-not-required",
+        ],
     )
     def test_a_broken_schema_fails_without_jsonschema(
         self, tmp_path: Path, schema: dict[str, object]

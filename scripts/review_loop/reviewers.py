@@ -36,7 +36,7 @@ from .config import (
     env_flag,
     reviewer_timeout,
 )
-from .proc import signals_deferred, signals_unwind
+from .proc import signals_deferred, signals_held, signals_unwind
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -150,9 +150,12 @@ def _hermes_cmd(prompt_path: Path, model: str) -> list[str]:
 _CLAUDE_TOOLS = "Read Grep Glob"
 
 
+#: What it is denied, which never changes.
+_CLAUDE_DENIED, _ = claude_denied(_CLAUDE_TOOLS)
+
+
 def _claude_cmd(slot: int) -> list[str]:
     model = "opus" if slot in (1, 4) else "sonnet" if slot == 3 else "haiku"
-    denied, _ = claude_denied(_CLAUDE_TOOLS)
     return [
         "claude",
         "-p",
@@ -166,7 +169,7 @@ def _claude_cmd(slot: int) -> list[str]:
         # --allowedTools alone the reviewer rewrote it; with this deny in
         # place it declines.
         "--disallowedTools",
-        " ".join(denied),
+        " ".join(_CLAUDE_DENIED),
         # No MCP servers: the user's own, configured for their sessions, would
         # each be a tool the deny list does not name.
         "--strict-mcp-config",
@@ -372,7 +375,11 @@ def _choose_command(
         if slot == 3:
             return _hermes_cmd(prompt_path, _SONNET_BEDROCK), None
 
-    if slot == 2 and backends["codex"]:
+    # A project pinned to Bedrock kept its code with providers it chose: with Hermes
+    # unavailable, slot 2 does not fall to OpenAI by default any more than slot 3 falls
+    # to Google. REVIEW_USE_CODEX=1 lets it.
+    codex_allowed = not prefer_hermes or env_flag("REVIEW_USE_CODEX")
+    if slot == 2 and backends["codex"] and codex_allowed:
         result_path = out_dir / f"codex-out-{slot}.txt"
         return [
             "codex",
@@ -564,7 +571,10 @@ def _spawn(
     with contextlib.ExitStack() as failed:
         out_f = failed.enter_context(_output(out_dir / f"raw-{slot}.txt"))
         err_f = failed.enter_context(_output(out_dir / f"stderr-{slot}.txt"))
-        with _feed(fed) as feed:
+        # Signals held from the start of the process until its stop is registered:
+        # one that arrived between the two left a reviewer running that nothing
+        # would stop. Raised again on the way out, when ``failed`` can stop it.
+        with _feed(fed) as feed, signals_held():
             proc = subprocess.Popen(
                 cmd,
                 cwd=workspace,
@@ -586,6 +596,12 @@ def _spawn(
     return proc, out_f, err_f
 
 
+def _under_review(repo: Path | None) -> tuple[Path, ...]:
+    """What agy's sandbox hides besides the homes: the repository under review (or the
+    directory the loop was started from), and this agent's checkout."""
+    return (repo if repo is not None else Path.cwd(), REPO_ROOT)
+
+
 def _prepare_agy(
     slot: int, cmd: list[str], repo: Path | None
 ) -> tuple[list[str], Path] | None:
@@ -598,7 +614,7 @@ def _prepare_agy(
         return cmd, workspace
     try:
         state = agy_seed_state(_scratch_dir("mmcra-agy-state-"))
-        sandbox = agy_wrapper(workspace, state)
+        sandbox = agy_wrapper(workspace, state, _under_review(repo))
     except OSError as exc:
         print(f"  R{slot}: could not prepare agy's sandbox ({exc})")
         return None

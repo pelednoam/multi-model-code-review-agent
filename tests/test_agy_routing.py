@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 from agy_case import AgyCase
-from helpers import SCHEMA_PATH
+from helpers import REPO_ROOT, SCHEMA_PATH
 
 from scripts.review_loop import agy, agy_sandbox, reviewers
 
@@ -193,7 +193,8 @@ class TestAgyRouting(AgyCase):
         assert isinstance(cmd, list) and cmd[-2:] == ["agy", "models"]
         wrap = cmd[: cmd.index("--") + 1]
         state = Path(wrap[wrap.index(str(agy_sandbox.agy_state_dir())) - 1])
-        assert wrap == agy_sandbox.agy_wrapper(Path(str(seen["cwd"])), state)
+        hidden = (Path.cwd(), REPO_ROOT)  # the repository, and this checkout
+        assert wrap == agy_sandbox.agy_wrapper(Path(str(seen["cwd"])), state, hidden)
 
     def test_a_listing_that_fails_is_empty(
         self, monkeypatch: pytest.MonkeyPatch
@@ -300,3 +301,20 @@ class TestAgyCommand(AgyCase):
         choice = _choose_command(2, tmp_path / "p.txt", tmp_path, found)
         assert choice is not None and choice[0][0] == "claude"
         assert choice[1] == "claude-haiku-4.5"
+
+    @pytest.mark.parametrize(
+        ("opted_in", "first"), [(False, "claude"), (True, "codex")]
+    )
+    def test_a_bedrock_project_does_not_fall_to_openai_by_default(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        opted_in: bool,
+        first: str,
+    ) -> None:
+        # With Hermes unavailable, a project pinned to Bedrock sent slot 2 to codex.
+        if opted_in:
+            monkeypatch.setenv("REVIEW_USE_CODEX", "1")
+        found = {**self.BACKENDS, "hermes": False, "codex": True}
+        choice = _choose_command(2, tmp_path / "p.txt", tmp_path, found, True)
+        assert choice is not None and choice[0][0] == first

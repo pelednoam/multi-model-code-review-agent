@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 from agy_case import AgyCase
+from helpers import REPO_ROOT
 
 from scripts.review_loop import agy, agy_sandbox, agy_sandbox_check, backends
 
@@ -66,8 +67,8 @@ class TestAgySandboxCheck(AgyCase):
         real = agy_sandbox.agy_wrapper
         target = tuple(str(Path.home()) if a == "HOME" else a for a in drop)
 
-        def weakened(ws: Path, st: Path) -> list[str]:
-            wrap = real(ws, st)
+        def weakened(ws: Path, st: Path, hidden: object = ()) -> list[str]:
+            wrap = real(ws, st, hidden)  # type: ignore[arg-type]
             for i in range(len(wrap) - len(target) + 1):
                 if tuple(wrap[i : i + len(target)]) == target:
                     return wrap[:i] + wrap[i + len(target) :]
@@ -511,6 +512,16 @@ class TestAgySandboxCheck(AgyCase):
             is None
         )
 
+    def test_the_repository_under_review_is_hidden(self, tmp_path: Path) -> None:
+        # Outside a home (/srv, a CI checkout) it was readable whole, .env and all.
+        repo = tmp_path / "srv" / "project"
+        wrap = agy_sandbox.agy_wrapper(
+            tmp_path / "ws", tmp_path / "st", [repo, Path("/")]
+        )
+        assert wrap[wrap.index(str(repo.resolve())) - 1] == "--tmpfs"
+        # Not /, which would hide everything.
+        assert ["--tmpfs", "/"] not in [wrap[i : i + 2] for i in range(len(wrap))]
+
     def test_the_sandbox_has_a_user_namespace_and_no_capabilities(self) -> None:
         wrap = agy_sandbox.agy_wrapper(Path("/var/tmp/ws"), Path("/var/tmp/st"))
         assert "--unshare-user" in wrap
@@ -631,4 +642,10 @@ class TestAgySandboxCheck(AgyCase):
         state = Path(wrap[wrap.index(str(agy_sandbox.agy_state_dir())) - 1])
         last_bind = len(wrap) - 1 - wrap[::-1].index("--bind")
         workspace = Path(wrap[last_bind + 1])
-        assert wrap == agy_sandbox.agy_wrapper(workspace, state)
+        # This checkout and the directory it runs from hidden, as a review hides them.
+        hidden = [
+            p
+            for p in dict.fromkeys(x.resolve() for x in (Path.cwd(), REPO_ROOT))
+            if p != Path("/")
+        ]
+        assert wrap == agy_sandbox.agy_wrapper(workspace, state, hidden)

@@ -1,0 +1,4 @@
+{
+  "source_dirs": ["scripts/"],
+  "test_dirs": ["tests/"]
+}

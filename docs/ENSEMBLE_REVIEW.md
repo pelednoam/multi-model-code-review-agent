@@ -42,7 +42,8 @@ ensemble-review agent (docs/ensemble-review.md)
   |                                                     --> result-3.json (readability)
   |-- claude -p opus OR hermes opus                     --> result-4.json (spec-contract)
   |   (pinned to Bedrock, .use-hermes: hermes first in every slot)
-  |   (all four run IN PARALLEL, 10min timeout each)
+  |   (all four run IN PARALLEL; the loop's deadline scales with the diff, full mode's
+  |    is REVIEWER_TIMEOUT, 600s by default, with the watchdog at +90s)
   |
   |  5. validate results against JSON schema
   |  6. persist review packet to data/reviews/<timestamp>_<branch>/

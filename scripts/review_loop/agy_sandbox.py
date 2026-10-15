@@ -9,11 +9,17 @@ docs/agy-sandbox.md.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Iterator
 
 try:
     import pwd
@@ -157,20 +163,32 @@ def _maskable(sock: str) -> bool:
         return False
 
 
-def agy_wrapper(workspace: Path, state: Path) -> list[str]:
+@contextlib.contextmanager
+def scratch_dirs() -> Iterator[tuple[Path, Path]]:
+    """A workspace and a state directory for one sandboxed agy run outside a round
+    (the model listing, the check): empty, resolved, removed on the way out. A round's
+    are kept with the round's other scratch instead (``reviewers._scratch_dir``)."""
+    with tempfile.TemporaryDirectory() as ws, tempfile.TemporaryDirectory() as st:
+        yield Path(ws).resolve(), Path(st).resolve()
+
+
+def agy_wrapper(workspace: Path, state: Path, hidden: Iterable[Path] = ()) -> list[str]:
     """The bubblewrap prefix agy runs under: ``agy_wrapper_parts``, joined."""
-    env, bwrap = agy_wrapper_parts(workspace, state)
+    env, bwrap = agy_wrapper_parts(workspace, state, hidden)
     return [*env, *bwrap]
 
 
-def agy_wrapper_parts(workspace: Path, state: Path) -> tuple[list[str], list[str]]:
+def agy_wrapper_parts(
+    workspace: Path, state: Path, hidden: Iterable[Path] = ()
+) -> tuple[list[str], list[str]]:
     """The bubblewrap prefix agy runs under, as ``env -i VAR=val...`` and bwrap's part.
 
     Everything is read-only except ``workspace``. The parts are separate so that a
     launcher can put a command between them: the bash runner's ``timeout`` goes after
     env, so its command line, readable by any local user in /proc, holds no values.
 
-    It replaces the home directories (``user_homes``), /tmp and /run with empty ones --
+    It replaces the home directories (``user_homes``), the directories in ``hidden``
+    (the repository under review, this checkout), /tmp and /run with empty ones --
     putting back only the resolver's file for DNS -- masks ``_HOST_SOCKETS``,
     gives agy a throwaway copy of its state (``agy_seed_state``), runs bwrap as PID 1
     of a new process namespace and session, and clears the environment to
@@ -215,6 +233,13 @@ def agy_wrapper_parts(workspace: Path, state: Path) -> tuple[list[str], list[str
             wrap += ["--ro-bind", "/dev/null", sock]
     for home in user_homes():
         wrap += ["--tmpfs", str(home)]
+    # The repository under review and this agent's checkout, wherever they are:
+    # outside a home (/srv, a CI checkout) they were readable whole, .env files and
+    # all, by a model that only ever needs the scrubbed diff it is sent. Not /, which
+    # cannot be hidden without hiding everything.
+    for directory in dict.fromkeys(p.resolve() for p in hidden):
+        if directory != Path("/"):
+            wrap += ["--tmpfs", str(directory)]
     exe = shutil.which("agy")
     if exe:
         target = str(Path(exe).resolve())

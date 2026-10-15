@@ -1062,7 +1062,7 @@ class TestReviewerDeadline:
         monkeypatch.setenv("REVIEWER_TIMEOUT", "42")
         assert reviewer_timeout(5000) == 42
 
-    def test_a_result_that_lands_after_the_deadline_is_recognised(
+    def test_a_codex_answer_that_lands_after_the_deadline_is_recognised(
         self, tmp_path: Path
     ) -> None:
         """A killed reviewer's helper can outlive it and write minutes later."""
@@ -1072,7 +1072,7 @@ class TestReviewerDeadline:
         (tmp_path / "codex-out-2.txt").write_text("{}")
         assert _has_codex_answer(tmp_path, 2)
 
-    def test_an_empty_result_file_is_not_a_result(self, tmp_path: Path) -> None:
+    def test_an_empty_codex_answer_is_not_an_answer(self, tmp_path: Path) -> None:
         from scripts.review_loop.reviewers import _has_codex_answer
 
         (tmp_path / "codex-out-2.txt").write_text("")
@@ -1403,6 +1403,18 @@ class TestCoverageSourceSpec:
     that must find a real gap.
     """
 
+    def test_the_gate_does_not_run_inside_a_test_run(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A project whose tests run the preflight had it run the suite, which ran the
+        # preflight again, until something timed out.
+        import scripts.preflight.coverage as cov_mod
+
+        monkeypatch.setenv("PYTEST_CURRENT_TEST", "t.py::test (call)")
+        warnings: list[str] = []
+        assert cov_mod._run_pytest_with_coverage(warnings) is None
+        assert "inside a test" in warnings[0]
+
     def test_cov_sources_are_directories_not_files(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -1410,6 +1422,8 @@ class TestCoverageSourceSpec:
 
         (tmp_path / "src").mkdir()
         monkeypatch.setattr(cov_mod, "REPO_ROOT", tmp_path)
+        # The gate itself, which is skipped inside a test run.
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
         monkeypatch.setattr(cov_mod, "SOURCE_DIRS", ["src/"])
 
         captured: list[list[str]] = []
@@ -1434,6 +1448,8 @@ class TestCoverageSourceSpec:
         from scripts.preflight import coverage as cov_mod
 
         monkeypatch.setattr(cov_mod, "REPO_ROOT", tmp_path)
+        # The gate itself, which is skipped inside a test run.
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
         monkeypatch.setattr(cov_mod, "SOURCE_DIRS", ["nonexistent/"])
 
         warnings: list[str] = []
@@ -1470,6 +1486,8 @@ class TestCoverageSourceSpec:
         )
 
         monkeypatch.setattr(cov_mod, "REPO_ROOT", tmp_path)
+        # The gate itself, which is skipped inside a test run.
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
         monkeypatch.setattr(cov_mod, "SOURCE_DIRS", ["src/"])
         monkeypatch.setattr(cov_mod, "COVERAGE_TARGET", 100)
 

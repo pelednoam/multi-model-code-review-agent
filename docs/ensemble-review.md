@@ -93,7 +93,7 @@ review_helper() {
 }
 # The switches the checks read, exported first: one set in this shell but not exported -- say
 # REVIEW_USE_AGY=0 -- is not seen by the helper, and agy would be detected anyway.
-export AGY_MODEL REVIEW_USE_AGY REVIEW_USE_GEMINI MMCRA_SKIP_AGY_SANDBOX_CHECK \
+export AGY_MODEL REVIEW_USE_AGY REVIEW_USE_GEMINI REVIEW_USE_CODEX MMCRA_SKIP_AGY_SANDBOX_CHECK \
   MMCRA_SKIP_CODEX_SANDBOX_CHECK
 
 # codex: only once its sandbox is shown to refuse a write (no model call). MMCRA_SKIP_CODEX_SANDBOX_CHECK=1
@@ -134,7 +134,7 @@ Bedrock opt-in precedence (PREFER_HERMES=true), used for regulated codebases tha
 | Reviewer | 1st choice | 2nd choice | 3rd choice |
 |---|---|---|---|
 | Security (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
-| Correctness | Hermes Haiku (Bedrock) | Codex CLI GPT-5.5 (free) | Claude CLI haiku (free) |
+| Correctness | Hermes Haiku (Bedrock) | Codex CLI GPT-5.5 only with `REVIEW_USE_CODEX=1`, else Claude CLI haiku (free) | Claude CLI haiku (free) |
 | Readability | Hermes Sonnet (Bedrock) | agy only with `REVIEW_USE_AGY=1`, else Gemini CLI only with `REVIEW_USE_GEMINI=1` (a project that pinned Bedrock never falls to Google by default) | Claude CLI sonnet (free) |
 | Spec-contract (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
 
@@ -405,7 +405,7 @@ Lens: off-by-one, null paths, shape/dtype mismatches, contract violations, logic
 
 **Coverage gaps**: when the audit JSON contains a non-empty `coverage_gaps` array, this reviewer MUST propose specific test cases for each uncovered line/branch. Each such finding should have `category: "test"` and `suggested_fix` containing the actual test code (function name, inputs, assertions) -- not a description. The merge agent will apply these tests verbatim, so they must be runnable as-is.
 
-### Reviewer 3 -- Readability, maintainability & performance (agy by default, else Gemini or Claude Sonnet; Sonnet 4.6 via Bedrock when opted in)
+### Reviewer 3 -- Readability, maintainability & performance (agy by default, else Gemini with `REVIEW_USE_GEMINI=1`, else Claude Sonnet; Sonnet 4.6 via Bedrock when opted in)
 
 Output: `$REVIEW_TMP/result-3.json`
 
@@ -687,6 +687,7 @@ launch_hermes() {
   JOB_PID[$num]=$!
   JOB_OUT[$num]="$REVIEW_TMP/stdout-$num.txt"
   JOB_BACKEND[$num]=hermes
+  echo hermes > "$REVIEW_TMP/backend-$num.txt"   # for watching
   JOB_PROVIDER[$num]=anthropic
   echo $! > "$REVIEW_TMP/pid-$num"
   echo "R$num: Hermes ($hermes_model) [Bedrock]"
@@ -728,7 +729,7 @@ prepare_agy() {
     "$(cd "$REVIEW_ROOT" && pwd -P)"/*)
       echo "R$num: SKIPPED (agy workspace $AGY_WS is inside the repo; check TMPDIR)"; return 1 ;;
   esac
-  mapfile -d '' -t wrap < <(review_helper agy-sandbox "$AGY_WS" "$AGY_STATE")
+  mapfile -d '' -t wrap < <(review_helper agy-sandbox "$AGY_WS" "$AGY_STATE" "$REVIEW_ROOT")
   [ "${#wrap[@]}" -ge 1 ] || { echo "R$num: SKIPPED (could not build agy's sandbox)"; return 1; }
   AGY_ENVP=("${wrap[@]:1:${wrap[0]}}")
   AGY_BWRAP=("${wrap[@]:$((1 + wrap[0]))}")
@@ -758,7 +759,7 @@ claude_deny() {
   [ -z "$denied" ] || CLAUDE_DENY=(--disallowedTools "$denied")
 }
 
-# Launch via a coding agent CLI (free, stdin-based).
+# Launch via a local reviewer CLI (stdin-based; each uses its own subscription or plan).
 # Callers pass 'claude-<model>' (e.g. claude-opus, claude-sonnet,
 # claude-haiku), 'codex', 'gemini', or 'agy'.
 launch_cli() {
@@ -795,6 +796,7 @@ launch_cli() {
       JOB_PID[$num]=$!
       JOB_OUT[$num]="$REVIEW_TMP/claude-raw-$num.json"
       JOB_BACKEND[$num]=claude
+      echo claude > "$REVIEW_TMP/backend-$num.txt"   # for watching
       JOB_PROVIDER[$num]=anthropic
       echo $! > "$REVIEW_TMP/pid-$num"
       echo "R$num: Claude CLI ($model, tools: $tools) [Claude subscription]"
@@ -821,6 +823,7 @@ launch_cli() {
       JOB_PID[$num]=$!
       JOB_OUT[$num]="$REVIEW_TMP/codex-out-$num.txt"
       JOB_BACKEND[$num]=codex
+      echo codex > "$REVIEW_TMP/backend-$num.txt"   # for watching
       JOB_PROVIDER[$num]=openai
       echo $! > "$REVIEW_TMP/pid-$num"
       local label="${CODEX_MODEL:-gpt-5.5}"
@@ -853,6 +856,7 @@ launch_cli() {
       JOB_PID[$num]=$!
       JOB_OUT[$num]="$REVIEW_TMP/stdout-$num.txt"
       JOB_BACKEND[$num]=gemini
+      echo gemini > "$REVIEW_TMP/backend-$num.txt"   # for watching
       JOB_PROVIDER[$num]=google
       echo $! > "$REVIEW_TMP/pid-$num"
       echo "R$num: Gemini CLI (${GEMINI_MODEL:-gemini-2.5-flash}) [Google AI Studio free tier]"
@@ -924,7 +928,8 @@ fi
 # When PREFER_HERMES is set, the Bedrock haiku path runs first.
 if $PREFER_HERMES && $HAS_HERMES; then
   launch_hermes 2 us.anthropic.claude-haiku-4-5-20251001-v1:0 "$REVIEW_TMP/prompt-2.txt"
-elif $HAS_CODEX; then
+elif $HAS_CODEX && { ! $PREFER_HERMES || review_helper flag REVIEW_USE_CODEX; }; then
+  # A project pinned to Bedrock does not fall to OpenAI by default when Hermes is unavailable.
   launch_cli 2 codex "$REVIEW_TMP/prompt-2.txt"
 elif $HAS_CLAUDE && launch_cli 2 claude-haiku "$REVIEW_TMP/prompt-2.txt"; then
   :  # launched; if claude could not be set up, Hermes is next
@@ -1061,7 +1066,7 @@ shell and inherits nothing from the call that wrote it.
 
 ```bash
 export REVIEW_TMP HAS_CLAUDE HAS_HERMES HAS_CODEX HAS_GEMINI HAS_AGY AGY_MODEL PREFER_HERMES \
-  MMCRA_SKIP_AGY_SANDBOX_CHECK REVIEW_USE_AGY REVIEW_USE_GEMINI
+  MMCRA_SKIP_AGY_SANDBOX_CHECK REVIEW_USE_AGY REVIEW_USE_GEMINI REVIEW_USE_CODEX
 "$REVIEW_TMP/run-reviewers.sh" 2>&1 | tee "$REVIEW_TMP/round.log"
 ```
 

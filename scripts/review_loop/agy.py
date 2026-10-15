@@ -14,18 +14,17 @@ in ``agy_sandbox`` and ``agy_sandbox_check``. Its stream is read in ``results``.
 
 from __future__ import annotations
 
-import contextlib
 import functools
 import json
 import os
 import re
 import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 
-from .agy_sandbox import agy_seed_state, agy_wrapper
-from .config import AGY_MODELS_TIMEOUT, RESULT_SCHEMA, env_flag
+from .agy_sandbox import agy_seed_state, agy_wrapper, scratch_dirs
+from .config import AGY_MODELS_TIMEOUT, REPO_ROOT, RESULT_SCHEMA, env_flag
+from .findings import REVIEW_KEYS
 from .proc import run, signals_unwind
 
 # The flags that remain once the sandbox is in place: --sandbox restricts terminal
@@ -123,17 +122,11 @@ def agy_models() -> list[str]:
     agy runs in it treats as its workspace: not the repository, nor a shared /tmp.
     """
     try:
-        with (
-            signals_unwind(),
-            contextlib.ExitStack() as scratch,
-        ):
-            workspace = Path(scratch.enter_context(tempfile.TemporaryDirectory()))
-            workspace = workspace.resolve()
+        with signals_unwind(), scratch_dirs() as (workspace, state):
             cmd = ["agy", "models"]
             if not agy_unsandboxed():
-                # A state directory only for the sandbox, which mounts it over agy's.
-                st = Path(scratch.enter_context(tempfile.TemporaryDirectory()))
-                cmd = [*agy_wrapper(workspace, agy_seed_state(st.resolve())), *cmd]
+                agy_seed_state(state)
+                cmd = [*agy_wrapper(workspace, state, (Path.cwd(), REPO_ROOT)), *cmd]
             done = run(
                 cmd,
                 cwd=workspace,
@@ -260,6 +253,12 @@ def _check_schema_shape(schema: object, path: Path) -> None:
         isinstance(key, str) and key in properties for key in required
     ):
         raise fail("it requires keys it does not define")
+    # And it must ask for what a review is read for (findings.validate_result):
+    # agy's answer is held to this schema, and one that need not have these is one
+    # the loop would then throw away.
+    missing = sorted(REVIEW_KEYS - set(required))
+    if missing:
+        raise fail(f"it does not require {', '.join(missing)}")
 
 
 def agy_message(prompt: str) -> str:

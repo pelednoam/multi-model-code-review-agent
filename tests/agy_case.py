@@ -54,6 +54,9 @@ class AgyCase:
         # where the suite runs, it changed what every wrapper test saw. Tests of it
         # set it themselves.
         monkeypatch.delenv("MMCRA_SKIP_AGY_SANDBOX_CHECK", raising=False)
+        # Nor the documented codex settings, which changed what a slot's choice named.
+        for var in ("CODEX_MODEL", "CODEX_REASONING_EFFORT", "REVIEW_USE_CODEX"):
+            monkeypatch.delenv(var, raising=False)
         # What the installed bwrap supports, asked once now: asked later, the question
         # would go to whatever fake process a test has put in place.
         agy_sandbox._bwrap_supports("--disable-userns")

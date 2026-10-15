@@ -148,7 +148,7 @@ next backend.
 
 - `REVIEW_USE_AGY` set to anything but `1`, `true`, `yes` or `on` (`0`, empty, a
   typo): do not use agy. It is on by default wherever it is installed, and then sends
-  the scrubbed diff and audit to Google. Every round that does so says so.
+  the scrubbed diff, audit and context to Google. Every round that does so says so.
 - `REVIEW_USE_AGY=1`: in a project pinned to Bedrock, let agy answer slot 3 when
   Hermes is not installed (with Hermes, Hermes answers it).
 - `MMCRA_AGY_STRICT_SOCKETS=1`: refuse every abstract socket that takes connections,

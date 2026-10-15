@@ -2067,6 +2067,26 @@ class TestRunnerScript:
     had happened. It cost two rounds on a downstream project before the cause was found.
     """
 
+    def test_the_runner_is_read_whole_before_it_runs(self, tmp_path: Path) -> None:
+        # bash reads a script as it runs it: a reviewer that rewrote the file while it
+        # ran had its commands run (measured). One group, closed by an exit, is read
+        # whole first.
+        runner = runner_script()
+        code = [line for line in runner.splitlines() if not line.startswith("#")]
+        assert code[0] == "{" and code[-2:] == ["exit 0", "}"]
+        script = tmp_path / "s.sh"
+        script.write_text(
+            "{\nsleep 1\necho ran\nexit 0\n}\n" + "#" * 64 + "\n", encoding="utf-8"
+        )
+        proc = subprocess.Popen(
+            ["bash", str(script)], stdout=subprocess.PIPE, text=True
+        )
+        time.sleep(0.3)
+        with script.open("r+", encoding="utf-8") as f:
+            f.write("{\nsleep 1\necho bad\nexit 0\n}\n")
+        out, _ = proc.communicate(timeout=10)
+        assert out == "ran\n"
+
     def test_cdpath_is_cleared_before_any_cd(self) -> None:
         # Set, it made "$(cd DIR && pwd -P)" capture cd's own line in the path.
         runner = runner_script()
@@ -2698,6 +2718,7 @@ class TestCredentialShapes:
             "postgres://app@srv" + ":hunter2pass" + "@srv.example.net/db",
             "postgres://u" + ":hunter2pass" + "@[::1]:5432/db",
             "postgres://u" + ":$ecret9" + "@db/prod",
+            "mysql://root" + ":12345" + "@localhost/db",
             "ya" + "29." + "a" * 30,
             "1/" + "/0" + "a" * 40,
             "GOC" + "SPX-" + "a" * 28,
@@ -2709,12 +2730,17 @@ class TestCredentialShapes:
             "gh" + "s_" + "a" * 36,
             "sk" + "_live_" + "x" * 24,
             "xo" + "xb-" + "1234567890-abc",
+            "xa" + "pp-1-" + "A" * 24,
+            "hooks.slack.com/services/" + "T0123/B0456/" + "a" * 24,
+            "discord.com/api/" + "webhooks/123/" + "a" * 60,
+            "S" + "G." + "a" * 22 + "." + "b" * 43,
         ],
         ids=["url-userinfo", "url-no-user", "url-short-password", "url-slash-password",
-             "url-quote-password", "url-azure-user", "url-ipv6-host", "url-dollar-password",
+             "url-quote-password", "url-azure-user", "url-ipv6-host", "url-dollar-password", "url-numeric-password",
              "google-oauth-access", "google-oauth-refresh",
              "google-client-secret", "huggingface", "npm", "pypi", "google-api-key", "github-fine-grained", "github-app",
-             "stripe-live", "slack"],
+             "stripe-live", "slack", "slack-app", "slack-webhook", "discord-webhook",
+             "sendgrid"],
     )  # fmt: skip
     def test_more_credential_shapes_are_redacted(self, secret: str) -> None:
         # None was caught, and with agy on by default the diff goes to Google too.
@@ -2726,6 +2752,19 @@ class TestCredentialShapes:
         import time as clock
 
         line = "+" + "a" * 200_000 + "\n"
+        started = clock.monotonic()
+        scrub_diff.scrub_line(line, False)
+        assert clock.monotonic() - started < 2
+
+    @pytest.mark.parametrize("piece", [":{", ":${A", ":<", ":%(", ":*"])
+    def test_a_line_of_unfinished_placeholders_is_scanned_quickly(
+        self, piece: str
+    ) -> None:
+        # Unbounded, each placeholder's scan ran to the end of the line from every
+        # URL on it.
+        import time as clock
+
+        line = "+" + ("a://b" + piece + "c" * 50) * 4000 + "\n"
         started = clock.monotonic()
         scrub_diff.scrub_line(line, False)
         assert clock.monotonic() - started < 2
@@ -2991,3 +3030,52 @@ class TestSecretReads:
         assert f"/{account}/.ssh/**" in reads
         monkeypatch.setenv("HOME", account)
         assert claude_tools._secret_reads() == list(SECRET_READS)
+
+    def test_a_home_with_a_space_is_left_to_the_tilde_rules(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # Space-separated, a rule with a space in it would have been two others.
+        import pwd
+
+        record = pwd.getpwuid(os.getuid())
+        spaced = type(record)((*record[:5], "/home/a b", *record[6:]))
+        monkeypatch.setattr(pwd, "getpwuid", lambda uid: spaced)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert claude_tools._secret_reads() == list(SECRET_READS)
+        out = capsys.readouterr()
+        assert out.out == "" and "a space" in out.err
+
+
+class TestScrubText:
+    """``scrub_diff.py --text``: plain text, every line content, as full mode's
+    context bundle is."""
+
+    def _scrub(self, text: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(REPO_ROOT / "scripts" / "scrub_diff.py"), "--text"],
+            input=text, capture_output=True, text=True, timeout=30,
+        )  # fmt: skip
+
+    def test_a_credential_in_plain_text_is_redacted(self) -> None:
+        # Read as a diff, a line with no +, - or space prefix passed untouched, and the
+        # bundle went into every prompt -- to Google too, with agy.
+        key = "gh" + "p_" + "a" * 36
+        done = self._scrub(f"plain\nsee {key}\ndiff --git a b\n")
+        assert done.returncode == 1
+        assert key not in done.stdout
+        assert done.stdout.startswith("plain\n") and "diff --git a b\n" in done.stdout
+
+    def test_a_private_keys_body_is_redacted(self) -> None:
+        begin = "-----BEGIN RSA PRIVATE " + "KEY-----"
+        end = "-----END RSA PRIVATE " + "KEY-----"
+        done = self._scrub(f"a\n{begin}\nMIIbody\n{end}\nb\n")
+        assert done.returncode == 1
+        assert "MIIbody" not in done.stdout
+        assert done.stdout.startswith("a\n") and done.stdout.endswith("b\n")
+
+    def test_clean_text_passes_through(self) -> None:
+        done = self._scrub("nothing here\n")
+        assert done.returncode == 0 and done.stdout == "nothing here\n"

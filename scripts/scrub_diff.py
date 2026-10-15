@@ -108,10 +108,13 @@ KEYWORD_PATTERNS = [
 
 #: A URL password that is no password: a template's field -- {password},
 #: ${DB_PASS}, %(pw)s, <password> -- or a placeholder word or mask. A port can be a
-#: field too (localhost:{port}/...), so before a "/" it is no password either.
+#: field too (localhost:{port}/...), so before a "/" it is no password either. Each
+#: part bounded, as the pattern's are, so that a line of unfinished ones is scanned
+#: in linear time.
 _URL_PLACEHOLDER = (
-    r"(?:\{[^}@\s]*\}|\$\{[A-Za-z_]\w*\}|\$[A-Z_][A-Z0-9_]*|%\([^)@\s]*\)s|%[sd]"
-    + r"|<[^>@\s]*>|\*+|x+|X+|pass(?:w(?:or)?d)?|pwd?|secret|changeme)"
+    r"(?:\{[^}@\s]{0,64}\}|\$\{[A-Za-z_]\w{0,64}\}|\$[A-Z_][A-Z0-9_]{0,64}"
+    + r"|%\([^)@\s]{0,64}\)s|%[sd]|<[^>@\s]{0,64}>|\*{1,64}|x{1,64}|X{1,64}"
+    + r"|pass(?:w(?:or)?d)?|pwd?|secret|changeme)"
 )
 
 
@@ -139,6 +142,11 @@ SHAPE_PATTERNS = [
     re.compile(r"AIza[0-9A-Za-z_-]{35}"),
     re.compile(r"(?:sk|rk)_live_[0-9a-zA-Z]{20,}"),
     re.compile(r"xox[abprs]-[0-9A-Za-z-]{10,}"),
+    # Slack app tokens and incoming webhooks, Discord webhooks, SendGrid keys.
+    re.compile(r"xapp-\d-[A-Za-z0-9-]{20,}"),
+    re.compile(r"hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]{20,}"),
+    re.compile(r"discord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9_-]{50,}"),
+    re.compile(r"SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}"),
     # A password in a URL's userinfo: scheme, "://", user (redis's may be empty,
     # Azure's holds an @), ":", password, "@" -- in a postgres, redis or proxy URL.
     # A password may hold ' or / (base64 often has one); a port and a path after it
@@ -150,9 +158,9 @@ SHAPE_PATTERNS = [
     # line is not one.
     re.compile(
         r"(?<![a-zA-Z0-9+.-])[a-zA-Z][a-zA-Z0-9+.-]{0,31}:"
-        + r"//[^\s/:\"?#\[\]]{0,256}:(?!(?:\d{1,5}|"
+        + r"//[^\s/:\"?#\[\]]{0,256}:(?!\d{1,5}/)(?!"
         + _URL_PLACEHOLDER
-        + r")[/@])[^\s@\"?#]{1,256}@"
+        + r"[/@])[^\s@\"?#]{1,256}@"
     ),
     # Google's OAuth access and refresh tokens and client secrets, and the package
     # registries' tokens.
@@ -402,10 +410,38 @@ def _force_utf8(stream: object) -> None:
         reconfigure(encoding="utf-8", errors="replace")
 
 
+def scrub_text() -> int:
+    """``--text``: scrub stdin as plain text rather than a diff -- every line is
+    content, as an added line is -- writing it to stdout. Returns the number of
+    lines redacted. For what goes into a prompt beside the diff: full mode's context
+    bundle quotes project files, and is sent wherever the diff is."""
+    n_redacted = 0
+    in_key = False
+    for line in sys.stdin:
+        if in_key:
+            # A private key's body, after its redacted BEGIN line, to its END line.
+            clean = _redact_preserving_prefix("+" + line)[1:]
+            in_key = not _PEM_END.search(line)
+        else:
+            clean = scrub_line("+" + line, False, in_hunk=True)[1:]
+            in_key = clean != line and bool(_PEM_BEGIN.search(line))
+        sys.stdout.write(clean)
+        if REDACTED in clean and clean != line:
+            n_redacted += 1
+    return n_redacted
+
+
 def main() -> None:
     """Read stdin, scrub, write to stdout. Exit 1 if any redactions."""
     _force_utf8(sys.stdin)
     _force_utf8(sys.stdout)
+
+    if sys.argv[1:] == ["--text"]:
+        n_text = scrub_text()
+        if n_text:
+            print(f"# scrub_diff.py: {n_text} line(s) redacted", file=sys.stderr)
+            sys.exit(1)
+        return
 
     n_redacted = 0
     in_safe = False

@@ -193,8 +193,11 @@ for f in "$ROUND"/result-*.json; do echo "$f: $(jq '.findings | length' "$f")"; 
   directory: this removes the obvious path, not every path. Wait for `Reviewers
   finished in Ns` before concluding anything.
 
-When a slot genuinely produced nothing, `result-N.json` is absent and
-`stderr-N.txt` says why.
+When a slot genuinely produced nothing, the convergence loop leaves
+`result-N.json` absent and `stderr-N.txt` says why; the full-mode runner writes
+a placeholder `result-N.json` instead, `"reviewer": "unknown"`, whose
+`overall_assessment` gives the reason. Either is a missing reviewer, not an
+empty review.
 
 claude, codex, gemini and agy get the prompt on stdin from a file, never a pipe: a pipe holds 64 KB and stalled the launch until the reviewer read it. agy's is one stream-json line. Hermes takes it with `-z`: `@file` in the convergence loop, the text itself in the full-mode runner, which is subject to the ARG_MAX limit on one argument -- for very large diffs, prefer the loop or Claude CLI.
 
@@ -231,13 +234,21 @@ Read the audit JSON and report a one-line summary to the user.
 
 ## 3. Build the repo-aware context bundle
 
-Write `$REVIEW_TMP/context.md` with:
+Write `$REVIEW_TMP/context.raw.md` with:
 
 1. **Feature summary**: 1-2 sentences from `git log --oneline -10`.
 2. **Preflight audit summary**: manifest counts, SHA matches, warnings.
 3. **Untracked and cached files**.
 4. **Relevant source-of-truth snippets**: CLAUDE.md sections, proposal specs, manifest metadata.
 5. **Flags**: e.g. "touches FDA-cleared path" or "modifies signed artifact".
+
+Then scrub it as the diff is -- it quotes project files, and goes into every prompt, to Google too when agy runs -- and use only the scrubbed copy:
+
+```bash
+python scripts/scrub_diff.py --text < "$REVIEW_TMP/context.raw.md" > "$REVIEW_TMP/context.md"
+```
+
+If the scrubber exits non-zero, **STOP**, as for the diff: a credential is quoted in the bundle.
 
 ## 4. Read the diff and audit into your context
 
@@ -454,6 +465,10 @@ cat > "$REVIEW_TMP/run-reviewers.sh" <<'RUNNER'
 #!/usr/bin/env bash
 # Launch, wait, and normalize - one shell, start to finish.
 # Written to a file rather than run inline so that `wait` sees the children it launched.
+# All one group, closed by the exit at its end: bash reads a script as it runs it, and a reviewer
+# with a file tool (hermes -t file --yolo) could rewrite what comes after the line being run. A
+# group is read whole before any of it runs, and the exit stops bash reading past it.
+{
 set -uo pipefail
 # bash 4.4 or later: `mapfile -d` reads agy's sandbox, and before 4.4 `set -u` failed on an empty
 # array. macOS's /bin/bash is 3.2; install a newer one (Homebrew) to run this.
@@ -573,7 +588,8 @@ JOB_PID=()
 JOB_BACKEND=()   # which CLI ran each slot, which decides how its output is read (unwrap_envelope)
 JOB_OUT=()       # the one file each slot's CLI writes its answer to, the only one read for it
 JOB_PROVIDER=()  # whose model answers each slot, for the diversity count
-JOB_MODEL=()     # the model that answers each slot, written into its result
+JOB_MODEL=()     # the model launched for each slot, written into its result; the loop instead
+                 # keeps the label its prompt named, which is the same model
 SCRATCH=()
 kill_jobs() {
   local sig
@@ -931,7 +947,7 @@ launch_cli() {
       JOB_MODEL[$num]="$AGY_MODEL"
       echo $! > "$REVIEW_TMP/pid-$num"
       echo "R$num: Antigravity CLI ($AGY_MODEL) [Google AI plan]"
-      echo "R$num: agy sends the diff and audit to Google (REVIEW_USE_AGY=0 to stop)"
+      echo "R$num: agy sends diff, audit and context to Google (REVIEW_USE_AGY=0 to stop)"
       ;;
     *)
       echo "R$num: SKIPPED (unknown backend: $cli)"
@@ -1002,8 +1018,10 @@ fi
 # Provider diversity, counted from what was launched: predicted from what is installed, it counted
 # codex and Google for a project pinned to Bedrock, where Hermes takes slots 2 and 3.
 N_PROVIDERS=$(printf '%s\n' "${JOB_PROVIDER[@]}" | sort -u | grep -c .)
-if [ "$N_PROVIDERS" -le 1 ]; then
-  echo "WARNING: single-provider mode (Anthropic only)."
+if [ "$N_PROVIDERS" -eq 0 ]; then
+  echo "WARNING: no reviewer was launched."
+elif [ "$N_PROVIDERS" -eq 1 ]; then
+  echo "WARNING: single-provider mode ($(printf '%s\n' "${JOB_PROVIDER[@]}" | sort -u | grep .) only)."
   echo "Install codex and/or agy (or gemini, with REVIEW_USE_GEMINI=1) for cross-provider diversity."
 fi
 echo "Provider diversity: $N_PROVIDERS provider(s)"
@@ -1087,6 +1105,8 @@ for num in 1 2 3 4; do
 done
 
 echo "ROUND COMPLETE"
+exit 0
+}
 RUNNER
 chmod +x "$REVIEW_TMP/run-reviewers.sh"
 ```

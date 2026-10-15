@@ -7,6 +7,7 @@ One copy, for the convergence loop's claude reviewers and the full-mode runner's
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 #: The tools a claude reviewer is denied unless it is granted them by name: each one
@@ -111,4 +112,13 @@ def _secret_reads() -> list[str]:
     if not account or Path(account) == Path(os.path.expanduser("~")):
         return reads
     root = account.rstrip("/")
+    if any(c.isspace() for c in root):
+        # --disallowedTools takes its rules space-separated: a rule with a space in it
+        # would be two, each meaning something else.
+        # To stderr: the runner reads stdout as the rules (``runner_cli claude-deny``).
+        print(
+            f"  WARNING: claude's credential denies do not cover {account!r}: a space",
+            file=sys.stderr,
+        )
+        return reads
     return reads + [f"/{root}/{path[2:]}" for path in SECRET_READS if path[:2] == "~/"]

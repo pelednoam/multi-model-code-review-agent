@@ -51,7 +51,7 @@ AGY_PREAMBLE = (
 
 #: Said whenever agy takes slot 3, by both launchers: it is on by default, and this is
 #: where the scrubbed diff and audit leave for Google.
-AGY_EGRESS = "agy sends the diff and audit to Google (REVIEW_USE_AGY=0 to stop)"
+AGY_EGRESS = "agy sends diff, audit and context to Google (REVIEW_USE_AGY=0 to stop)"
 
 
 def agy_enabled() -> bool:

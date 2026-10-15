@@ -418,7 +418,7 @@ class TestAgyLaunch(AgyCase):
         self, tmp_path: Path
     ) -> None:
         # Read by its path from round_dir, another reviewer with a file tool could
-        # rewrite it first.
+        # rewrite it first; from the private output directory, it learnt where that is.
         found = {**self.BACKENDS, "hermes": True}
         out_dir = tmp_path / "private"
         out_dir.mkdir()
@@ -427,7 +427,24 @@ class TestAgyLaunch(AgyCase):
         )
         picked = reviewers._pick_backend(1, round_)
         assert picked is not None and picked.backend == "hermes"
-        assert f"@{out_dir / 'prompt-1.txt'}" in picked.cmd
+        assert picked.prompt_path is not None
+        assert f"@{picked.prompt_path}" in picked.cmd
+        # Not in round_dir, nor in the reviewers' private output directory, which
+        # hermes would then know.
+        assert picked.prompt_path.parent not in (tmp_path, out_dir)
+        assert str(out_dir) not in " ".join(picked.cmd)
+        reviewers._release_scratch()
+
+    def test_claude_runs_in_the_repository_under_review(self, tmp_path: Path) -> None:
+        # From the loop's own directory -- a trusted checkout, with --repo naming the
+        # branch -- its Read and Grep read that checkout, not the branch.
+        repo = tmp_path / "repo"
+        round_ = reviewers._Round(
+            "d", "{}", "", tmp_path, self.BACKENDS, False, repo, out_dir=tmp_path
+        )
+        picked = reviewers._pick_backend(1, round_)
+        assert picked is not None and picked.backend == "claude"
+        assert picked.workspace == repo
 
     def test_gemini_runs_outside_the_repository(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

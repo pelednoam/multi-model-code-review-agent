@@ -68,7 +68,7 @@ review missed.
 | Artifact/manifest audit | no | yes | yes | yes |
 | Coverage-gap detection | no | yes | yes | yes |
 | Per-reviewer attribution | no | 2 lenses | 4 lenses | 4 lenses |
-| Write isolation | no | no | `--disallowedTools`; codex and agy sandboxed | none for hermes (see the backends table) |
+| Write isolation | no | no | `--disallowedTools`; codex and agy sandboxed; gemini (opt-in) policy-only | none for hermes (see the backends table) |
 | Structured JSON schema | no | no | yes | yes |
 | Review packet persistence | no | no | yes | yes |
 | Cross-provider models | no | no | with Codex + agy/Gemini | any provider |
@@ -301,7 +301,8 @@ why: the gemini CLI treats the prompt as a task and goes exploring the
 repository with its own tools, finishing a 200 KB diff in sixty seconds where
 the Claude reviewers take six minutes on the same input. It is opt-in now, in
 both modes -- `REVIEW_USE_GEMINI=1`. Slot 3 goes to agy where it is installed and its
-sandbox verified, and otherwise falls through to Claude.
+sandbox verified, else to gemini with `REVIEW_USE_GEMINI=1`, and otherwise falls
+through to Claude.
 
 **A killed reviewer's work is not always dead.** `proc.kill()` kills the process
 the loop started, which is not always the one doing the work: a CLI that shells

@@ -107,10 +107,11 @@ KEYWORD_PATTERNS = [
 ]
 
 #: A URL password that is no password: a template's field -- {password},
-#: ${DB_PASS}, %(pw)s, <password> -- or a placeholder word or mask.
+#: ${DB_PASS}, %(pw)s, <password> -- or a placeholder word or mask. A port can be a
+#: field too (localhost:{port}/...), so before a "/" it is no password either.
 _URL_PLACEHOLDER = (
-    r"(?:\{[^}@\s]*\}|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|%\([^)@\s]*\)s|<[^>@\s]*>"
-    + r"|\*+|x+|X+|pass(?:w(?:or)?d)?|pwd?|secret|changeme)"
+    r"(?:\{[^}@\s]*\}|\$\{[A-Za-z_]\w*\}|\$[A-Z_][A-Z0-9_]*|%\([^)@\s]*\)s|%[sd]"
+    + r"|<[^>@\s]*>|\*+|x+|X+|pass(?:w(?:or)?d)?|pwd?|secret|changeme)"
 )
 
 
@@ -149,9 +150,9 @@ SHAPE_PATTERNS = [
     # line is not one.
     re.compile(
         r"(?<![a-zA-Z0-9+.-])[a-zA-Z][a-zA-Z0-9+.-]{0,31}:"
-        + r"//[^\s/:\"?#\[\]]{0,256}:(?!\d{1,5}/)(?!"
+        + r"//[^\s/:\"?#\[\]]{0,256}:(?!(?:\d{1,5}|"
         + _URL_PLACEHOLDER
-        + r"@)[^\s@\"?#]{1,256}@"
+        + r")[/@])[^\s@\"?#]{1,256}@"
     ),
     # Google's OAuth access and refresh tokens and client secrets, and the package
     # registries' tokens.

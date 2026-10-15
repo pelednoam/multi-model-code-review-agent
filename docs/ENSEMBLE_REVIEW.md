@@ -26,7 +26,7 @@ manifest). This pipeline addresses three gaps:
 ```
 Claude Code (dev pipeline)
   |
-  |  "run an ensemble review"
+  |  "full review" (full mode; "review this" / "ensemble review" run quick mode)
   v
 ensemble-review agent (docs/ensemble-review.md)
   |

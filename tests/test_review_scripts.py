@@ -2067,6 +2067,11 @@ class TestRunnerScript:
     had happened. It cost two rounds on a downstream project before the cause was found.
     """
 
+    def test_cdpath_is_cleared_before_any_cd(self) -> None:
+        # Set, it made "$(cd DIR && pwd -P)" capture cd's own line in the path.
+        runner = runner_script()
+        assert runner.index("unset CDPATH") < runner.index('(cd "')
+
     def test_runner_is_valid_bash(self, tmp_path: Path) -> None:
         script = tmp_path / "run-reviewers.sh"
         script.write_text(runner_script() + "\n")
@@ -2692,6 +2697,7 @@ class TestCredentialShapes:
             "postgres://u" + ":it's-me" + "@db/prod",
             "postgres://app@srv" + ":hunter2pass" + "@srv.example.net/db",
             "postgres://u" + ":hunter2pass" + "@[::1]:5432/db",
+            "postgres://u" + ":$ecret9" + "@db/prod",
             "ya" + "29." + "a" * 30,
             "1/" + "/0" + "a" * 40,
             "GOC" + "SPX-" + "a" * 28,
@@ -2705,7 +2711,8 @@ class TestCredentialShapes:
             "xo" + "xb-" + "1234567890-abc",
         ],
         ids=["url-userinfo", "url-no-user", "url-short-password", "url-slash-password",
-             "url-quote-password", "url-azure-user", "url-ipv6-host", "google-oauth-access", "google-oauth-refresh",
+             "url-quote-password", "url-azure-user", "url-ipv6-host", "url-dollar-password",
+             "google-oauth-access", "google-oauth-refresh",
              "google-client-secret", "huggingface", "npm", "pypi", "google-api-key", "github-fine-grained", "github-app",
              "stripe-live", "slack"],
     )  # fmt: skip
@@ -2748,6 +2755,8 @@ class TestCredentialShapes:
             "http://host:8080#to=a@b",
             "ws://h:1?u=x:y@z",
             "http://[::1]:8080/@scope/pkg",
+            "http://localhost:{port}/@scope/pkg",
+            "http://localhost:${PORT}/@scope/pkg",
         ],
     )
     def test_a_query_or_fragment_with_an_at_is_kept(self, url: str) -> None:

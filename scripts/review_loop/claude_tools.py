@@ -77,9 +77,15 @@ SECRET_READS = (
     # Environment files anywhere, the repository's included, and direnv's; joined,
     # because the diff scrubber rightly redacts a line that names one.
     "**/." + "env", "**/." + "env.*", "**/." + "envrc",
-    # Processes' environments, this one's and the CLI's own with them. "//" is an
-    # absolute path in a permission rule; a single "/" is relative to the settings.
-    "//proc/*/environ", "//proc/self/environ",
+    # The same files inside the repository under review, or any other: a remote's URL
+    # in .git/config can carry a token.
+    "**/.git/config", "**/.git-credentials", "**/.npmrc", "**/.pypirc", "**/.netrc",
+    "**/.docker/config.json",
+    # All of /proc: processes' environments, this one's and the CLI's own among them,
+    # and the aliases (/proc/self/root, /proc/<pid>/cwd) that reach every file above
+    # by another path. "//" is an absolute path in a permission rule; a single "/" is
+    # relative to the settings.
+    "//proc/**",
 )  # fmt: skip
 
 

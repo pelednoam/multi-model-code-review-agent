@@ -150,10 +150,6 @@ def _hermes_cmd(prompt_path: Path, model: str) -> list[str]:
 _CLAUDE_TOOLS = "Read Grep Glob"
 
 
-#: What it is denied, which never changes.
-_CLAUDE_DENIED = claude_disallowed(_CLAUDE_TOOLS)
-
-
 def _claude_cmd(slot: int) -> list[str]:
     model = "opus" if slot in (1, 4) else "sonnet" if slot == 3 else "haiku"
     return [
@@ -169,7 +165,9 @@ def _claude_cmd(slot: int) -> list[str]:
         # --allowedTools alone the reviewer rewrote it; with this deny in
         # place it declines.
         "--disallowedTools",
-        " ".join(_CLAUDE_DENIED),
+        # Built per launch: whether it repeats the ~/ rules under the account's own home
+        # depends on $HOME at the time (claude_tools._secret_reads).
+        " ".join(claude_disallowed(_CLAUDE_TOOLS)),
         # No MCP servers: the user's own, configured for their sessions, would
         # each be a tool the deny list does not name.
         "--strict-mcp-config",
@@ -479,8 +477,11 @@ class _Picked(NamedTuple):
     backend: str
     #: The model the prompt should name; None for the lens's own.
     label: str | None
-    #: Its working directory; None for the round's.
+    #: Its working directory: the repository under review, or for agy and gemini an
+    #: empty one outside it; None for the loop's own.
     workspace: Path | None
+    #: Where hermes reads its prompt, which is written there; None for the others.
+    prompt_path: Path | None = None
 
 
 def _launch_one(
@@ -509,11 +510,10 @@ def _launch_one(
         prompt = AGY_PREAMBLE + prompt
         # On by default, so said whenever it runs: this is where the diff leaves.
         print(f"  R{slot}: {AGY_EGRESS}")
-    # The record of what the reviewer was sent, and the copy hermes reads by its path:
-    # in the private directory, not in round_dir, where another reviewer with a file
-    # tool could rewrite it before hermes read it.
+    # The record of what the reviewer was sent.
     (round_.round_dir / f"prompt-{slot}.txt").write_text(prompt, encoding="utf-8")
-    (round_.out_dir / f"prompt-{slot}.txt").write_text(prompt, encoding="utf-8")
+    if picked.prompt_path is not None:
+        picked.prompt_path.write_text(prompt, encoding="utf-8")
     # Which backend answered, for a person reading the round. The loop goes by what
     # it launched (``launch_reviewers`` returns it), not by this file.
     (round_.round_dir / f"backend-{slot}.txt").write_text(backend, encoding="utf-8")
@@ -533,17 +533,27 @@ def _pick_backend(slot: int, round_: _Round) -> _Picked | None:
     would have had without it, as the routing tables say: an empty slot 3 every round
     never converges. The prompt is built once the backend is settled, not per attempt.
     """
-    prompt_path = round_.out_dir / f"prompt-{slot}.txt"
     backends = dict(round_.backends)
     while True:
         choice = _choose_command(
-            slot, prompt_path, round_.out_dir, backends, round_.prefer_hermes
+            slot, Path("prompt.txt"), round_.out_dir, backends, round_.prefer_hermes
         )
         if choice is None:
             return None
         cmd, label = choice
+        prompt_path = None
+        if cmd[0] == "hermes":
+            # hermes reads its prompt by path. Not from round_dir, where another
+            # reviewer with a file tool could rewrite it first, nor from the reviewers'
+            # private output directory, which hermes -- with a file tool of its own --
+            # would then know: a directory of the slot's own.
+            prompt_path = _scratch_dir(f"mmcra-prompt-{slot}-") / "prompt.txt"
+            cmd = _hermes_cmd(prompt_path, cmd[cmd.index("-m") + 1])
         if cmd[0] not in ("agy", "gemini"):
-            return _Picked(cmd, cmd[0], label, None)
+            # In the repository under review, whose files its tools read: from the
+            # directory the loop was started in -- a trusted checkout of this agent,
+            # with --repo naming the branch -- it read that checkout instead.
+            return _Picked(cmd, cmd[0], label, round_.repo, prompt_path)
         if cmd[0] == "gemini":
             # Not from the repository under review, whose .gemini/settings.json --
             # chosen by the change being reviewed -- it would load (--skip-trust):

@@ -116,7 +116,7 @@ fi
 
 **Priority order for each reviewer -- local CLIs first (free), Hermes only when opted in:**
 
-For Anthropic models (reviewers 1, 3, 4), the local `claude` CLI is the default when installed. It's free (uses the user's existing Claude subscription) and manages its own OAuth reliably. Hermes/Bedrock is preferred only when `PREFER_HERMES=true` -- it's paid (~$5-40 per full review) and only worth it for regulated codebases that need Bedrock's data-at-rest guarantees.
+For Anthropic models -- reviewers 1 and 4, and reviewer 3 when neither agy nor (with `REVIEW_USE_GEMINI=1`) the gemini CLI takes it -- the local `claude` CLI is the default when installed. It's free (uses the user's existing Claude subscription) and manages its own OAuth reliably. Hermes/Bedrock is preferred only when `PREFER_HERMES=true` -- it's paid (~$5-40 per full review) and only worth it for regulated codebases that need Bedrock's data-at-rest guarantees.
 
 For non-Anthropic models (reviewer 2 correctness via Codex GPT-5.5, reviewer 3 readability via agy or Gemini), the dedicated CLI is the only free path.
 
@@ -461,6 +461,9 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ] || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${
   echo "ERROR: the runner needs bash 4.4 or later (this is $BASH_VERSION)"; exit 1
 fi
 : "${REVIEW_TMP:?REVIEW_TMP must be exported by the caller}"
+# With CDPATH set, `cd` to a relative path can go elsewhere and prints where it went, and every
+# "$(cd DIR && pwd -P)" below would capture that line as part of the path.
+unset CDPATH
 # A session of its own, so that "a group with a member in this session" (live_group) means one of
 # this run's: in the caller's session, a group number reused by any other of its processes passed.
 # The first runner starts the real one in a new session (setsid, which does not fork here: a
@@ -496,7 +499,8 @@ HELPER_ROOT=""
 HELPER_ROOT="$(mktemp -d)" && HELPER_ROOT="$(cd "$HELPER_ROOT" && pwd -P)" \
   && mkdir -p "$HELPER_ROOT/scripts" "$HELPER_ROOT/docs" \
   && cp -RL "$REVIEW_ROOT/scripts/review_loop" "$HELPER_ROOT/scripts/" \
-  && cp -L "$REVIEW_ROOT/docs/ensemble_review_result_schema.json" "$HELPER_ROOT/docs/" \
+  && { cp -L "$REVIEW_ROOT/docs/ensemble_review_result_schema.json" "$HELPER_ROOT/docs/" \
+       || echo "WARNING: no result schema; agy's slot goes to its next backend"; } \
   || { echo "ERROR: could not copy the runner's helpers"; rm -rf -- "${HELPER_ROOT:-}"; exit 1; }
 # Removed by finish_round from the moment it is set as the EXIT trap; until then, by this.
 # OUT_DIR emptied first: one inherited from the environment (Cargo sets one) would be removed.

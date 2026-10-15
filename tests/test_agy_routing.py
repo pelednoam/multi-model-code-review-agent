@@ -8,17 +8,17 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from agy_case import _AgyCase
+from agy_case import AgyCase
 from helpers import SCHEMA_PATH
 
 from scripts.review_loop import agy, agy_sandbox, reviewers
 
-# agy_models itself, kept before _AgyCase's autouse fixture replaces it.
+# agy_models itself, kept before AgyCase's autouse fixture replaces it.
 from scripts.review_loop.agy import agy_models as real_agy_models
 from scripts.review_loop.reviewers import _choose_command
 
 
-class TestAgyRouting(_AgyCase):
+class TestAgyRouting(AgyCase):
     """Which backend slot 3 gets, and which model agy runs."""
 
     @pytest.mark.usefixtures("on")
@@ -134,9 +134,9 @@ class TestAgyRouting(_AgyCase):
         ("listed", "best"),
         [
             # This machine today.
-            (_AgyCase.LISTED, "gemini-3.8-flash-high"),
+            (AgyCase.LISTED, "gemini-3.8-flash-high"),
             # The day the plan includes Argon: a newer version beats a higher effort.
-            ([*_AgyCase.LISTED, "gemini-4-argon"], "gemini-4-argon"),
+            ([*AgyCase.LISTED, "gemini-4-argon"], "gemini-4-argon"),
             # Same version: Pro above Flash above Lite, whatever the effort.
             (
                 [
@@ -151,6 +151,8 @@ class TestAgyRouting(_AgyCase):
                 ["gemini-3.10-flash-low", "gemini-3.9-flash-high"],
                 "gemini-3.10-flash-low",
             ),
+            # 4 and 4.0 are one version; the tier and effort decide between them.
+            (["gemini-4.0-flash-low", "gemini-4-pro-high"], "gemini-4-pro-high"),
             # Newer, but not a text model: an image or speech model cannot review.
             (
                 [
@@ -254,7 +256,7 @@ class TestAgyRouting(_AgyCase):
         assert choice is not None and choice[0][0] != "agy"
 
 
-class TestAgyCommand(_AgyCase):
+class TestAgyCommand(AgyCase):
     """The agy invocation: its pinned flags, schema and input."""
 
     @pytest.mark.usefixtures("on")

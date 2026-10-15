@@ -909,10 +909,10 @@ def _cpu_seconds(pid: int) -> float | None:
 
 
 def _bytes_written(out_dir: Path, slot: int) -> int:
-    """How much this reviewer has produced, on either stream."""
+    """How much this reviewer has written: stdout, stderr and codex's answer."""
     total = 0
-    for name in (pattern.format(slot) for pattern in _OUTPUTS):
-        path = out_dir / name
+    for pattern in _OUTPUTS:
+        path = out_dir / pattern.format(slot)
         if path.exists():
             total += path.stat().st_size
     return total

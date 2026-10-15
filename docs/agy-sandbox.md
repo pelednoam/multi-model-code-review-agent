@@ -49,14 +49,17 @@ convergence loop and the full-mode runner call it.
     sockets of the host's network namespace, each by the exact path it was bound
     at; if the kernel will not list them, or the list comes back interrupted, the
     check fails. A socket bound in another namespace (a container's), or whose
-    directory was renamed after, is not found at the path that reaches it. Another
-    user's abstract socket -- a session bus or an X server, which admit their own
-    user only -- is not counted, so that no local user can switch the slot off by
-    binding one;
-  - a session bus on an abstract socket (`dbus-launch`'s, IBus's);
-  - an X server that admits your user without its cookie. Stock GNOME and
-    Xwayland grant `SI:localuser`, and a program inside could type into a terminal
-    outside. `xhost -si:localuser:$USER` closes that.
+    directory was renamed after, is not found at the path that reaches it;
+  - any abstract socket of your own that takes connections, whatever its name: a
+    session bus (`dbus-launch`'s, IBus's, or one at an address of its own), or
+    anything else that admits your user. Root's system daemons and other users'
+    abstract sockets check who connects, and are not counted;
+  - an X server, whoever runs it, that admits your user without its cookie. Stock
+    GNOME and Xwayland grant `SI:localuser`, and a program inside could type into
+    a terminal outside. `xhost -si:localuser:$USER` closes that.
+- **Nested namespaces**: no user namespace of agy's own inside (`--disable-userns`,
+  where bwrap is 0.8 or later), in which it could map itself root and mount over
+  the read-only binds; its own hostname and cgroup view.
 
 ## How it is proven
 
@@ -95,6 +98,10 @@ included, unless `REVIEW_USE_AGY=1`.
   pointing at the branch.
 - **agy's browser and MCP tools.** Headless agy refused the one shell command it
   tried, but whether those tools reach the network unprompted has not been tested.
+- **Being switched off by another local user.** The check fails closed, so any
+  user who can leave a world-writable socket where the sandbox can see it
+  (`/var/tmp`, say), or an X socket that never answers, turns the agy slot off
+  for everyone; the message names the socket. The slot goes to its next backend.
 - **Kernel keyrings.** They are not namespaced: keys this user owns -- Kerberos
   tickets, ecryptfs or fscrypt keys, anything `keyctl` stored -- are readable
   inside, as they are to any of the user's processes. Closing that takes a seccomp

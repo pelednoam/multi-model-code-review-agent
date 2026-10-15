@@ -36,7 +36,11 @@ def run(
 #: The signals that end a run from outside: a kill, a closed terminal or ssh session
 #: (the loop can run for half an hour), a Ctrl-\. SIGINT already unwinds, as
 #: KeyboardInterrupt.
-UNWIND_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
+UNWIND_SIGNALS = tuple(
+    getattr(signal, name)
+    for name in ("SIGTERM", "SIGHUP", "SIGQUIT")
+    if hasattr(signal, name)  # SIGHUP and SIGQUIT are Unix's
+)
 
 
 @contextlib.contextmanager

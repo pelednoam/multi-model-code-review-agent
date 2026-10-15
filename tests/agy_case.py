@@ -16,7 +16,7 @@ from scripts.review_loop import agy, agy_sandbox, agy_sandbox_check, backends, r
 from scripts.review_loop.reviewers import _choose_command
 
 
-class _AgyCase:
+class AgyCase:
     """agy, the Antigravity CLI, in slot 3.
 
     agy cannot make itself read-only -- measured, it wrote outside its workspace with
@@ -132,7 +132,7 @@ class _AgyCase:
         return started
 
     @staticmethod
-    def _prepare_agy(
+    def _run_prepare_agy(
         tmp_path: Path, root: Path = REPO_ROOT, writable: bool = True, **env: str
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, list[str]]]:
         """Run the runner's prepare_agy for real; its AGY_* results, one list each.
@@ -150,14 +150,14 @@ class _AgyCase:
         )
         script = tmp_path / "t.sh"
         script.write_text(
-            'REVIEW_ROOT="$1"\nAGY_SCRATCH=()\n'
+            'REVIEW_ROOT="$1"\nOUT_DIR="$(dirname "$2")"\nAGY_SCRATCH=()\n'
             + 'AGY_SCHEMA="" AGY_WS="" AGY_STATE="" AGY_ENVP=() AGY_BWRAP=()\n'
             + real
             + "review_helper() {\n"
             + '  case "$1" in\n'
             + "    agy-reachable) return 0 ;;\n"
             # The real preamble, or a failing one.
-            + ("" if writable else "    agy-preamble) return 1 ;;\n")
+            + ("" if writable else "    agy-input) return 1 ;;\n")
             + "  esac\n"
             + '  real_review_helper "$@"\n'
             + "}\n"
@@ -258,9 +258,14 @@ class _AgyCase:
 
     #: The host's sockets, as ``agy_sandbox_check._unix_sockets`` lists them.
     SOCKETS = [
-        b"/var/lib/incus/unix.socket",
-        b"/run/systemd/resolve/io.systemd.Resolve",
+        agy_sandbox_check._Sock(b"/var/lib/incus/unix.socket", 0),
+        agy_sandbox_check._Sock(b"/run/systemd/resolve/io.systemd.Resolve", 991),
     ]
+
+    @staticmethod
+    def _mine(name: bytes, accepts: bool = True) -> agy_sandbox_check._Sock:
+        """A socket of this user's, as ``agy_sandbox_check._unix_sockets`` lists it."""
+        return agy_sandbox_check._Sock(name, os.getuid(), accepts)
 
     def _detect(
         self, monkeypatch: pytest.MonkeyPatch, verdict: tuple[bool, str] | None

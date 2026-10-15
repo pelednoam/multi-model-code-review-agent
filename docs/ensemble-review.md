@@ -137,7 +137,7 @@ Bedrock opt-in precedence (PREFER_HERMES=true), used for regulated codebases tha
 
 **Why Hermes/Bedrock matters when opted in**: data stays in your AWS account. Its tools are limited to the file toolset (`-t file`), which still writes under `--yolo`: the gain is data residency, not write isolation. Worth the cost for FDA-path / HIPAA / compliance-sensitive codebases.
 
-**Maximum diversity** (all CLIs installed): Anthropic (Claude CLI) + OpenAI (Codex CLI) + Google (agy, or the Gemini CLI) = 3 provider families, at no cost beyond existing subscriptions.
+**Maximum diversity** (all CLIs installed): Anthropic (Claude CLI) + OpenAI (Codex CLI) + Google (agy, or the Gemini CLI with `REVIEW_USE_GEMINI=1`) = 3 provider families, at no cost beyond existing subscriptions.
 
 ### CLI flags reference
 
@@ -391,7 +391,7 @@ Lens: injection vectors, auth gaps, unsafe deserialization, secrets, race condit
 
 Output: `$REVIEW_TMP/result-2.json`
 
-If Codex CLI is installed and its sandbox check passes (`review_helper codex-check`), this reviewer runs via `codex exec -s read-only -c 'approvals_reviewer="user"' -o $REVIEW_TMP/codex-out-2.txt - < prompt-2.txt`: both safety flags pinned, the prompt on stdin. The `-o` flag captures the last agent message, which is checked like every other reviewer's output before it becomes `result-2.json`. The prompt must end with: "Output ONLY the JSON result object, no other text." Otherwise it falls back to Claude CLI Haiku (free), then Hermes Haiku on Bedrock (whose answer is read from `stdout-2.txt`). A project pinned to Bedrock (`.use-hermes`) runs Hermes Haiku first.
+If Codex CLI is installed and its sandbox check passes (`review_helper codex-check`), this reviewer runs via `codex exec -s read-only -c 'approvals_reviewer="user"' -o $OUT_DIR/codex-out-2.txt - < prompt-2.txt` (a private directory, copied into `$REVIEW_TMP` once every reviewer has stopped): both safety flags pinned, the prompt on stdin. The `-o` flag captures the last agent message, which is checked like every other reviewer's output before it becomes `result-2.json`. The prompt must end with: "Output ONLY the JSON result object, no other text." Otherwise it falls back to Claude CLI Haiku (free), then Hermes Haiku on Bedrock (whose answer is read from `stdout-2.txt`). A project pinned to Bedrock (`.use-hermes`) runs Hermes Haiku first.
 
 Lens: off-by-one, null paths, shape/dtype mismatches, contract violations, logic errors, missing test coverage. For numpy/torch: shape broadcasting, device placement, gradient flow.
 
@@ -482,7 +482,10 @@ set -m
 # there. A reviewer running as the same user could still find it: this takes away the obvious
 # path, not every path. The done markers are also written to $REVIEW_TMP, for watching from
 # another shell; the runner itself reads only its own.
-OUT_DIR="$(mktemp -d)" && [ -n "$OUT_DIR" ] || { echo "ERROR: no temporary directory"; exit 1; }
+# Absolute: the agy job changes into its workspace before its redirections are opened, and a
+# relative TMPDIR would put them, and its done marker, somewhere else.
+OUT_DIR="$(mktemp -d)" && [ -n "$OUT_DIR" ] && OUT_DIR="$(cd "$OUT_DIR" && pwd -P)" \
+  || { echo "ERROR: no temporary directory"; exit 1; }
 # mark_done N STATUS: slot N finished with STATUS.
 mark_done() {
   echo "$2" > "$OUT_DIR/done-$1"
@@ -525,14 +528,18 @@ kill_jobs() {
   local sig
   for sig in TERM KILL; do
     [ "$sig" = KILL ] && sleep 1
-    local num groups=()
-    for num in "$@"; do live_group "${JOB_PID[$num]:-}" && groups+=("-${JOB_PID[$num]}"); done
+    local num groups=() known=""
+    [ "$GROUP_CHECK" = proc ] && known="$(session_groups)"
+    for num in "$@"; do
+      live_group "${JOB_PID[$num]:-}" "$known" && groups+=("-${JOB_PID[$num]}")
+    done
     [ "${#groups[@]}" -eq 0 ] || kill -"$sig" -- "${groups[@]}" 2>/dev/null
   done
   return 0
 }
-# live_group PGID: whether the group still has a member in this runner's session. bash reaps a
-# finished job at once, and once its group has emptied, the number is free for the system to give
+# live_group PGID [GROUPS]: whether the group still has a member in this runner's session (GROUPS:
+# session_groups, already read). bash reaps a finished job at once, and once its group has
+# emptied, the number is free for the system to give
 # to someone else's new session -- a shell, an ssh login -- which a kill of it would reach. A group
 # of this run's always has its members in this run's session. Asked of pgrep where it can answer
 # (GROUP_CHECK, decided below before anything is launched), else of /proc. A group number that
@@ -545,15 +552,21 @@ live_group() {
     pgrep -s 0 -g "$1" >/dev/null 2>&1
     return $?
   fi
-  local stat line pgrp sid mine=""
+  case "${2:-$(session_groups)}" in *" $1 "*) return 0 ;; esac
+  return 1
+}
+# session_groups: " PGID PGID ... ", every process group with a member in this runner's session,
+# from one pass over /proc -- which kill_jobs makes once, not once per slot.
+session_groups() {
+  local stat line pgrp sid mine="" groups=" "
   for stat in "/proc/$$/stat" /proc/[0-9]*/stat; do
     { read -r line < "$stat"; } 2>/dev/null || continue   # gone since the glob: not a member
     # After the command name, which can hold spaces and parentheses: state, ppid, pgrp, session.
     read -r _ _ pgrp sid _ <<< "${line##*) }"
     if [ -z "$mine" ]; then mine=$sid; continue; fi
-    [ "$pgrp" = "$1" ] && [ "$sid" = "$mine" ] && return 0
+    [ "$sid" = "$mine" ] && groups+="$pgrp "
   done
-  return 1
+  echo "$groups"
 }
 # pgrep says 0 or 1; anything else -- not installed, no -s or -g -- is not an answer. Without
 # either way to ask, a cleanup would have to guess, so the runner does not start.
@@ -638,9 +651,11 @@ launch_hermes() {
 #   after env has execed it, its command line -- which any local user can read -- holds none of the
 #   values. The helper writes the first part's length, then both parts; just "0" from a host
 #   trusted to be the sandbox itself (MMCRA_SKIP_AGY_SANDBOX_CHECK).
-# - The preamble, into the prompt file itself, so the file is the record of what agy was sent. Last,
-#   after every way this launch can still fall through to another backend.
-AGY_SCHEMA="" AGY_WS="" AGY_STATE="" AGY_ENVP=() AGY_BWRAP=()
+# - Its one stream-json input line, in a file (AGY_IN) as every other CLI's prompt is, and the
+#   preamble into the prompt file itself, so the file is the record of what agy was sent. Last,
+#   after every way this launch can still fall through to another backend, and in one step: the
+#   prompt file is changed only once the input line is written.
+AGY_SCHEMA="" AGY_WS="" AGY_STATE="" AGY_IN="" AGY_ENVP=() AGY_BWRAP=()
 # agy_scratch VAR: a new temporary directory, listed in AGY_SCRATCH, resolved, into VAR.
 agy_scratch() {
   local dir
@@ -669,7 +684,8 @@ prepare_agy() {
   local why
   why="$(printf '%s\0' "${AGY_ENVP[@]}" "${AGY_BWRAP[@]}" | review_helper agy-reachable "$AGY_WS")" \
     || { echo "R$num: SKIPPED (agy not launched -- $why)"; return 1; }
-  review_helper agy-preamble "$prompt_file" \
+  AGY_IN="$OUT_DIR/agy-in-$num.jsonl"
+  review_helper agy-input "$prompt_file" "$AGY_IN" \
     || { echo "R$num: SKIPPED (could not prepare agy's prompt)"; return 1; }
 }
 
@@ -790,7 +806,7 @@ launch_cli() {
           --model "$AGY_MODEL" \
           --input-format stream-json --output-format stream-json \
           --print-timeout 0 --json-schema "$AGY_SCHEMA" \
-          < <(review_helper agy-message "$prompt_file") \
+          < "$AGY_IN" \
           1>"$OUT_DIR/stdout-$num.txt" \
           2>"$OUT_DIR/stderr-$num.txt"
         # agy's status held while its scratch -- with the copy of its sign-in token -- is
@@ -873,7 +889,7 @@ fi
 N_PROVIDERS=$(printf '%s\n' "${JOB_PROVIDER[@]}" | sort -u | grep -c .)
 if [ "$N_PROVIDERS" -le 1 ]; then
   echo "WARNING: single-provider mode (Anthropic only)."
-  echo "Install codex and/or agy (or gemini) for cross-provider diversity."
+  echo "Install codex and/or agy (or gemini, with REVIEW_USE_GEMINI=1) for cross-provider diversity."
 fi
 echo "Provider diversity: $N_PROVIDERS provider(s)"
 

@@ -112,18 +112,7 @@ def _explain_missing(round_dir: Path, slot: int, backend: str | None) -> list[st
     was silently binned while carrying a correct finding about duplicated tests.
     Whatever it wrote goes in front of the operator either way.
     """
-    # codex's answer is its -o file, read first as extraction reads it: an answer in
-    # prose there read as "NO OUTPUT" from its empty stdout.
-    names = (["codex-out-{}.txt"] if backend == "codex" else []) + ["raw-{}.txt"]
-    raw, text = round_dir / names[-1].format(slot), ""
-    for name in names:
-        path = round_dir / name.format(slot)
-        said = ""
-        if path.is_file():
-            said = path.read_text(encoding="utf-8", errors="replace").strip()
-        if said:
-            raw, text = path, said
-            break
+    raw, text = _read_answer(round_dir, slot, backend)
     # Parsed once, and only when agy is the backend that wrote it.
     event = agy_result(text) if text and backend == "agy" else None
     failed = agy_failure(event) if event is not None else None
@@ -134,15 +123,31 @@ def _explain_missing(round_dir: Path, slot: int, backend: str | None) -> list[st
             *[f"                {line}" for line in textwrap.wrap(failed, 74)],
             f"                (in full: {raw})",
         ]
-    said = printable(_display_text(text, event))
-    if not said:
+    shown = printable(_display_text(text, event))
+    if not shown:
         return [f"  NO OUTPUT  -> R{slot} produced nothing; see stderr-{slot}.txt"]
     return [
         f"  NOT JSON   -> R{slot} answered in prose, so it has no findings the loop",
         "                can act on. It still said something -- read it:",
-        *[f"                {line}" for line in textwrap.wrap(said, 74)],
+        *[f"                {line}" for line in textwrap.wrap(shown, 74)],
         f"                (in full: {raw})",
     ]
+
+
+def _read_answer(round_dir: Path, slot: int, backend: str | None) -> tuple[Path, str]:
+    """The file holding the slot's answer, and what it says (empty if nothing).
+
+    codex's answer is its -o file, read first as extraction reads it: an answer in
+    prose there read as "NO OUTPUT" from its empty stdout.
+    """
+    names = (["codex-out-{}.txt"] if backend == "codex" else []) + ["raw-{}.txt"]
+    for name in names:
+        path = round_dir / name.format(slot)
+        if path.is_file():
+            content = path.read_text(encoding="utf-8", errors="replace").strip()
+            if content:
+                return path, content
+    return round_dir / f"raw-{slot}.txt", ""
 
 
 def _display_text(text: str, event: dict[str, Any] | None) -> str:

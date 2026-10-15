@@ -12,13 +12,13 @@ import time
 from pathlib import Path
 
 import pytest
-from agy_case import _AgyCase
+from agy_case import AgyCase
 from helpers import REPO_ROOT, SCHEMA_PATH, runner_script
 
 from scripts.review_loop import agy, agy_sandbox, agy_sandbox_check, reviewers
 
 
-class TestAgyLaunch(_AgyCase):
+class TestAgyLaunch(AgyCase):
     """Starting agy: its workspace, its sandbox, its scratch and its cleanup."""
 
     @pytest.mark.usefixtures("on")
@@ -278,7 +278,7 @@ class TestAgyLaunch(_AgyCase):
         # timeout ran ahead of `env -i`, holding every allowlisted value -- a proxy URL
         # with a password -- in a command line any local user can read.
         proxy = "http://u:secret@proxy:1"
-        done, parts = self._prepare_agy(tmp_path, HTTPS_PROXY=proxy)
+        done, parts = self._run_prepare_agy(tmp_path, HTTPS_PROXY=proxy)
         assert done.returncode == 0, done.stdout + done.stderr
         assert parts["AGY_ENVP"][1] == "-i"
         assert f"HTTPS_PROXY={proxy}" in parts["AGY_ENVP"]
@@ -300,7 +300,7 @@ class TestAgyLaunch(_AgyCase):
         (root / "docs").mkdir(parents=True)
         (root / "scripts").symlink_to(REPO_ROOT / "scripts")
         (root / "docs" / "ensemble_review_result_schema.json").write_text('{"type": 7}')
-        done, parts = self._prepare_agy(tmp_path, root=root)
+        done, parts = self._run_prepare_agy(tmp_path, root=root)
         assert done.returncode == 1
         assert "SKIPPED (agy result schema unusable)" in done.stdout
         assert parts["AGY_SCRATCH"] == []  # nothing made, nothing left behind
@@ -312,7 +312,7 @@ class TestAgyLaunch(_AgyCase):
         (root / "docs").mkdir(parents=True)
         (root / "scripts").symlink_to(REPO_ROOT / "scripts")
         shutil.copy(SCHEMA_PATH, root / "docs" / "ensemble_review_result_schema.json")
-        done, parts = self._prepare_agy(tmp_path, root=root, writable=False)
+        done, parts = self._run_prepare_agy(tmp_path, root=root, writable=False)
         assert done.returncode == 1, done.stdout
         assert "could not prepare agy's prompt" in done.stdout
         assert len(parts["AGY_SCRATCH"]) == 2

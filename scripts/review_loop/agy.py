@@ -14,6 +14,7 @@ in ``agy_sandbox`` and ``agy_sandbox_check``. Its stream is read in ``results``.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import json
 import os
@@ -124,14 +125,15 @@ def agy_models() -> list[str]:
     try:
         with (
             signals_unwind(),
-            tempfile.TemporaryDirectory() as ws,
-            tempfile.TemporaryDirectory() as st,
+            contextlib.ExitStack() as scratch,
         ):
-            workspace = Path(ws).resolve()
+            workspace = Path(scratch.enter_context(tempfile.TemporaryDirectory()))
+            workspace = workspace.resolve()
             cmd = ["agy", "models"]
             if not agy_unsandboxed():
-                state = agy_seed_state(Path(st).resolve())
-                cmd = [*agy_wrapper(workspace, state), *cmd]
+                # A state directory only for the sandbox, which mounts it over agy's.
+                st = Path(scratch.enter_context(tempfile.TemporaryDirectory()))
+                cmd = [*agy_wrapper(workspace, agy_seed_state(st.resolve())), *cmd]
             done = run(
                 cmd,
                 cwd=workspace,
@@ -168,6 +170,9 @@ def _agy_rank(slug: str) -> tuple[tuple[int, ...], int, int] | None:
     if match is None or _NOT_A_REVIEWER.search(slug):
         return None
     version = tuple(int(part) for part in match.group(1).split("."))
+    # 4 and 4.0 are one version: as written, 4.0-flash-low outranked 4-pro-high.
+    while len(version) > 1 and version[-1] == 0:
+        version = version[:-1]
     rest = slug[match.end() :]
     tier = 0 if "lite" in rest else 1 if "flash" in rest else 2
     effort = _EFFORT.get(rest.rsplit("-", 1)[-1], 1)

@@ -9,13 +9,13 @@ import time
 from pathlib import Path
 
 import pytest
-from agy_case import _AgyCase
+from agy_case import AgyCase
 from helpers import REPO_ROOT
 
 from scripts.review_loop import reviewers
 
 
-class TestReviewerProcesses(_AgyCase):
+class TestReviewerProcesses(AgyCase):
     """A reviewer's process: launched, waited for, stopped -- once, not per subclass."""
 
     @pytest.mark.usefixtures("on")

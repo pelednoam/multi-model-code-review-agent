@@ -13,15 +13,15 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from agy_case import _AgyCase
+from agy_case import AgyCase
 
 from scripts.review_loop import agy, agy_sandbox, agy_sandbox_check, backends
 
-# agy_state_dir itself, kept before _AgyCase's autouse fixture replaces it.
+# agy_state_dir itself, kept before AgyCase's autouse fixture replaces it.
 from scripts.review_loop.agy_sandbox import agy_state_dir as real_agy_state_dir
 
 
-class TestAgySandboxCheck(_AgyCase):
+class TestAgySandboxCheck(AgyCase):
     """The startup check that proves the wrapper, with no model call."""
 
     def test_the_real_sandbox_passes(self) -> None:
@@ -136,7 +136,9 @@ class TestAgySandboxCheck(_AgyCase):
         # bound by a name that only starts there -- was let through. systemd-resolved's
         # varlink socket answers more than DNS.
         self._reach(monkeypatch, name)
-        reason = agy_sandbox_check._check_reachable(None, [*self.SOCKETS, name])  # type: ignore[arg-type]
+        reason = agy_sandbox_check._check_reachable(
+            None, [*self.SOCKETS, self._mine(name)]
+        )  # type: ignore[arg-type]
         assert reason and "can reach" in reason
 
     def test_only_the_resolvers_file_is_put_back(self, tmp_path: Path) -> None:
@@ -146,14 +148,57 @@ class TestAgySandboxCheck(_AgyCase):
             assert wrap[wrap.index(str(resolver)) - 1] == "--ro-bind"
             assert str(resolver.parent) not in wrap
 
-    def test_any_abstract_session_bus_is_refused(
+    @pytest.mark.parametrize(
+        "name",
+        [b"\0/home/u/.cache/ibus/dbus-AbCd", b"\0/tmp/my-own-bus", b"\0ISCSI-like"],
+        ids=["ibus", "custom-address", "any-name"],
+    )
+    def test_any_abstract_socket_of_this_users_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch, name: bytes
+    ) -> None:
+        # Not only dbus-launch's under /tmp: IBus keeps one under ~/.cache, and a
+        # session bus can listen at an address of any name -- which the old "/dbus-"
+        # test let through.
+        self._reach(monkeypatch)
+        socks = [*self.SOCKETS, self._mine(name)]
+        reason = agy_sandbox_check._check_reachable(None, socks)  # type: ignore[arg-type]
+        assert reason and "abstract socket of this user's" in reason
+
+    def test_abstract_sockets_that_admit_only_others_are_not_counted(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Not only dbus-launch's under /tmp: IBus keeps one under ~/.cache.
+        # Root's daemons and another user's sockets check who connects; a client's
+        # connected socket of this user's takes no connections at all. Counting any of
+        # them switched the slot off on an ordinary host.
+        Sock = agy_sandbox_check._Sock
         self._reach(monkeypatch)
-        names = [*self.SOCKETS, b"\0/home/u/.cache/ibus/dbus-AbCd"]
-        reason = agy_sandbox_check._check_reachable(None, names)  # type: ignore[arg-type]
-        assert reason and "session bus" in reason and "@/home/u" in reason
+        socks = [
+            Sock(b"\0/org/kernel/linux/storage/multipathd", 0),
+            Sock(b"\0/tmp/dbus-theirs", os.getuid() + 12345),
+            self._mine(b"\0c99a1981b9af149d/bus/systemd/bus-system", accepts=False),
+            Sock(b"theirs-relative.sock", os.getuid() + 12345),
+        ]
+        assert agy_sandbox_check._check_reachable(None, socks) is None  # type: ignore[arg-type]
+        # Where the kernel does not say whose, a session bus by its usual name counts.
+        unknown = [Sock(b"\0/tmp/dbus-unknown", None)]
+        assert agy_sandbox_check._check_reachable(None, unknown)  # type: ignore[arg-type]
+
+    def test_another_users_x_server_is_still_asked(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Owner filtering skipped other users' X servers, one of which may admit this
+        # user (xhost +).
+        asked: list[bytes] = []
+
+        def admits(name: bytes) -> bool:
+            asked.append(name)
+            return True
+
+        monkeypatch.setattr(agy_sandbox_check, "_x_admits", admits)
+        self._reach(monkeypatch)
+        theirs = agy_sandbox_check._Sock(b"\0/tmp/.X11-unix/X7", os.getuid() + 12345)
+        reason = agy_sandbox_check._check_reachable(None, [theirs])  # type: ignore[arg-type]
+        assert asked == [theirs.name] and reason and "X server :7" in reason
 
     @pytest.mark.parametrize(
         "name",
@@ -167,7 +212,9 @@ class TestAgySandboxCheck(_AgyCase):
         # and a byte that is not UTF-8 became another character: each a different path
         # from the socket that existed.
         self._reach(monkeypatch, name)
-        reason = agy_sandbox_check._check_reachable(None, [*self.SOCKETS, name])  # type: ignore[arg-type]
+        reason = agy_sandbox_check._check_reachable(
+            None, [*self.SOCKETS, self._mine(name)]
+        )  # type: ignore[arg-type]
         assert reason and "can reach" in reason
         # Named in the message escaped, not raw: someone else chose it.
         assert "\n" not in reason and "\xff" not in reason
@@ -179,10 +226,12 @@ class TestAgySandboxCheck(_AgyCase):
         name = b"\0mmcra-test-\n-" + str(os.getpid()).encode()
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as mine:
             mine.bind(name)
-            assert name in agy_sandbox_check._unix_sockets()
+            mine.listen(1)
+            (listed,) = [s for s in agy_sandbox_check._unix_sockets() if s.name == name]
+            assert listed.uid in (os.getuid(), None) and listed.accepts
 
     @staticmethod
-    def _diag(name: bytes, uid: int | None, flags: int = 0) -> bytes:
+    def _diag(name: bytes, uid: int | None, flags: int = 0, state: int = 10) -> bytes:
         """One sock_diag message for a socket called ``name``, owned by ``uid``."""
         attrs = b""
         for kind, value in (
@@ -193,7 +242,7 @@ class TestAgySandboxCheck(_AgyCase):
                 continue
             attr = struct.pack("=HH", 4 + len(value), kind) + value
             attrs += attr + b"\0" * (-len(attr) % 4)
-        body = struct.pack("=BBBBIII", 1, 1, 1, 0, 1, 0, 0) + attrs
+        body = struct.pack("=BBBBIII", 1, 1, state, 0, 1, 0, 0) + attrs
         return struct.pack("=IHHII", 16 + len(body), 20, flags, 1, 0) + body
 
     @staticmethod
@@ -222,26 +271,23 @@ class TestAgySandboxCheck(_AgyCase):
 
         monkeypatch.setattr(agy_sandbox_check.socket, "socket", lambda *a: Netlink())
 
-    def test_another_users_abstract_socket_does_not_count(
+    def test_the_kernels_list_carries_owner_and_state(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Any local user could switch the slot off by binding a bus-like name; their
-        # bus admits them only. A path socket counts whoever owns it: its file's
-        # permissions decide, and the probe asks.
+        # Owners and states decide which abstract sockets count; the list keeps all.
         me, other = os.getuid(), os.getuid() + 12345
         self._kernel_says(
             monkeypatch,
             self._diag(b"\0/tmp/dbus-theirs", other)
-            + self._diag(b"\0/tmp/dbus-mine", me)
-            + self._diag(b"\0/tmp/dbus-unknown", None)
-            + self._diag(b"relative.sock", other)
+            + self._diag(b"\0client", me, state=1)
             + self._diag(b"/var/tmp/theirs.sock", other)
             + self._done(),
         )
+        Sock = agy_sandbox_check._Sock
         assert agy_sandbox_check._unix_sockets() == [
-            b"\0/tmp/dbus-mine",
-            b"\0/tmp/dbus-unknown",
-            b"/var/tmp/theirs.sock",
+            Sock(b"\0/tmp/dbus-theirs", other, True),
+            Sock(b"\0client", me, False),
+            Sock(b"/var/tmp/theirs.sock", other, True),
         ]
 
     @pytest.mark.parametrize(
@@ -287,7 +333,7 @@ class TestAgySandboxCheck(_AgyCase):
             server.listen(1)  # accepts the connection, never replies
             self._reach(monkeypatch)
             with pytest.raises(OSError, match="did not answer"):
-                agy_sandbox_check._check_reachable(None, [name])  # type: ignore[arg-type]
+                agy_sandbox_check._check_reachable(None, [self._mine(name)])  # type: ignore[arg-type]
 
     def test_a_timeout_does_not_print_the_wrapper(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -300,7 +346,9 @@ class TestAgySandboxCheck(_AgyCase):
             raise subprocess.TimeoutExpired([*wrap, "sh"], 30)
 
         monkeypatch.setattr(agy_sandbox_check, "_reachable", slow)
-        monkeypatch.setattr(agy_sandbox_check, "_unix_sockets", lambda: [b"/x.sock"])
+        monkeypatch.setattr(
+            agy_sandbox_check, "_unix_sockets", lambda: [self._mine(b"/x.sock")]
+        )
         reason = agy_sandbox_check.agy_reachable(wrap, tmp_path)
         assert reason and "30s" in reason and "hunter2" not in reason
 
@@ -346,9 +394,31 @@ class TestAgySandboxCheck(_AgyCase):
     ) -> None:
         self._reach(monkeypatch)
         reason = agy_sandbox_check._check_reachable(
-            None, [*self.SOCKETS, b"relative.sock"]
+            None, [*self.SOCKETS, self._mine(b"relative.sock")]
         )  # type: ignore[arg-type]
         assert reason and "relative" in reason
+
+    def test_a_sandbox_that_allows_a_user_namespace_inside_is_not_a_pass(
+        self, tmp_path: Path
+    ) -> None:
+        # In a user namespace of its own, a process maps itself root and can mount over
+        # the read-only binds; where bwrap can forbid that, the check holds it to it.
+        forbidding = agy_sandbox_check._Box(
+            ["bwrap", "--disable-userns", "--"], tmp_path
+        )
+        assert agy_sandbox_check._check_userns({"userns": "USERNS"}, forbidding)
+        assert agy_sandbox_check._check_userns({"userns": ""}, forbidding) is None
+        older = agy_sandbox_check._Box(["bwrap", "--"], tmp_path)
+        assert agy_sandbox_check._check_userns({"userns": "USERNS"}, older) is None
+
+    def test_the_wrapper_forbids_nested_user_namespaces_where_bwrap_can(
+        self, tmp_path: Path
+    ) -> None:
+        wrap = agy_sandbox.agy_wrapper(tmp_path / "ws", tmp_path / "st")
+        assert "--unshare-uts" in wrap and "--unshare-cgroup-try" in wrap
+        assert ("--disable-userns" in wrap) == agy_sandbox._bwrap_supports(
+            "--disable-userns"
+        )
 
     @pytest.mark.parametrize(
         "caps",
@@ -390,7 +460,7 @@ class TestAgySandboxCheck(_AgyCase):
         thread.start()
         self._reach(monkeypatch)
         try:
-            reason = agy_sandbox_check._check_reachable(None, [name])  # type: ignore[arg-type]
+            reason = agy_sandbox_check._check_reachable(None, [self._mine(name)])  # type: ignore[arg-type]
         finally:
             thread.join(timeout=5)
             server.close()

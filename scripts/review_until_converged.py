@@ -64,6 +64,7 @@ from scripts.review_loop import (  # noqa: E402
     tamper,
     validate_result,
 )
+# As _run: the name this shim has always exported, which importers of it still use.
 from scripts.review_loop.proc import run as _run  # noqa: E402
 
 __all__ = [

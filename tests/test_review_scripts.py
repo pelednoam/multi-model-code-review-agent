@@ -23,6 +23,13 @@ from scripts.review_loop import reviewers as reviewers_mod
 from scripts.review_loop.artifacts import describe_outputs, write_artifacts_key
 from scripts.review_loop.claude_tools import claude_denied
 
+def _liveness(runner: str) -> str:
+    """The runner's live_group, and the /proc reader it falls back on."""
+    return shell_function(runner, "live_group") + shell_function(
+        runner, "session_groups"
+    )
+
+
 SCRUB_SCRIPT = REPO_ROOT / "scripts" / "scrub_diff.py"
 PREFLIGHT_SCRIPT = REPO_ROOT / "scripts" / "review_preflight.py"
 VALIDATE_SCRIPT = REPO_ROOT / "scripts" / "validate_review_results.py"
@@ -1136,7 +1143,8 @@ class TestSalvagingProse:
         from scripts.review_loop.results import printable
 
         assert printable("ok\u202edlrow\u200b\ufeff") == "ok?dlrow??"
-        hidden = "\u061c\u2028\u2029\u00ad\U000e0041\x1b"
+        # A lone surrogate, which a JSON "\\ud800" decodes to, raised on printing.
+        hidden = "\u061c\u2028\u2029\u00ad\U000e0041\x1b\ud800\ue000"
         assert printable(hidden) == "?" * len(hidden)
         assert printable("tab\tline\nü — ok") == "tab\tline\nü — ok"
 
@@ -2041,7 +2049,7 @@ class TestRunnerScript:
         # pgrep only to ask whether a group is still this run's (live_group), and once
         # before that, whether it can.
         assert runner.count("pgrep -s") == 2
-        assert 'pgrep -s 0 -g "$1"' in shell_function(runner, "live_group")
+        assert 'pgrep -s 0 -g "$1"' in _liveness(runner)
         assert "if pgrep -s 0 -g 0 >/dev/null 2>&1 || [ $? -eq 1 ]; then" in runner
 
     @pytest.mark.parametrize("exits", [False, True], ids=["running", "exited"])
@@ -2054,9 +2062,7 @@ class TestRunnerScript:
         # of reach once timeout had exited. And with no pgrep to ask, every group read as
         # gone, and nothing was killed at all.
         runner = runner_script()
-        kill_jobs = shell_function(runner, "kill_jobs") + shell_function(
-            runner, "live_group"
-        )
+        kill_jobs = shell_function(runner, "kill_jobs") + _liveness(runner)
         then = "exit 0" if exits else "wait"
         script = tmp_path / "t.sh"
         script.write_text(
@@ -2110,7 +2116,7 @@ class TestRunnerScript:
         script.write_text(
             f"set -m\nJOB_PID=()\nGROUP_CHECK={check}\n"
             + shell_function(runner, "kill_jobs")
-            + shell_function(runner, "live_group")
+            + _liveness(runner)
             + "{ sleep 300; } &\nJOB_PID[1]=$!\necho $! > job\nsleep 0.3\n"
             + "trap 'kill_jobs 1' EXIT\ntrap 'exit 143' TERM\nkill -TERM $$\nsleep 5\n"
         )
@@ -2193,6 +2199,12 @@ class TestRunnerScript:
         assert (tmp / "stdout-1.txt").read_text() == "real"
         assert not (tmp / "codex-out-2.txt").exists()
 
+    def test_the_private_directory_is_absolute(self) -> None:
+        # The agy job changes into its workspace before its redirections are opened: a
+        # relative TMPDIR put its output, and its done marker, somewhere else.
+        runner = runner_script()
+        assert 'OUT_DIR="$(cd "$OUT_DIR" && pwd -P)"' in runner
+
     def test_a_slot_is_read_only_from_its_own_clis_file(self, tmp_path: Path) -> None:
         # Every slot was read from codex-out-N.txt, then claude-raw-N.json, then
         # stdout, whichever existed first, and a result-N.json already there was kept:
@@ -2228,7 +2240,7 @@ class TestRunnerScript:
         script.write_text(
             f"GROUP_CHECK={check}\n"
             + shell_function(runner, "kill_jobs")
-            + shell_function(runner, "live_group")
+            + _liveness(runner)
             # Another session's group leader standing in for a reused number.
             + "setsid sleep 30 & other=$!\nsleep 0.3\n"
             + "JOB_PID=([1]=$other)\nkill_jobs 1\n"

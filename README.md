@@ -13,7 +13,7 @@ preflight audit. Three modes:
 - **Full mode** (free or paid): 4 parallel reviewer subprocesses
   across providers using the locally installed CLIs by default. Free
   beyond your existing subscriptions when `claude` + `codex` + `agy` (or
-  `gemini`) are installed. Hermes/Bedrock
+  `gemini`, with `REVIEW_USE_GEMINI=1`) are installed. Hermes/Bedrock
   available as an opt-in for codebases that need data-at-rest.
   ~3-5 minutes. Use for pre-merge gates.
 - **Convergence loop** (free or paid): runs full mode repeatedly,
@@ -159,7 +159,7 @@ When opted in, the precedence flips for Anthropic reviewers:
 | Readability | Hermes Sonnet (Bedrock) | agy only with `REVIEW_USE_AGY=1`, else Gemini CLI only with `REVIEW_USE_GEMINI=1` (a project that pinned Bedrock never falls to Google by default) | Claude CLI sonnet (free) |
 | Spec-contract (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
 
-**With all CLIs installed** (claude + codex + agy or gemini): the full review
+**With all CLIs installed** (claude + codex + agy, or gemini with `REVIEW_USE_GEMINI=1`): the full review
 costs nothing beyond the subscriptions the CLIs sign in with (Claude, ChatGPT,
 and for agy a Google account's plan; the gemini CLI runs on AI Studio's free
 tier), across 3 provider families (Anthropic + OpenAI + Google).

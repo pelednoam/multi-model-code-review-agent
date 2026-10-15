@@ -16,7 +16,7 @@ import struct
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from .agy_sandbox import agy_wrapper, user_homes
 from .proc import run, signals_unwind
@@ -86,6 +86,7 @@ def _probe(box: _Box, canary: Path, roots: list[Path]) -> dict[str, str]:
         "workspace": f"echo ok > {q(str(box.workspace / 'probe'))}",
         "pidns": "readlink /proc/self/ns/pid",
         "caps": "grep '^CapEff:' /proc/self/status",
+        "userns": "unshare -U true >/dev/null 2>&1 && echo USERNS",
         # Every process's environment, not only the shell's: bwrap is PID 1 inside.
         "env": 'printf %s "$MMCRA_ENV_PROBE"; cat /proc/[0-9]*/environ'
         " | tr '\\0' '\\n' | grep -q '^MMCRA_ENV_PROBE=' && echo LEAK",
@@ -173,6 +174,14 @@ def _check_capabilities(seen: dict[str, str]) -> str | None:
     return None
 
 
+def _check_userns(seen: dict[str, str], box: _Box) -> str | None:
+    # Where the wrapper asks bwrap to forbid them, a new user namespace inside must
+    # fail: in one, a process maps itself root and can mount over the read-only binds.
+    if "--disable-userns" in box.wrap and "USERNS" in seen.get("userns", ""):
+        return "bwrap sandbox lets agy create a user namespace of its own"
+    return None
+
+
 def _check_environment(seen: dict[str, str]) -> str | None:
     if seen.get("env", "").strip():
         return "bwrap sandbox passes the host environment through"
@@ -193,20 +202,25 @@ _UNIX_DIAG_MSG = struct.Struct("=BBBBIII")
 _RTATTR = struct.Struct("=HH")
 
 
-def _unix_sockets() -> list[bytes]:
-    """The name of every bound unix socket in this network namespace that matters.
+class _Sock(NamedTuple):
+    """A bound unix socket: its name, and its owner (None where the kernel, before
+    5.3, does not say)."""
 
-    A path name as it was bound (``b"/run/..."``); an abstract one with its leading NUL
-    (``b"\\0/tmp/.X11-unix/X0"``). From the kernel over netlink, not /proc/net/unix:
-    that file prints each name raw on a line of its own, so a name with a line break
-    in it reads as two sockets, neither of them the real one, and a name that is not
-    UTF-8 reads as some other name.
+    #: A path as it was bound (``b"/run/..."``), or an abstract name with its leading
+    #: NUL (``b"\\0/tmp/.X11-unix/X0"``).
+    name: bytes
+    uid: int | None = None
+    #: Whether it takes connections or datagrams from others: a listening stream
+    #: socket, or a datagram one. A client's connected socket has a name too.
+    accepts: bool = True
 
-    Every path socket, whoever owns it: whether the sandbox can reach one is a question
-    of its file's permissions, which the probe asks. But an abstract or a relative one
-    only if it is this user's or root's (or the kernel does not say whose, before
-    5.3): another user's session bus or X server admits that user only, and counting
-    them let any local user switch the agy slot off by binding a name.
+
+def _unix_sockets() -> list[_Sock]:
+    """Every bound unix socket in this network namespace, byte for byte, and its owner.
+
+    From the kernel over netlink, not /proc/net/unix: that file prints each name raw on
+    a line of its own, so a name with a line break in it reads as two sockets, neither
+    of them the real one, and a name that is not UTF-8 reads as some other name.
 
     Raises OSError when the kernel will not list them, or the list comes back
     interrupted or malformed; a short list would pass every check that reads it.
@@ -228,8 +242,7 @@ def _unix_sockets() -> list[bytes]:
         1,
         0,
     )
-    trusted = {os.getuid(), 0, None}
-    names: list[bytes] = []
+    found: list[_Sock] = []
     with socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, _NETLINK_SOCK_DIAG) as nl:
         nl.settimeout(10)
         nl.sendall(header + request)
@@ -243,12 +256,12 @@ def _unix_sockets() -> list[bytes]:
                     raise OSError("the kernel's socket list was interrupted")
                 if kind == _NLMSG_DONE:
                     _check_done(body)
-                    return names
+                    return found
                 if kind == _NLMSG_ERROR:
                     raise OSError("the kernel would not list its sockets (sock_diag)")
-                name, uid = _diag_socket(body)
-                if name and (name[:1] == b"/" or uid in trusted):
-                    names.append(name)
+                sock = _diag_socket(body)
+                if sock.name:
+                    found.append(sock)
 
 
 def _netlink_messages(data: bytes) -> Iterator[tuple[int, int, bytes]]:
@@ -270,10 +283,18 @@ def _check_done(body: bytes) -> None:
         raise OSError("the kernel's socket list did not complete")
 
 
-def _diag_socket(body: bytes) -> tuple[bytes, int | None]:
-    """The name in one socket's unix_diag_msg (empty if it has none), and its owner."""
+#: unix_diag_msg's type and state that take a connection: a stream or seqpacket socket
+#: in TCP_LISTEN, or any datagram one.
+_SOCK_DGRAM, _TCP_LISTEN = 2, 10
+
+
+def _diag_socket(body: bytes) -> _Sock:
+    """One socket's unix_diag_msg: its name (empty if it has none), owner, and
+    whether it accepts anything from others."""
     if len(body) < _UNIX_DIAG_MSG.size:
         raise OSError("a truncated socket in the kernel's socket list")
+    _, kind_, state, _, _, _, _ = _UNIX_DIAG_MSG.unpack_from(body)
+    accepts = kind_ == _SOCK_DGRAM or state == _TCP_LISTEN
     name, uid = b"", None
     offset = _UNIX_DIAG_MSG.size
     while offset < len(body):
@@ -290,7 +311,7 @@ def _diag_socket(body: bytes) -> tuple[bytes, int | None]:
         elif kind == _UNIX_DIAG_UID and len(value) >= 4:
             uid = struct.unpack_from("=I", value)[0]
         offset += (length + 3) & ~3
-    return name, uid
+    return _Sock(name, uid, accepts)
 
 
 def _shown(name: bytes) -> str:
@@ -298,30 +319,48 @@ def _shown(name: bytes) -> str:
     return repr(name.replace(b"\0", b"@", 1).decode("utf-8", "backslashreplace"))
 
 
-def _check_sockets(box: _Box, names: list[bytes]) -> str | None:
-    """No socket ``names`` lists can be connected to from inside.
+def _check_sockets(box: _Box, socks: list[_Sock]) -> str | None:
+    """No socket in ``socks`` (``_unix_sockets``) can be connected to from inside.
 
-    ``names`` are the sockets of this network namespace, which the sandbox shares, at
-    the path each was bound at. Every one of those the sandbox can still reach is
-    refused, not a list of known ones, which always lags what is installed; none is
-    let through, now that only the resolver's file, not its directory, is put back.
-    A socket bound in another namespace (a container's), or whose directory has since
-    moved, is not listed at its reachable path: docs/agy-sandbox.md says so.
+    They are the sockets of this network namespace, which the sandbox shares.
+
+    - A path socket, whoever owns it, if the sandbox can still write to it at the path
+      it was bound at: refused, not looked up in a list of known ones, which always
+      lags what is installed. None is let through. A socket bound in another
+      namespace (a container's), or whose directory has since moved, is not found
+      at the path that reaches it: docs/agy-sandbox.md says so.
+    - An abstract one -- which no mount hides: it belongs to the network namespace,
+      which agy keeps to reach its model -- if this user's and it takes connections
+      (a client's connected socket has a name too): whatever listens there admits
+      this user, whatever it is called (a session bus can take any name).
+      Where the kernel does not say whose, a session bus by its usual name. Root's
+      system daemons check who connects, and another user's admit that user only:
+      counting those would let any local user switch the slot off by binding one.
+      X servers, of any owner, are asked (``_check_x_servers``).
+    - A relative one, which cannot be checked, if this user's or root's.
     """
-    relative = [n for n in names if n[:1] not in (b"/", b"\0")]
-    if relative:
-        return f"a socket bound by a relative name ({_shown(relative[0])}) cannot be checked"
-    reached = _reachable(box, sorted({n for n in names if n[:1] == b"/"}))
+    me = os.getuid()
+    for sock in socks:
+        if sock.name[:1] not in (b"/", b"\0") and sock.uid in (me, 0, None):
+            return f"a socket bound by a relative name ({_shown(sock.name)}) cannot be checked"
+    paths = sorted({sock.name for sock in socks if sock.name[:1] == b"/"})
+    reached = _reachable(box, paths)
     if isinstance(reached, str):
         return reached
     if reached:
         return f"bwrap sandbox can reach {_shown(reached[0])}"
-    # Abstract sockets belong to the network namespace, which agy keeps to reach its
-    # model, so no mount hides them. A session bus -- dbus-launch's under /tmp, IBus's
-    # under ~/.cache -- starts any program it is asked to.
-    for name in names:
-        if name[:1] == b"\0" and b"/dbus-" in name:
-            return f"bwrap sandbox can reach a session bus ({_shown(name)})"
+    for sock in socks:
+        if (
+            not sock.accepts
+            or sock.name[:1] != b"\0"
+            or _X_DISPLAY.fullmatch(sock.name)
+        ):
+            continue
+        if sock.uid == me or (sock.uid is None and b"/dbus-" in sock.name):
+            return (
+                f"bwrap sandbox can reach {_shown(sock.name)}, an abstract socket of"
+                " this user's, and whatever listens there admits this user"
+            )
     return None
 
 
@@ -362,15 +401,15 @@ def _reachable(box: _Box, paths: list[bytes]) -> list[bytes] | str:
 _X_DISPLAY = re.compile(rb"\0/tmp/\.X11-unix/X(\d+)")
 
 
-def _check_x_servers(names: list[bytes]) -> str | None:
-    """No X server in ``names`` lets this user in without credentials.
+def _check_x_servers(socks: list[_Sock]) -> str | None:
+    """No X server in ``socks`` lets this user in without credentials, whoever owns it.
 
     Its abstract socket is reachable from inside, and one that admits a client with no
     cookie -- stock GNOME and Xwayland grant ``SI:localuser`` -- takes keystrokes into a
     terminal outside the sandbox. Asked from here, which is the same thing: the server
     decides by the connecting uid, and inside it is this one.
     """
-    for name in names:
+    for name in (sock.name for sock in socks):
         match = _X_DISPLAY.fullmatch(name)
         if match and _x_admits(name):
             display = f":{match.group(1).decode()}"
@@ -405,9 +444,9 @@ def _x_admits(name: bytes) -> bool:
     return reply == b"\x01"
 
 
-def _check_reachable(box: _Box, names: list[bytes]) -> str | None:
-    """No socket and no X server among ``names`` (``_unix_sockets``) is reachable."""
-    return _check_sockets(box, names) or _check_x_servers(names)
+def _check_reachable(box: _Box, socks: list[_Sock]) -> str | None:
+    """No socket and no X server among ``socks`` (``_unix_sockets``) is reachable."""
+    return _check_sockets(box, socks) or _check_x_servers(socks)
 
 
 def agy_reachable(wrap: list[str], workspace: Path) -> str | None:
@@ -480,6 +519,7 @@ def agy_is_confined() -> tuple[bool, str]:
                 or _check_hidden(seen, box, roots)
                 or _check_processes(seen)
                 or _check_environment(seen)
+                or _check_userns(seen, box)
                 or _check_reachable(box, sockets)
             )
             if failure:

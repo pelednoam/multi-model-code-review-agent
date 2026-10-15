@@ -9,14 +9,14 @@ import sys
 from pathlib import Path
 
 import pytest
-from agy_case import _AgyCase
+from agy_case import AgyCase
 from helpers import REPO_ROOT
 
 from scripts.review_loop.artifacts import describe_outputs
 from scripts.review_loop.results import _unwrap_envelope, extract_results
 
 
-class TestAgyOutput(_AgyCase):
+class TestAgyOutput(AgyCase):
     """Reading agy's stream: only a finished turn is a review."""
 
     def test_structured_output_is_the_result(self, tmp_path: Path) -> None:

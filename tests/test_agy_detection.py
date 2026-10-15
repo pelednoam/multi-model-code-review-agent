@@ -7,13 +7,13 @@ import pwd
 from pathlib import Path
 
 import pytest
-from agy_case import _AgyCase
+from agy_case import AgyCase
 from helpers import REPO_ROOT, runner_script, shell_function
 
 from scripts.review_loop import agy, agy_sandbox, backends
 
 
-class TestAgyDetection(_AgyCase):
+class TestAgyDetection(AgyCase):
     """Whether agy is used at all, decided once at startup."""
 
     @pytest.mark.usefixtures("on")
@@ -118,7 +118,7 @@ class TestAgyDetection(_AgyCase):
                 assert hidden.index(account) < hidden.index(tmp_path)
 
 
-class TestAgyRunner(_AgyCase):
+class TestAgyRunner(AgyCase):
     """The bash runner's agy launcher, which must not be the weaker path."""
 
     def test_the_bash_launcher_matches_the_python_one(self) -> None:
@@ -133,8 +133,8 @@ class TestAgyRunner(_AgyCase):
         assert 'review_helper agy-sandbox "$AGY_WS" "$AGY_STATE"' in prepare
         assert "review_helper agy-schema" in prepare
         # The preamble written into the prompt file, which then goes in as one line.
-        assert 'review_helper agy-preamble "$prompt_file"' in prepare
-        assert 'review_helper agy-message "$prompt_file"' in runner
+        assert 'review_helper agy-input "$prompt_file" "$AGY_IN"' in prepare
+        assert '< "$AGY_IN"' in runner and "agy-message" not in runner
         assert runner.count("python3") == 1  # review_helper's own definition
         assert 'prepare_agy "$num" "$prompt_file" || return 1' in runner
         # Its output parsed as agy's only because agy ran it -- as the runner itself

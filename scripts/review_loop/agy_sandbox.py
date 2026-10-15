@@ -9,10 +9,16 @@ docs/agy-sandbox.md.
 
 from __future__ import annotations
 
+import functools
 import os
-import pwd
 import shutil
+import subprocess
 from pathlib import Path
+
+try:
+    import pwd
+except ImportError:  # not a Unix: agy's sandbox is Linux-only, the loop is not
+    pwd = None  # type: ignore[assignment]
 
 
 # -- the sandbox ---------------------------------------------------------------
@@ -94,6 +100,8 @@ def user_homes() -> list[Path]:
     passwd entry (a container under a bare numeric UID), whose home is unknown; or a
     home of ``/``, which cannot be replaced without replacing everything.
     """
+    if pwd is None:
+        raise OSError("no passwd database on this platform; agy's sandbox needs Linux")
     try:
         account = Path(pwd.getpwuid(os.getuid()).pw_dir)
     except KeyError as exc:
@@ -119,6 +127,21 @@ def _resolver_file() -> Path | None:
     ):
         return resolver
     return None
+
+
+@functools.cache
+def _bwrap_supports(flag: str) -> bool:
+    """Whether the installed bwrap knows ``flag`` (``bwrap --help`` lists it)."""
+    exe = shutil.which("bwrap")
+    if exe is None:
+        return False
+    try:
+        done = subprocess.run(
+            [exe, "--help"], capture_output=True, text=True, timeout=10, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return flag in done.stdout + done.stderr
 
 
 def _maskable(sock: str) -> bool:
@@ -168,6 +191,9 @@ def agy_wrapper_parts(workspace: Path, state: Path) -> tuple[list[str], list[str
         # otherwise keeps them all, and a remount would undo every read-only bind.
         "--unshare-user",
         "--cap-drop", "ALL",
+        # Its own hostname and cgroup view too, where the kernel allows the latter.
+        "--unshare-uts",
+        "--unshare-cgroup-try",
         "--new-session",
         "--die-with-parent",
         "--ro-bind", "/", "/",
@@ -176,6 +202,10 @@ def agy_wrapper_parts(workspace: Path, state: Path) -> tuple[list[str], list[str
         "--tmpfs", "/tmp",
         "--tmpfs", "/run",
     ]  # fmt: skip
+    # And no user namespace of its own inside, where it could map itself root again
+    # and mount over what this one made read-only (bwrap 0.8 and later).
+    if _bwrap_supports("--disable-userns"):
+        wrap.append("--disable-userns")
     resolver = _resolver_file()
     if resolver is not None:
         wrap += ["--ro-bind", str(resolver), str(resolver)]

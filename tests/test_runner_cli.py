@@ -218,6 +218,23 @@ class TestRunnerCli:
             schema.write_text(text, encoding="utf-8")
         assert self._cli("agy-schema", str(schema)).returncode == 1
 
+    def test_agys_input_and_its_record_are_written_together(
+        self, tmp_path: Path
+    ) -> None:
+        # The preamble went into the prompt file first; if the input line then could
+        # not be written, the slot fell through with agy's preamble in its prompt.
+        prompt = tmp_path / "prompt-3.txt"
+        prompt.write_text("Review this.\n", encoding="utf-8")
+        blocked = tmp_path / "no-such-dir" / "agy-in-3.jsonl"
+        assert self._cli("agy-input", str(prompt), str(blocked)).returncode != 0
+        assert prompt.read_text(encoding="utf-8") == "Review this.\n"
+        written = tmp_path / "agy-in-3.jsonl"
+        assert self._cli("agy-input", str(prompt), str(written)).returncode == 0
+        (line,) = written.read_text(encoding="utf-8").splitlines()
+        sent = json.loads(line)["message"]["content"]
+        assert sent == prompt.read_text(encoding="utf-8")
+        assert sent.endswith("Review this.\n") and sent != "Review this.\n"
+
     def test_the_real_schema_is_usable(self) -> None:
         done = self._cli("agy-schema", str(SCHEMA_PATH))
         assert done.returncode == 0 and json.loads(done.stdout)["type"] == "object"

@@ -59,8 +59,8 @@ def _agy_detect(prefer_hermes: str = "false") -> int:
         found = detect_backends(
             verify_codex=False, prefer_hermes=prefer_hermes == "true"
         )
-        ok = found["agy"]
-        model = agy_model_choice()[0] if ok else None
+        # Picked once per run (cached): detection already chose it.
+        model = agy_model_choice()[0] if found["agy"] else None
     print(model or "")
     return 0
 
@@ -109,16 +109,17 @@ def _agy_reachable(workspace: str) -> int:
     return 0
 
 
-def _agy_preamble(prompt_file: str) -> int:
-    """Prepend agy's no-tools preamble to the prompt file, which records what it is sent."""
+def _agy_input(prompt_file: str, message_file: str) -> int:
+    """Write agy's one stream-json input line, then record it in the prompt file.
+
+    The prompt with agy's no-tools preamble goes to ``message_file``, and only then is
+    the preamble written into ``prompt_file``, the record of what agy was sent: if the
+    first fails, the prompt is untouched for the backend the slot falls through to.
+    """
     path = Path(prompt_file)
-    path.write_text(AGY_PREAMBLE + path.read_text(encoding="utf-8"), encoding="utf-8")
-    return 0
-
-
-def _agy_message(prompt_file: str) -> int:
-    """Print the prompt file framed as agy's one stream-json input line."""
-    sys.stdout.write(agy_message(Path(prompt_file).read_text(encoding="utf-8")))
+    prompt = AGY_PREAMBLE + path.read_text(encoding="utf-8")
+    Path(message_file).write_text(agy_message(prompt), encoding="utf-8")
+    path.write_text(prompt, encoding="utf-8")
     return 0
 
 
@@ -191,8 +192,7 @@ _COMMANDS: dict[str, Callable[..., int]] = {
     "agy-schema": _agy_schema,
     "agy-sandbox": _agy_sandbox,
     "agy-reachable": _agy_reachable,
-    "agy-preamble": _agy_preamble,
-    "agy-message": _agy_message,
+    "agy-input": _agy_input,
     "extract": _extract,
     "placeholder": _placeholder,
     "claude-deny": _claude_deny,

@@ -24,10 +24,12 @@ EXPECTED_REVIEWERS = {
 #: which a reply decoded from JSON can carry raw: an escape sequence can rewrite or hide
 #: the lines above it, retitle the window, or on some terminals write the clipboard.
 #: Format characters (Cf): bidi controls (the "Trojan Source" trick), zero-width ones,
-#: the BOM, tag characters ("ASCII smuggling"). And line and paragraph separators (Zl,
-#: Zp). By category rather than a list of ranges, which missed some every time it was
+#: the BOM, tag characters ("ASCII smuggling"). Line and paragraph separators (Zl,
+#: Zp). Lone surrogates (Cs), which a JSON "\\ud800" decodes to and which no terminal
+#: encoding can print: one raised UnicodeEncodeError and ended the loop. And private-use
+#: characters (Co), which show as whatever a font makes of them. By category rather than a list of ranges, which missed some every time it was
 #: reviewed. A reviewer's text is shaped by the diff it read.
-_INVISIBLE = frozenset({"Cc", "Cf", "Zl", "Zp"})
+_INVISIBLE = frozenset({"Cc", "Cf", "Cs", "Co", "Zl", "Zp"})
 
 
 def printable(text: str) -> str:
@@ -180,8 +182,9 @@ def extract_results(
     shaped like agy's ``result`` event -- one with a failed status would silence a
     real review -- so the shape alone decides nothing.
 
-    Each slot is read from its own CLI's output, as the full-mode runner reads it:
-    codex's answer (-o, ``codex-out-N.txt``), then stdout (``raw-N.txt``). A
+    Each slot is read from its own CLI's output: codex's answer (-o,
+    ``codex-out-N.txt``), then -- in this loop only; the full-mode runner reads the
+    answer alone -- its stdout (``raw-N.txt``), as every other CLI's is read. A
     result-N.json is only ever written here, so one already present was put there by
     something else -- a reviewer with a file tool, hermes --yolo -- and is removed, as
     is one for a slot with no usable answer: the round's files list only real ones.

@@ -640,6 +640,11 @@ class TestAgySandboxCheck(AgyCase):
         monkeypatch.setenv("HOME", str(tmp_path / "link"))
         monkeypatch.setattr(agy_sandbox, "agy_state_dir", real_agy_state_dir)
         assert agy_sandbox.agy_state_dir().is_relative_to(real.resolve())
+        # And agy is told that home, not the link -- under /tmp, emptied inside, the
+        # link led nowhere and agy found no sign-in.
+        env, _ = agy_sandbox.agy_wrapper_parts(tmp_path / "ws", tmp_path / "st")
+        assert f"HOME={real.resolve()}" in env
+        assert f"HOME={tmp_path / 'link'}" not in env
 
     def test_a_home_of_root_is_not_a_pass(
         self, monkeypatch: pytest.MonkeyPatch

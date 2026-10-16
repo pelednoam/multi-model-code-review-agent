@@ -156,14 +156,12 @@ class TestAgyRunner(AgyCase):
         assert 'echo agy > "$REVIEW_TMP/backend-$num.txt"' in runner  # for watching
         assert 'cat "$REVIEW_TMP/backend-' not in runner
         # Scratch listed in the runner's own shell, not in a file a reviewer could write.
-        assert "make_scratch AGY_WS && make_scratch AGY_STATE" in prepare
+        assert "make_scratch AGY_WS mmcra-ws- && make_scratch AGY_STATE" in prepare
         assert 'SCRATCH+=("$dir")' in shell_function(runner, "make_scratch")
         assert "scratch-" not in runner
         assert "trap finish_round EXIT" in runner
         # A failed mktemp must not fall back to running agy in the repository.
-        assert 'dir="$(mktemp -d)" && [ -n "$dir" ] || return 1' in shell_function(
-            runner, "make_scratch"
-        )
+        assert '&& [ -n "$dir" ] || return 1' in shell_function(runner, "make_scratch")
         assert 'rm -rf "$AGY_WS" "$AGY_STATE"' in runner
         # Absolute, or the job's cd into the workspace sends its output there.
         assert 'REVIEW_TMP="$(cd "$REVIEW_TMP" && pwd -P)" || exit 1' in runner

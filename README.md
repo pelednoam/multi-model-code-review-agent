@@ -71,14 +71,15 @@ review missed.
 | Write isolation | no | no | `--disallowedTools`; codex and agy sandboxed; gemini (opt-in) policy-only | none for hermes (see the backends table) |
 | Structured JSON schema | no | no | yes | yes |
 | Review packet persistence | no | no | yes | yes |
-| Cross-provider models | no | no | with Codex + agy/Gemini | no: Anthropic on Bedrock (Codex or agy only by name, where Hermes is absent) |
+| Cross-provider models | no | no | with Codex + agy/Gemini | no: Anthropic on Bedrock; where Hermes is absent, OpenAI/Google only by name (`REVIEW_USE_CODEX` / `REVIEW_USE_AGY` / `REVIEW_USE_GEMINI`) |
 | Mandatory CI gate before commit | no | no | yes | yes |
 | Cost | free | free | free beyond subscriptions | ~$5-40 |
 | Latency | instant | ~30s | ~3 min | ~5 min |
 
 **When to use which:**
 - **Quick mode**: every commit, rapid iteration (free, 30s)
-- **Full mode with CLIs**: pre-merge gates when cost matters (free, 3min)
+- **Full mode with CLIs**: pre-merge gates when cost matters (free beyond your CLI
+  subscriptions, 3min)
 - **Full mode with Hermes**: high-stakes changes where Bedrock's
   data-at-rest guarantees matter
 

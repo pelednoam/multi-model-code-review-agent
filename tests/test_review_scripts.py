@@ -2114,6 +2114,24 @@ class TestRunnerScript:
         )  # fmt: skip
         assert (time.monotonic() - started < 1) == stops
 
+    def test_launchers_read_private_copies_of_the_prompts(self) -> None:
+        # From $REVIEW_TMP, a hermes reviewer already running with a file tool could
+        # rewrite a later slot's prompt before it was read.
+        runner = runner_script()
+        copied = runner.index('cp -- "$REVIEW_TMP"/prompt-[1-4].txt "$PROMPT_DIR/"')
+        launches = runner[runner.index("# R1: Security") :]
+        assert copied < runner.index("# R1: Security")
+        assert '"$REVIEW_TMP/prompt-' not in launches
+        assert launches.count('"$PROMPT_DIR/prompt-') == 15
+
+    def test_the_runners_private_directories_are_named_for_the_deny_rules(self) -> None:
+        # Plain mktemp names (tmp.XXXX) were outside claude's mmcra-* deny rules.
+        runner = runner_script()
+        assert "mmcra-out-XXXXXXXX" in runner
+        assert "make_scratch PROMPT_DIR mmcra-prompt-" in runner
+        assert "//**/mmcra-out-*/**" in SECRET_READS
+        assert "//**/mmcra-prompt-*/**" in SECRET_READS
+
     def test_cdpath_is_cleared_before_any_cd(self) -> None:
         # Set, it made "$(cd DIR && pwd -P)" capture cd's own line in the path.
         runner = runner_script()
@@ -2771,6 +2789,8 @@ class TestCredentialShapes:
             "postgres://u" + ":" + "q7A_" * 80 + "@db/prod",
             "redis://" + ":8080/abc" + "@cache:6379/0",
             "postgres://u" + ":pass/W0rd9" + "@db/prod",
+            "postgres://u" + ":8080/abc" + "@db/prod",
+            "HTTPS://u" + ":p4ssw0rd9" + "@proxy:3128",
             "ya" + "29." + "a" * 30,
             "1/" + "/0" + "a" * 40,
             "GOC" + "SPX-" + "a" * 28,
@@ -2790,7 +2810,8 @@ class TestCredentialShapes:
         ids=["url-userinfo", "url-no-user", "url-short-password", "url-slash-password",
              "url-quote-password", "url-azure-user", "url-ipv6-host", "url-dollar-password", "url-numeric-password",
              "url-long-password", "url-no-user-slash-password",
-             "url-placeholder-word-prefix",
+             "url-placeholder-word-prefix", "url-digits-slash-password",
+             "url-upper-case-scheme",
              "google-oauth-access", "google-oauth-refresh",
              "google-client-secret", "huggingface", "npm", "pypi", "google-api-key", "github-fine-grained", "github-app",
              "stripe-live", "slack", "slack-app", "slack-webhook", "discord-webhook",
@@ -2850,6 +2871,8 @@ class TestCredentialShapes:
             "http://[::1]:8080/@scope/pkg",
             "http://localhost:{port}/@scope/pkg",
             "http://localhost:${PORT}/@scope/pkg",
+            "['http://localhost:8080','ops@example.com']",
+            "redis://h:6379/0?x=a@b",
         ],
     )
     def test_a_query_or_fragment_with_an_at_is_kept(self, url: str) -> None:

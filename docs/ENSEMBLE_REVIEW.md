@@ -41,7 +41,8 @@ ensemble-review agent (docs/ensemble-review.md)
   |-- agy (Gemini, sandboxed) OR gemini (opt-in) OR claude -p sonnet OR hermes sonnet
   |                                                     --> result-3.json (readability)
   |-- claude -p opus OR hermes opus                     --> result-4.json (spec-contract)
-  |   (pinned to Bedrock, .use-hermes: hermes first in every slot)
+  |   (pinned to Bedrock -- .use-hermes, --prefer-hermes, or a "hermes/bedrock/isolated
+  |    review" request: hermes first in every slot where it is installed)
   |   (all four run IN PARALLEL; the loop's deadline scales with the diff, full mode's
   |    is REVIEWER_TIMEOUT, 600s by default, with the watchdog at +90s)
   |

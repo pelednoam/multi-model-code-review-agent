@@ -125,6 +125,23 @@ _URL_PLACEHOLDER = (
 )
 
 
+#: The parts of a URL with a password in its userinfo: scheme, "://", user (redis's
+#: may be empty, Azure's holds an @, none holds a bracket, so an IPv6 host's colons
+#: are not taken for one), ":". The scheme is anchored, and bounded like the rest, so
+#: that a long line is scanned in linear time.
+_SCHEME_NAME = r"[a-zA-Z][a-zA-Z0-9+.-]{0,31}:"
+_URL_SCHEME = r"(?<![a-zA-Z0-9+.-])" + _SCHEME_NAME
+#: A web scheme's, whose host:port can be followed by a path holding an @
+#: (http://host:8080/@scope/pkg), and the rest.
+_WEB_SCHEME = r"(?<![a-zA-Z0-9+.-])(?i:https?|wss?):"
+_OTHER_SCHEME = r"(?<![a-zA-Z0-9+.-])(?!(?i:https?|wss?):)" + _SCHEME_NAME
+_URL_USER = r"//[^\s/:\"?#\[\]]{0,256}:"
+#: A character of the password: it may hold ' or / (base64 often has one), but not a
+#: quote that closes a string literal -- one followed by , ) ] } ; : + or a space --
+#: or the pattern ran from one string into the next (['http://h:8080','ops@x']).
+_URL_PASSWORD_CHAR = r"(?:[^\s@\"?#']|'(?![,\])};:+\s]))"
+
+
 # SHAPE_PATTERNS recognise a credential by its own shape, with no help from a
 # name: `sk-ant-...`, `AKIA...`, a PEM block, a service-account blob. Nothing
 # excuses these. A string shaped like a live key *is* a live key as far as this
@@ -154,38 +171,55 @@ SHAPE_PATTERNS = [
     re.compile(r"hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]{20,}"),
     re.compile(r"discord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9_-]{50,}"),
     re.compile(r"SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}"),
-    # A password in a URL's userinfo: scheme, "://", user (redis's may be empty,
-    # Azure's holds an @), ":", password, "@" -- in a postgres, redis or proxy URL.
-    # A password may hold ' or / (base64 often has one); a port and a path after it
-    # is not a password, and nor is a port and a query or fragment with an @ in it,
-    # nor an IPv6 host's colons (no user name holds a bracket). Nor a placeholder or
-    # a template's field, which documentation and connection-string code are full
-    # of: a redaction aborts the review. The scheme anchored and the parts bounded,
-    # so that a long line is scanned in linear time. Written in parts, so that this
-    # line is not one.
+    # A password in a URL's userinfo (``_URL_USER``), "@" -- in a postgres, redis or
+    # proxy URL. Not a web URL's port and a path after it, nor a port and a query or
+    # fragment with an @ in it, nor a placeholder or a template's field, which
+    # documentation and connection-string code are full of: a redaction aborts the
+    # review. Written in parts, so that this line is not one.
     re.compile(
-        r"(?<![a-zA-Z0-9+.-])[a-zA-Z][a-zA-Z0-9+.-]{0,31}:"
-        + r"//[^\s/:\"?#\[\]]{0,256}:(?!\d{1,5}/)(?!"
+        _WEB_SCHEME
+        + _URL_USER
+        + r"(?!\d{1,5}/)(?!"
         + _URL_FIELD
         + r"/)(?!"
         + _URL_PLACEHOLDER
-        + r"@)[^\s@\"?#]{1,256}@"
+        + r"@)"
+        + _URL_PASSWORD_CHAR
+        + r"{1,256}@"
+    ),
+    # Any other scheme -- postgres, redis, amqp -- has no port to mistake: "8080/abc"
+    # before the "@" is a password there.
+    re.compile(
+        _OTHER_SCHEME
+        + _URL_USER
+        + r"(?!"
+        + _URL_FIELD
+        + r"/)(?!"
+        + _URL_PLACEHOLDER
+        + r"@)"
+        + _URL_PASSWORD_CHAR
+        + r"{1,256}@"
     ),
     # The same with no "/" in the password, which may then be any length: the scan
     # stops at the next "/", and every URL after it has one, so it stays linear.
     re.compile(
-        r"(?<![a-zA-Z0-9+.-])[a-zA-Z][a-zA-Z0-9+.-]{0,31}:"
-        + r"//[^\s/:\"?#\[\]]{0,256}:(?!"
+        _URL_SCHEME
+        + _URL_USER
+        + r"(?!"
         + _URL_PLACEHOLDER
-        + r"@)[^\s/@\"?#]+@"
+        + r"@)(?:(?!/)"
+        + _URL_PASSWORD_CHAR
+        + r")+@"
     ),
     # And with no user name, where nothing before the ":" is a host, so nothing after
     # it is a port.
     re.compile(
-        r"(?<![a-zA-Z0-9+.-])[a-zA-Z][a-zA-Z0-9+.-]{0,31}:"
+        _URL_SCHEME
         + r"//:(?!"
         + _URL_PLACEHOLDER
-        + r"@)[^\s@\"?#]{1,256}@"
+        + r"@)"
+        + _URL_PASSWORD_CHAR
+        + r"{1,256}@"
     ),
     # Google's OAuth access and refresh tokens and client secrets, and the package
     # registries' tokens.

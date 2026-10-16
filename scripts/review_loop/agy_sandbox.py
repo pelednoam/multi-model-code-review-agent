@@ -250,5 +250,9 @@ def agy_wrapper_parts(
         if (real / name).is_dir():
             wrap += ["--ro-bind", str(real / name), str(real / name)]
     wrap += ["--bind", str(workspace), str(workspace)]
-    keep = [f"{var}={os.environ[var]}" for var in _AGY_ENV if var in os.environ]
+    values = {var: os.environ[var] for var in _AGY_ENV if var in os.environ}
+    # The home its state was mounted under, resolved: a HOME that is a link -- from
+    # /tmp, say, which is emptied inside -- led nowhere, and agy found no sign-in.
+    values["HOME"] = str(real.parent.parent)
+    keep = [f"{var}={value}" for var, value in values.items()]
     return [shutil.which("env") or "env", "-i", *keep], [*wrap, "--"]

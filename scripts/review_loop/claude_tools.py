@@ -70,7 +70,11 @@ SECRET_READS = (
     "~/.local/share/keyrings/**", "~/.claude/**", "~/.codex/**", "~/.gemini/**",
     "~/.config/**/credentials*", "~/.pgpass", "~/.my.cnf", "~/.vault-token",
     "~/.cargo/credentials*", "~/.terraform.d/**", "~/.s3cfg", "~/.boto", "~/.oci/**",
-    "~/.config/hub",
+    "~/.config/hub", "~/.cache/huggingface/**", "~/.huggingface/**", "~/.kaggle/**",
+    "~/.config/rclone/**", "~/.config/op/**",
+    # Browsers' and editors' profiles: cookies, saved sign-ins, extension tokens.
+    "~/.config/google-chrome/**", "~/.config/chromium/**", "~/.mozilla/**",
+    "~/.config/Code/**",
     # Where API keys are exported, and pasted into commands.
     "~/.bashrc", "~/.bash_profile", "~/.profile", "~/.zshrc", "~/.zshenv",
     "~/.zprofile", "~/.bash_history", "~/.zsh_history", "~/.python_history",

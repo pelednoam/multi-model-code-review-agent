@@ -92,9 +92,12 @@ review_helper() {
   python3 -I "$PWD/scripts/review_loop/runner_entry.py" "$@"
 }
 # The switches the checks read, exported first: one set in this shell but not exported -- say
-# REVIEW_USE_AGY=0 -- is not seen by the helper, and agy would be detected anyway.
-export AGY_MODEL REVIEW_USE_AGY REVIEW_USE_GEMINI REVIEW_USE_CODEX MMCRA_SKIP_AGY_SANDBOX_CHECK \
-  MMCRA_SKIP_CODEX_SANDBOX_CHECK MMCRA_AGY_STRICT_SOCKETS
+# REVIEW_USE_AGY=0 -- is not seen by the helper, and agy would be detected anyway. Only those that
+# are set: zsh's `export` of an unset name sets it empty, and an empty REVIEW_USE_AGY is "off".
+for v in AGY_MODEL REVIEW_USE_AGY REVIEW_USE_GEMINI REVIEW_USE_CODEX MMCRA_SKIP_AGY_SANDBOX_CHECK \
+    MMCRA_SKIP_CODEX_SANDBOX_CHECK MMCRA_AGY_STRICT_SOCKETS; do
+  eval "[ -n \"\${$v+set}\" ]" && export "$v"
+done
 
 # codex: only once its sandbox is shown to refuse a write (no model call). MMCRA_SKIP_CODEX_SANDBOX_CHECK=1
 # (or true/yes/on -- not 0) skips the check on a host that is already a sandbox.
@@ -250,7 +253,7 @@ Then scrub it as the diff is -- it quotes project files, and goes into every pro
 python scripts/scrub_diff.py --text < "$REVIEW_TMP/context.raw.md" > "$REVIEW_TMP/context.md"
 ```
 
-If the scrubber exits non-zero, **STOP**, as for the diff: a credential is quoted in the bundle.
+Exit 1 means it redacted something: `context.md` is the redacted copy and safe to send, so say how many lines it redacted (its stderr) and go on -- prose about a project mentions environment files often, and that alone is redacted. Exit 2 means it failed and `context.md` is incomplete: **STOP**.
 
 ## 4. Read the diff and audit into your context
 
@@ -513,7 +516,7 @@ REVIEW_ROOT="$PWD"
 # this code -- extraction among it -- after the reviewers have.
 # Links followed (-L): copied as links, a module could still be read from the checkout.
 HELPER_ROOT=""
-HELPER_ROOT="$(mktemp -d)" && HELPER_ROOT="$(cd "$HELPER_ROOT" && pwd -P)" \
+HELPER_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/mmcra-helper-XXXXXXXX")" && HELPER_ROOT="$(cd "$HELPER_ROOT" && pwd -P)" \
   && mkdir -p "$HELPER_ROOT/scripts" "$HELPER_ROOT/docs" \
   && cp -RL "$REVIEW_ROOT/scripts/review_loop" "$HELPER_ROOT/scripts/" \
   && { cp -L "$REVIEW_ROOT/docs/ensemble_review_result_schema.json" "$HELPER_ROOT/docs/" \
@@ -544,7 +547,8 @@ set -m
 # another shell; the runner itself reads only its own.
 # Absolute: the agy job changes into its workspace before its redirections are opened, and a
 # relative TMPDIR would put them, and its done marker, somewhere else.
-OUT_DIR="$(mktemp -d)" && [ -n "$OUT_DIR" ] && OUT_DIR="$(cd "$OUT_DIR" && pwd -P)" \
+# Named as the loop names its own, mmcra-out-*: a name claude reviewers are denied reading.
+OUT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mmcra-out-XXXXXXXX")" && [ -n "$OUT_DIR" ] && OUT_DIR="$(cd "$OUT_DIR" && pwd -P)" \
   || { echo "ERROR: no temporary directory"; exit 1; }
 # mark_done N STATUS: slot N finished with STATUS.
 mark_done() {
@@ -722,7 +726,7 @@ launch_hermes() {
   JOB_BACKEND[$num]=hermes
   echo hermes > "$REVIEW_TMP/backend-$num.txt"   # for watching
   JOB_PROVIDER[$num]=anthropic
-  case "$hermes_model" in   # named as the convergence loop names them
+  case "$hermes_model" in   # labelled as the convergence loop's prompts label them
     *opus*)   JOB_MODEL[$num]=claude-opus-4.6 ;;
     *sonnet*) JOB_MODEL[$num]=claude-sonnet-4.6 ;;
     *haiku*)  JOB_MODEL[$num]=claude-haiku-4.5 ;;
@@ -750,10 +754,11 @@ launch_hermes() {
 #   after every way this launch can still fall through to another backend, and in one step: the
 #   prompt file is changed only once the input line is written.
 AGY_SCHEMA="" AGY_WS="" AGY_STATE="" AGY_IN="" AGY_ENVP=() AGY_BWRAP=()
-# make_scratch VAR: a new temporary directory, listed in SCRATCH, resolved, into VAR.
+# make_scratch VAR [PREFIX]: a new temporary directory, named PREFIX (mmcra-tmp-) and random
+# characters, listed in SCRATCH, resolved, into VAR.
 make_scratch() {
   local dir
-  dir="$(mktemp -d)" && [ -n "$dir" ] || return 1
+  dir="$(mktemp -d "${TMPDIR:-/tmp}/${2:-mmcra-tmp-}XXXXXXXX")" && [ -n "$dir" ] || return 1
   SCRATCH+=("$dir")
   dir="$(cd "$dir" && pwd -P)" || return 1
   printf -v "$1" %s "$dir"
@@ -762,7 +767,7 @@ prepare_agy() {
   local num=$1 prompt_file=$2 wrap=()
   AGY_SCHEMA="$(review_helper agy-schema "$HELPER_ROOT/docs/ensemble_review_result_schema.json")" \
     || { echo "R$num: SKIPPED (agy result schema unusable)"; return 1; }
-  { make_scratch AGY_WS && make_scratch AGY_STATE; } \
+  { make_scratch AGY_WS mmcra-ws- && make_scratch AGY_STATE mmcra-agy-state-; } \
     || { echo "R$num: SKIPPED (no temporary directory for agy)"; return 1; }
   case "$AGY_WS/" in
     "$(cd "$REVIEW_ROOT" && pwd -P)"/*)
@@ -778,9 +783,11 @@ prepare_agy() {
   local why
   why="$(printf '%s\0' "${AGY_ENVP[@]}" "${AGY_BWRAP[@]}" | review_helper agy-reachable "$AGY_WS")" \
     || { echo "R$num: SKIPPED (agy not launched -- $why)"; return 1; }
-  AGY_IN="$OUT_DIR/agy-in-$num.jsonl"
+  AGY_IN="$PROMPT_DIR/agy-in-$num.jsonl"
   review_helper agy-input "$prompt_file" "$AGY_IN" \
     || { echo "R$num: SKIPPED (could not prepare agy's prompt)"; return 1; }
+  # The private copy now holds the preamble too; the record in $REVIEW_TMP is to say so as well.
+  cp -- "$prompt_file" "$REVIEW_TMP/prompt-$num.txt" 2>/dev/null || true
 }
 
 # claude_deny N TOOLS: the --disallowedTools arguments for a claude reviewer allowed TOOLS, in
@@ -837,7 +844,8 @@ launch_cli() {
       JOB_BACKEND[$num]=claude
       echo claude > "$REVIEW_TMP/backend-$num.txt"   # for watching
       JOB_PROVIDER[$num]=anthropic
-      # Named as the convergence loop names them, so a result reads the same from either path.
+      # Named as the convergence loop labels them in the prompt; the loop keeps whatever model
+      # the reviewer itself reports, so its result can name another.
       case "$model" in
         opus)   JOB_MODEL[$num]=claude-opus-4.6 ;;
         sonnet) JOB_MODEL[$num]=claude-sonnet-4.6 ;;
@@ -888,7 +896,7 @@ launch_cli() {
       # .gemini/settings.json -- chosen by the change being reviewed -- it would load.
       # Its own, not inside OUT_DIR, where the other slots' outputs are.
       local gemini_ws
-      make_scratch gemini_ws || { echo "R$num: SKIPPED (no directory for gemini)"; return 1; }
+      make_scratch gemini_ws mmcra-ws- || { echo "R$num: SKIPPED (no directory for gemini)"; return 1; }
       case "$gemini_ws/" in
         "$(cd "$REVIEW_ROOT" && pwd -P)"/*)
           echo "R$num: SKIPPED (gemini's directory $gemini_ws is inside the repo; check TMPDIR)"
@@ -968,26 +976,33 @@ if ! $HAS_CLAUDE && ! $HAS_HERMES; then
   exit 1
 fi
 
+# The prompts each launcher reads, copied first into a directory of the runner's own: in
+# $REVIEW_TMP, a reviewer already running with a file tool (hermes -t file --yolo) could rewrite a
+# later slot's before it was read. The copies there stay as the record.
+make_scratch PROMPT_DIR mmcra-prompt- \
+  && cp -- "$REVIEW_TMP"/prompt-[1-4].txt "$PROMPT_DIR/" \
+  || { echo "ERROR: could not copy the reviewers' prompts"; exit 1; }
+
 # R1: Security (Opus) -- local CLI by default (free), Hermes only when opted in
 if $PREFER_HERMES && $HAS_HERMES; then
-  launch_hermes 1 us.anthropic.claude-opus-4-6-v1 "$REVIEW_TMP/prompt-1.txt"
-elif $HAS_CLAUDE && launch_cli 1 claude-opus "$REVIEW_TMP/prompt-1.txt"; then
+  launch_hermes 1 us.anthropic.claude-opus-4-6-v1 "$PROMPT_DIR/prompt-1.txt"
+elif $HAS_CLAUDE && launch_cli 1 claude-opus "$PROMPT_DIR/prompt-1.txt"; then
   :  # launched; if claude could not be set up, Hermes is next, as the routing tables say
 elif $HAS_HERMES; then
-  launch_hermes 1 us.anthropic.claude-opus-4-6-v1 "$REVIEW_TMP/prompt-1.txt"
+  launch_hermes 1 us.anthropic.claude-opus-4-6-v1 "$PROMPT_DIR/prompt-1.txt"
 fi
 
 # R2: Correctness -- Codex (GPT-5.5) preferred for cross-provider diversity.
 # When PREFER_HERMES is set, the Bedrock haiku path runs first.
 if $PREFER_HERMES && $HAS_HERMES; then
-  launch_hermes 2 us.anthropic.claude-haiku-4-5-20251001-v1:0 "$REVIEW_TMP/prompt-2.txt"
+  launch_hermes 2 us.anthropic.claude-haiku-4-5-20251001-v1:0 "$PROMPT_DIR/prompt-2.txt"
 elif $HAS_CODEX && { ! $PREFER_HERMES || review_helper flag REVIEW_USE_CODEX; }; then
   # A project pinned to Bedrock does not fall to OpenAI by default when Hermes is unavailable.
-  launch_cli 2 codex "$REVIEW_TMP/prompt-2.txt"
-elif $HAS_CLAUDE && launch_cli 2 claude-haiku "$REVIEW_TMP/prompt-2.txt"; then
+  launch_cli 2 codex "$PROMPT_DIR/prompt-2.txt"
+elif $HAS_CLAUDE && launch_cli 2 claude-haiku "$PROMPT_DIR/prompt-2.txt"; then
   :  # launched; if claude could not be set up, Hermes is next
 elif $HAS_HERMES; then
-  launch_hermes 2 us.anthropic.claude-haiku-4-5-20251001-v1:0 "$REVIEW_TMP/prompt-2.txt"
+  launch_hermes 2 us.anthropic.claude-haiku-4-5-20251001-v1:0 "$PROMPT_DIR/prompt-2.txt"
 fi
 
 # R3: Readability -- Google preferred (3rd provider for diversity): agy when installed and its
@@ -999,27 +1014,27 @@ fi
 # `${HAS_AGY:-false}`, not `$HAS_AGY`: an unset variable expands to an empty command, which
 # succeeds, and would route the slot to a backend nobody verified.
 if $PREFER_HERMES && $HAS_HERMES; then
-  launch_hermes 3 us.anthropic.claude-sonnet-4-6-v1 "$REVIEW_TMP/prompt-3.txt"
+  launch_hermes 3 us.anthropic.claude-sonnet-4-6-v1 "$PROMPT_DIR/prompt-3.txt"
 elif ${HAS_AGY:-false} && [ -n "${AGY_SELECTED_MODEL:-}" ] \
     && { ! $PREFER_HERMES || review_helper flag REVIEW_USE_AGY; } \
-     && launch_cli 3 agy "$REVIEW_TMP/prompt-3.txt"; then
+     && launch_cli 3 agy "$PROMPT_DIR/prompt-3.txt"; then
   :  # launched; if agy could not be set up, launch_cli returned 1 and the next backend runs
 elif $HAS_GEMINI && review_helper flag REVIEW_USE_GEMINI \
-     && launch_cli 3 gemini "$REVIEW_TMP/prompt-3.txt"; then
+     && launch_cli 3 gemini "$PROMPT_DIR/prompt-3.txt"; then
   :  # launched; if gemini could not be set up, the next backend runs, as for agy
-elif $HAS_CLAUDE && launch_cli 3 claude-sonnet "$REVIEW_TMP/prompt-3.txt"; then
+elif $HAS_CLAUDE && launch_cli 3 claude-sonnet "$PROMPT_DIR/prompt-3.txt"; then
   :  # launched; if claude could not be set up, Hermes is next
 elif $HAS_HERMES; then
-  launch_hermes 3 us.anthropic.claude-sonnet-4-6-v1 "$REVIEW_TMP/prompt-3.txt"
+  launch_hermes 3 us.anthropic.claude-sonnet-4-6-v1 "$PROMPT_DIR/prompt-3.txt"
 fi
 
 # R4: Spec-contract (Opus) -- local CLI by default (free), Hermes only when opted in
 if $PREFER_HERMES && $HAS_HERMES; then
-  launch_hermes 4 us.anthropic.claude-opus-4-6-v1 "$REVIEW_TMP/prompt-4.txt"
-elif $HAS_CLAUDE && launch_cli 4 claude-opus "$REVIEW_TMP/prompt-4.txt"; then
+  launch_hermes 4 us.anthropic.claude-opus-4-6-v1 "$PROMPT_DIR/prompt-4.txt"
+elif $HAS_CLAUDE && launch_cli 4 claude-opus "$PROMPT_DIR/prompt-4.txt"; then
   :  # launched; if claude could not be set up, Hermes is next, as the routing tables say
 elif $HAS_HERMES; then
-  launch_hermes 4 us.anthropic.claude-opus-4-6-v1 "$REVIEW_TMP/prompt-4.txt"
+  launch_hermes 4 us.anthropic.claude-opus-4-6-v1 "$PROMPT_DIR/prompt-4.txt"
 fi
 
 # Provider diversity, counted from what was launched: predicted from what is installed, it counted
@@ -1124,9 +1139,12 @@ Run with `run_in_background: true`. Export the detection variables first: the sc
 shell and inherits nothing from the call that wrote it.
 
 ```bash
-export REVIEW_TMP HAS_CLAUDE HAS_HERMES HAS_CODEX HAS_GEMINI HAS_AGY AGY_SELECTED_MODEL PREFER_HERMES \
-  MMCRA_SKIP_AGY_SANDBOX_CHECK MMCRA_AGY_STRICT_SOCKETS REVIEW_USE_AGY REVIEW_USE_GEMINI \
-  REVIEW_USE_CODEX
+export REVIEW_TMP HAS_CLAUDE HAS_HERMES HAS_CODEX HAS_GEMINI HAS_AGY PREFER_HERMES
+# Only those that are set, as above.
+for v in AGY_SELECTED_MODEL MMCRA_SKIP_AGY_SANDBOX_CHECK MMCRA_AGY_STRICT_SOCKETS REVIEW_USE_AGY \
+    REVIEW_USE_GEMINI REVIEW_USE_CODEX; do
+  eval "[ -n \"\${$v+set}\" ]" && export "$v"
+done
 rm -f "$REVIEW_TMP/runner-exit"
 "$REVIEW_TMP/run-reviewers.sh" 2>&1 | tee "$REVIEW_TMP/round.log"
 echo "${PIPESTATUS[0]}" > "$REVIEW_TMP/runner-exit"   # however it ended: the poll below stops on it

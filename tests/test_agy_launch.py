@@ -448,6 +448,11 @@ class TestAgyLaunch(AgyCase):
         # hermes would then know.
         assert picked.prompt_path.parent not in (tmp_path, out_dir)
         assert str(out_dir) not in " ".join(picked.cmd)
+        # And from a workspace of its own, not the repository: its -z path ignores
+        # --ignore-rules, and would read the branch's AGENTS.md from where it runs.
+        assert picked.workspace is not None and picked.workspace != tmp_path
+        assert (picked.workspace / ".git").is_dir()
+        assert picked.cmd[:3] == ["env", "-u", "TERMINAL_CWD"]
         reviewers._release_scratch()
 
     def test_claude_runs_in_the_repository_under_review(self, tmp_path: Path) -> None:

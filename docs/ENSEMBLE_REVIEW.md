@@ -70,9 +70,9 @@ LLM review. It collects:
 
 - **Git state**: branch, commit, status, untracked files, cached changes
 - **Signed manifest metadata**: SHA, top-level fields for each
-  configured manifest (configure `SIGNED_MANIFESTS` for your project)
+  configured manifest (`signed_manifests` in `review-config.json` at the repo root)
 - **Changed artifact fields**: key fields from any modified JSON under
-  configured `ARTIFACT_DIRS`
+  `artifact_dirs` (in `review-config.json`; `data/` and `docs/` by default)
 - **Suspicious patterns**: fill_value=0, bare except, hardcoded paths
 - **Test/implementation alignment**: implementation changes without test
   changes and vice versa

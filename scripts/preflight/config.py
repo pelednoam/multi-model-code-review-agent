@@ -1,8 +1,9 @@
 """Configuration constants for the preflight audit.
 
-Edit ``SIGNED_MANIFESTS`` and ``ARTIFACT_DIRS`` to point at your
-project's signed JSON artifacts and the directories whose changed JSON
-files should be parsed.
+``SIGNED_MANIFESTS`` and ``ARTIFACT_DIRS`` -- the project's signed JSON
+artifacts and the directories whose changed JSON files are parsed -- come from
+``review-config.json`` (``signed_manifests``, ``artifact_dirs``), as the layout
+does.
 
 **A host project should not edit this file.** ``install.sh`` copies it into
 every host, so an edit here is overwritten the next time the agent is
@@ -94,7 +95,18 @@ def _manifests(name: str) -> dict[str, str]:
     ):
         _complain(f"has a {name!r} that is not an object of names to paths")
         return {}
-    return dict(found)
+    # Inside the repository only: the file is the branch's to write, and a path out of
+    # it (absolute, or with "..") would read a host's JSON into the audit, which goes
+    # to every reviewer.
+    root = REPO_ROOT.resolve()
+    kept = {}
+    for key, value in found.items():
+        target = (root / value).resolve()
+        if Path(value).is_absolute() or not target.is_relative_to(root):
+            _complain(f"has a {name!r} entry outside the repository: {value!r}")
+            continue
+        kept[key] = value
+    return kept
 
 
 # Map logical names to repo-relative paths of JSON artifacts whose contents should

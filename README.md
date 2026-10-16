@@ -591,7 +591,7 @@ Put the layout in `review-config.json` at the project root, which
 
 Defaults work fine for projects using the conventional `src/` /
 `tests/` layout. The audit will report no signed-manifest results
-rather than failing, but `SOURCE_DIRS` mismatch *is* surfaced as a
+rather than failing, but a `source_dirs` mismatch *is* surfaced as a
 warning so you don't miss it.
 
 ### 3. Run from Claude Code
@@ -809,9 +809,11 @@ have detected it via fingerprint matching and exited with code 2
 
 For sensitive/FDA-path code where data-at-rest guarantees matter, use
 Hermes+Bedrock for all reviewers. Its writes are not prevented, so prefer
-the convergence loop, whose tamper check reports them -- in tracked,
-untracked and newly created ignored files, not a change to an ignored file
-already there (full mode does not check).
+the convergence loop, whose tamper check reports them -- in tracked and
+untracked files (by content), ignored files (by size and modification
+time), the repository's git hooks and config, and the home's startup
+files; it does not see other writes outside the repository, and full mode
+does not check.
 
 ## Customization
 

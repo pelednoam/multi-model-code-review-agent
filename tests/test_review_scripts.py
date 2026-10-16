@@ -3617,6 +3617,22 @@ class TestTamper:
         touched = tamper.changed(before, tamper.snapshot(repo))
         assert any(".bashrc" in line for line in touched)
 
+    def test_a_file_planted_in_the_round_directory_is_reported(
+        self, tmp_path: Path
+    ) -> None:
+        # Excluded whole, the round directory was a place to plant a file unseen.
+        from scripts.review_loop import tamper
+
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        round_dir = tmp_path / "data" / "round-1"
+        round_dir.mkdir(parents=True)
+        before = tamper.snapshot(tmp_path, round_dir)
+        (round_dir / "raw-1.txt").write_text("")  # the round's own
+        (round_dir / "evil.py").write_text("")
+        touched = tamper.report(tmp_path, before, round_dir)
+        assert any("evil.py" in line for line in touched)
+        assert not any("raw-1.txt" in line for line in touched)
+
     def test_an_unchanged_tree_reports_nothing(self, tmp_path: Path) -> None:
         from scripts.review_loop import tamper
 

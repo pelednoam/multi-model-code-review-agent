@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .config import (
+    MAX_ARTIFACT_BYTES,
     REPO_ROOT,
     SELF_SKIP_PREFIXES,
     SOURCE_DIRS,
@@ -46,7 +47,14 @@ def scan_suspicious_patterns(
         if _should_skip(f) or not is_safe_relpath(f):
             continue
         path = REPO_ROOT / f
-        if not path.exists() or path.suffix != ".py":
+        if path.suffix != ".py":
+            continue
+        # A regular file in the repository, and not too big: a committed symlink was
+        # followed to whatever it named -- a host file, quoted into the audit, or a
+        # device that never ends -- and read whole.
+        if path.is_symlink() or not path.is_file():
+            continue
+        if path.stat().st_size > MAX_ARTIFACT_BYTES:
             continue
         try:
             # Numbered at "\n" alone, as git and the loop's re-quote number them, and

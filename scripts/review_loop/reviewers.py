@@ -581,6 +581,24 @@ def _pick_backend(slot: int, round_: _Round) -> _Picked | None:
             # would then know: a directory of the slot's own.
             prompt_path = _scratch_dir(f"mmcra-prompt-{slot}-") / "prompt.txt"
             cmd = _hermes_cmd(prompt_path, cmd[cmd.index("-m") + 1])
+            # Run from an empty directory outside the repository, as gemini is: its -z
+            # path ignores --ignore-rules (measured in its source: the one-shot agent is
+            # built without skip_context_files), so it reads AGENTS.md and the rest from
+            # its working directory -- TERMINAL_CWD, if set, cleared -- and .hermes.md up
+            # to a .git, which the workspace has, so the search ends there.
+            workspace = _empty_workspace_outside_repo(round_.repo)
+            if workspace is None:
+                print(f"  R{slot}: hermes has no workspace outside the repo (TMPDIR?)")
+                backends["hermes"] = False
+                continue
+            try:
+                (workspace / ".git").mkdir(exist_ok=True)
+            except OSError as exc:
+                print(f"  R{slot}: could not prepare hermes's workspace ({exc})")
+                backends["hermes"] = False
+                continue
+            wrapped = ["env", "-u", "TERMINAL_CWD", *cmd]
+            return _Picked(wrapped, "hermes", label, workspace, prompt_path)
         if cmd[0] == "codex":
             # Each MCP server it is configured with, off by name: each one a tool, and a
             # process, outside its sandbox. Not knowing which there are, it does not run.

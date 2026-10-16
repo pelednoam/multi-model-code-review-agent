@@ -251,6 +251,10 @@ def _preflight_script(repo: Path) -> Path:
     return SCRIPTS_DIR / "review_preflight.py"
 
 
+#: How long the preflight may take: its coverage step runs the project's test suite.
+_PREFLIGHT_TIMEOUT = 1800
+
+
 def run_preflight(round_dir: Path, repo: Path) -> Path:
     """Run preflight audit, return path to audit JSON.
 
@@ -266,10 +270,16 @@ def run_preflight(round_dir: Path, repo: Path) -> Path:
     # directory is kept, and a raw audit there would be what the scrub keeps out.
     raw = round_dir / ".audit.raw.json"
     try:
-        result = run(
-            [sys.executable, str(_preflight_script(repo)), "--output", str(raw)],
-            cwd=repo,
-        )
+        try:
+            result = run(
+                [sys.executable, str(_preflight_script(repo)), "--output", str(raw)],
+                cwd=repo,
+                # Generous -- it runs the project's tests for coverage -- but not none:
+                # the branch's own tests decide how long they take.
+                timeout=_PREFLIGHT_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"preflight did not finish in {exc.timeout}s") from exc
         if not raw.exists():
             raise RuntimeError(
                 f"preflight failed (no audit JSON, exit {result.returncode}): "

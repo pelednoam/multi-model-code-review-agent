@@ -289,8 +289,9 @@ def main() -> int:
         help=(
             "Run the reviewers and write their findings, then stop. Does not "
             "run the merge agent and does not touch the working tree. Exits "
-            "10 when there are blocking findings, 0 when every reviewer answered "
-            "and none is blocking, 11 when one produced nothing, 7 when none did."
+            "10 when there are blocking findings (whether or not every reviewer "
+            "answered), 0 when every reviewer answered and none is blocking, 11 "
+            "when nothing is blocking but one produced nothing, 7 when none did."
         ),
     )
     parser.add_argument(

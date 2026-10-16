@@ -243,10 +243,16 @@ source .venv/bin/activate
 python3 scripts/review_preflight.py --output "$REVIEW_TMP/runtime-audit.raw.json"
 # Each quoted line re-read whole from its source -- an older installed preflight cuts them at 120
 # characters, part of a credential with them -- then its strings scrubbed, as the diff is.
-python3 -I scripts/review_loop/runner_entry.py audit-requote "$REVIEW_TMP/runtime-audit.raw.json" "$PWD"
-python3 scripts/scrub_diff.py --json < "$REVIEW_TMP/runtime-audit.raw.json" \
-  > "$REVIEW_TMP/runtime-audit.json"
-status=$?
+# A missing audit, or a re-read that failed, is status 2 -- STOP -- not the scrub's exit 1 that a
+# missing input file would also give, which reads as "redacted, carry on".
+status=2
+if [ -f "$REVIEW_TMP/runtime-audit.raw.json" ] \
+  && python3 -I scripts/review_loop/runner_entry.py audit-requote \
+       "$REVIEW_TMP/runtime-audit.raw.json" "$PWD"; then
+  python3 scripts/scrub_diff.py --json < "$REVIEW_TMP/runtime-audit.raw.json" \
+    > "$REVIEW_TMP/runtime-audit.json"
+  status=$?
+fi
 echo "audit scrub exit $status"
 # Not left beside the prompts whatever happened, nor an incomplete scrubbed copy to be used.
 rm -f -- "$REVIEW_TMP/runtime-audit.raw.json"
@@ -271,8 +277,11 @@ Write `$REVIEW_TMP/context.raw.md` with:
 Then scrub it as the diff is -- it quotes project files, and goes into every prompt, to Google too when agy runs -- and use only the scrubbed copy:
 
 ```bash
-python3 scripts/scrub_diff.py --text < "$REVIEW_TMP/context.raw.md" > "$REVIEW_TMP/context.md"
-status=$?
+status=2   # as above: a missing bundle is a stop, not the scrub's exit 1
+if [ -f "$REVIEW_TMP/context.raw.md" ]; then
+  python3 scripts/scrub_diff.py --text < "$REVIEW_TMP/context.raw.md" > "$REVIEW_TMP/context.md"
+  status=$?
+fi
 echo "scrub exit $status"
 # Not left beside the prompts for the round, where the gemini CLI could read it, whatever
 # happened -- nor an incomplete scrubbed copy to be used.
@@ -755,8 +764,20 @@ ROUND_DEADLINE=$((REVIEWER_TIMEOUT + 90))
 # - Prompt content visible in /proc/PID/cmdline to local users
 # For sensitive reviews with large diffs, prefer Claude CLI.
 launch_hermes() {
-  local num=$1 hermes_model=$2 prompt_file=$3
-  { timeout --foreground -k 10 "$REVIEWER_TIMEOUT" hermes -z "$(cat "$prompt_file")" \
+  local num=$1 hermes_model=$2 prompt_file=$3 hermes_ws
+  # From an empty directory outside the repository, as gemini is: hermes's -z path ignores
+  # --ignore-rules (its one-shot agent is built without skip_context_files), so it reads the
+  # branch's AGENTS.md and the rest from where it runs -- TERMINAL_CWD cleared -- and .hermes.md
+  # up to a .git, which the workspace has, so the search ends there.
+  make_scratch hermes_ws mmcra-ws- && mkdir -p "$hermes_ws/.git" \
+    || { echo "R$num: SKIPPED (no directory for hermes)"; return 1; }
+  case "$hermes_ws/" in
+    "$(cd "$REVIEW_ROOT" && pwd -P)"/*)
+      echo "R$num: SKIPPED (hermes's directory $hermes_ws is inside the repo; check TMPDIR)"
+      return 1 ;;
+  esac
+  { cd "$hermes_ws" && env -u TERMINAL_CWD timeout --foreground -k 10 "$REVIEWER_TIMEOUT" \
+      hermes -z "$(cat "$prompt_file")" \
       -m "$hermes_model" --provider bedrock -t file --yolo --ignore-rules \
       </dev/null \
       1>"$OUT_DIR/stdout-$num.txt" \
@@ -1503,4 +1524,4 @@ concluding anything from a probe, and never suppress its output.
 
 - **Quick mode**: stays within Anthropic (Claude Code subagents).
 - **Full mode**: Hermes reviewers stay in your AWS. CLI reviewers go through their respective provider's infrastructure.
-- **For sensitive/FDA-path code**: use Hermes+Bedrock for all 4 reviewers (data-at-rest in your AWS account; writes are not prevented, so prefer the convergence loop, whose tamper check reports them -- in tracked, untracked and newly created ignored files, not a change to an ignored file already there).
+- **For sensitive/FDA-path code**: use Hermes+Bedrock for all 4 reviewers (data-at-rest in your AWS account; writes are not prevented, so prefer the convergence loop, whose tamper check reports them -- in tracked and untracked files (by content), ignored files (by size and modification time), the repository's git hooks and config, and the home's startup files; not other writes outside the repository).

@@ -35,6 +35,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import os
+import re
 import subprocess
 import sys
 import time
@@ -157,6 +158,28 @@ def changed(before: str, after: str) -> list[str]:
     return sorted(now - was) + gone
 
 
+#: What the round itself writes into its directory by the time the check runs: the
+#: diff and audit before the reviewers start, each slot's prompt and backend, and the
+#: outputs published once they stop (``reviewers._OUTPUTS``).
+_ROUND_FILES = re.compile(
+    r"(?:diff\.patch|audit\.json|\.audit\.raw\.json"
+    r"|(?:prompt|backend|raw|stderr|codex-out)-\d\.txt)"
+)
+
+
+def _strangers(round_dir: Path) -> list[str]:
+    """Anything in the round's directory the round did not write: excluded from the
+    tree's snapshot as a whole, it was a place a reviewer could plant a file unseen,
+    for --auto-commit's `git add -A` to commit where the directory is in the tree."""
+    try:
+        names = sorted(entry.name for entry in round_dir.iterdir())
+    except OSError:
+        return []
+    return [
+        f"?? {round_dir / name}" for name in names if not _ROUND_FILES.fullmatch(name)
+    ]
+
+
 def report(repo: Path, before: str, exclude: Path | None = None) -> list[str]:
     """Say what the reviewers wrote, loudly, and hand back the list.
 
@@ -165,6 +188,8 @@ def report(repo: Path, before: str, exclude: Path | None = None) -> list[str]:
     in a tree whose next command is very often ``git add -A``.
     """
     touched = changed(before, snapshot(repo, exclude))
+    if exclude is not None:
+        touched += _strangers(exclude)
     if not touched:
         return []
     print("\nWARNING: the reviewers changed the working tree. They must not.")

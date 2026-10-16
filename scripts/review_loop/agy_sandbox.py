@@ -3,8 +3,8 @@
 agy cannot make itself read-only (measured; docs/agy-sandbox.md has it), so the
 boundary is the operating system's. Measured under this wrapper with agy in its
 most permissive mode (accept-edits, which the reviewers never pass), agy's own
-write_to_file failed with "read-only file system". ``agy_sandbox_check`` proves it. What it closes and what it does not is
-docs/agy-sandbox.md.
+write_to_file failed with "read-only file system". ``agy_sandbox_check`` proves it.
+What it closes and what it does not is docs/agy-sandbox.md.
 """
 
 from __future__ import annotations
@@ -237,8 +237,8 @@ def agy_wrapper_parts(
     # it is sent. Not /, which cannot be hidden without hiding everything. Parents
     # first: one mounted over a child already hidden took the child's mount point
     # with it, and the check found nothing where it looked.
-    emptied = {*user_homes(), *(p.resolve() for p in hidden)} - {Path("/")}
-    for directory in sorted(emptied, key=lambda d: (len(d.parts), str(d))):
+    tmpfs_dirs = {*user_homes(), *(p.resolve() for p in hidden)} - {Path("/")}
+    for directory in sorted(tmpfs_dirs, key=lambda d: (len(d.parts), str(d))):
         wrap += ["--tmpfs", str(directory)]
     exe = shutil.which("agy")
     if exe:

@@ -94,6 +94,11 @@ SECRET_READS = (
     "~/.config/heroku/**", "//**/*.tfstate", "//**/*.tfstate.backup", "//**/*.tfvars",
     # Container and orchestrator secret mounts, and the host's private TLS keys.
     "//run/secrets/**", "//var/run/secrets/**", "//etc/ssl/private/**",
+    "~/snap/**/.mozilla/**", "~/snap/**/.config/**", "~/.config/sops/**",
+    "~/.config/age/**", "~/.age/**", "~/.yarnrc.yml", "//**/.yarnrc.yml",
+    "~/.config/composer/auth.json", "~/.composer/auth.json", "//**/auth.json",
+    "~/.nuget/**", "~/.ivy2/.credentials", "~/.local/share/fish/fish_history",
+    "~/.node_repl_history", "~/.mysql_history", "~/.sqlite_history",
     # Browsers' and editors' profiles: cookies, saved sign-ins, extension tokens.
     "~/.config/google-chrome/**", "~/.config/chromium/**", "~/.mozilla/**",
     "~/.config/Code/**",
@@ -141,6 +146,13 @@ def claude_disallowed(tools: str) -> list[str]:
     return [*denied, *(f"Read({path})" for path in _secret_reads())]
 
 
+def rule_safe(path: str) -> bool:
+    """Whether ``path`` can go into a permission rule as itself: no whitespace, which
+    separates rules, nor a comma, parenthesis or glob character, which the rule's own
+    syntax reads."""
+    return not any(c.isspace() or c in ",()*?[]{}" for c in path)
+
+
 def _secret_reads() -> list[str]:
     """``SECRET_READS``, and its ``~/`` entries again under the account's own home
     (``with_account_home``)."""
@@ -161,12 +173,12 @@ def with_account_home(paths: tuple[str, ...]) -> list[str]:
     if not account or Path(account) == Path(os.path.expanduser("~")):
         return reads
     root = account.rstrip("/")
-    if any(c.isspace() for c in root):
-        # --disallowedTools takes its rules space-separated: a rule with a space in it
-        # would be two, each meaning something else.
+    if not rule_safe(root):
+        # --disallowedTools takes its rules space-separated, with ( ) around a path and
+        # globs in it: a rule with any of those in its path would mean something else.
         # To stderr: the runner reads stdout as the rules (``runner_cli claude-deny``).
         print(
-            f"  WARNING: claude's credential denies do not cover {account!r}: a space",
+            f"  WARNING: claude's credential denies do not cover {account!r}: its name",
             file=sys.stderr,
         )
         return reads

@@ -553,6 +553,11 @@ def _launch_one(
     return slot, proc, backend, out_f, err_f
 
 
+#: The prompt path _choose_command builds a hermes command with before the backend is
+#: settled; a hermes slot's own (a directory of its own) replaces it once it is.
+_UNCHOSEN_PROMPT = Path("prompt.txt")
+
+
 def _pick_backend(slot: int, round_: _Round) -> _Picked | None:
     """The backend for ``slot`` -- or None if none is available.
 
@@ -563,7 +568,7 @@ def _pick_backend(slot: int, round_: _Round) -> _Picked | None:
     backends = dict(round_.backends)
     while True:
         choice = _choose_command(
-            slot, Path("prompt.txt"), round_.out_dir, backends, round_.prefer_hermes
+            slot, _UNCHOSEN_PROMPT, round_.out_dir, backends, round_.prefer_hermes
         )
         if choice is None:
             return None
@@ -601,7 +606,7 @@ def _pick_backend(slot: int, round_: _Round) -> _Picked | None:
                 return _Picked(cmd, "gemini", label, workspace)
             print(f"  R{slot}: gemini has no workspace outside the repo (see TMPDIR)")
         else:
-            prepared = _prepare_agy(slot, cmd, round_.repo)
+            prepared = _prepare_agy(slot, cmd, round_.repo, round_.round_dir.parent)
             if prepared is not None:
                 wrapped, workspace = prepared
                 return _Picked(wrapped, "agy", label, workspace)
@@ -675,9 +680,12 @@ def _end_gemini_search(workspace: Path) -> None:
 
 
 def _prepare_agy(
-    slot: int, cmd: list[str], repo: Path | None
+    slot: int, cmd: list[str], repo: Path | None, session: Path | None = None
 ) -> tuple[list[str], Path] | None:
-    """agy's command inside its sandbox, and its workspace -- or None, saying why."""
+    """agy's command inside its sandbox, and its workspace -- or None, saying why.
+
+    ``session`` is the loop's session directory, which holds every round's prompts and
+    outputs: hidden too, where --review-dir puts it outside the repository."""
     workspace = _empty_workspace_outside_repo(repo)
     if workspace is None:
         print(f"  R{slot}: agy has no workspace outside the repo (see TMPDIR)")
@@ -692,7 +700,10 @@ def _prepare_agy(
         # hermes's prompts: outside /tmp, which is emptied inside, TMPDIR would leave
         # them readable. Its own workspace and state are mounted after.
         private = [d for d in _ROUND_SCRATCH if d not in (workspace, state)]
-        sandbox = agy_wrapper(workspace, state, (*_under_review(repo), *private))
+        sessions = [session] if session is not None else []
+        sandbox = agy_wrapper(
+            workspace, state, (*_under_review(repo), *private, *sessions)
+        )
     except OSError as exc:
         print(f"  R{slot}: could not prepare agy's sandbox ({exc})")
         return None

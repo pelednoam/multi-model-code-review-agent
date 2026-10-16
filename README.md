@@ -770,9 +770,10 @@ have detected it via fingerprint matching and exited with code 2
   children to different models. Claude Code spawns parallel processes.
 - **Secrets are scrubbed before anything is sent**: the diff on its way in
   from git, through a pipe (a redaction stops the review). The audit and
-  full mode's context bundle are written once unscrubbed to a private
-  temporary directory, scrubbed, and the raw copy removed; a failed scrub
-  stops the review.
+  full mode's context bundle are written once unscrubbed -- in full mode
+  to its private temporary directory, in the loop beside the round's
+  `audit.json` -- scrubbed, and the raw copy removed whatever happens; a
+  failed scrub stops the review.
   Exits non-zero on redaction, blocking the review until secrets are
   removed and rotated.
 - **Evidence-based convergence**: a single finding with artifact

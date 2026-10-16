@@ -134,6 +134,10 @@ Review evidence is persisted to `data/reviews/<timestamp>_<branch>/`:
 - `result-{1,2,3,4}.json` -- each reviewer's review, extracted from its
   output and checked (a placeholder with `"reviewer": "unknown"` for a slot
   that produced none)
+- `stdout-N.txt` / `claude-raw-N.json` / `codex-out-N.txt` -- each reviewer's
+  raw answer (`backend-N.txt` says which CLI ran it)
+- `stderr-N.txt`, `extract-result-N.err` -- why a slot produced no result
+- `round.log` -- the runner's console output
 - `report.md` -- synthesized convergence report
 
 ## Cost

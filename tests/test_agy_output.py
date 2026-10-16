@@ -13,7 +13,7 @@ from agy_case import AgyCase
 from helpers import REPO_ROOT
 
 from scripts.review_loop.artifacts import describe_outputs
-from scripts.review_loop.results import unwrap_envelope, extract_results
+from scripts.review_loop.results import extract_results, unwrap_envelope
 
 
 class TestAgyOutput(AgyCase):

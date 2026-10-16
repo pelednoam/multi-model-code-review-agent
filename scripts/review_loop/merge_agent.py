@@ -10,7 +10,12 @@ import uuid
 from pathlib import Path
 from typing import IO, Any
 
-from .claude_tools import claude_disallowed, claude_tool_names, with_account_home
+from .claude_tools import (
+    claude_disallowed,
+    claude_tool_names,
+    rule_safe,
+    with_account_home,
+)
 from .config import MERGE_TIMEOUT, REPO_ROOT
 from .proc import run
 
@@ -162,9 +167,10 @@ def _merge_denied(repo: Path) -> list[str]:
     ]
     for path in protected:
         root = str(path).rstrip("/")
-        if any(c.isspace() for c in root):
-            # --disallowedTools takes its rules space-separated: this one would be two.
-            print(f"  WARNING: the merge agent is not denied {root}: a space in it")
+        if not rule_safe(root):
+            # A space would split the rule in two; ( ) , or a glob character would
+            # change what it says (claude_tools.rule_safe).
+            print(f"  WARNING: the merge agent is not denied {root!r}: its name")
         else:
             paths += [f"/{root}", f"/{root}/**"]
     paths += home_rules

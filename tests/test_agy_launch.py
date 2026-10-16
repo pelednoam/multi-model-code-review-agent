@@ -38,8 +38,11 @@ class TestAgyLaunch(AgyCase):
         assert isinstance(cmd, list)
         wrap = cmd[: cmd.index("--") + 1]
         state = Path(wrap[wrap.index(str(agy_sandbox.agy_state_dir())) - 1])
-        hidden = reviewers._under_review(None)  # the repository, and this checkout
-        assert wrap == agy_sandbox.agy_wrapper(workspace, state, hidden)
+        # The repository, the working directory and this checkout, and the session's
+        # directory, whose rounds hold every prompt and output: each emptied inside.
+        hidden = [*reviewers._under_review(None), tmp_path.parent]
+        mounted = {wrap[i + 1] for i, arg in enumerate(wrap) if arg == "--tmpfs"}
+        assert {str(h.resolve()) for h in hidden} <= mounted
         assert cmd[len(wrap)] == "agy"
         # A throwaway copy of agy's state, holding the sign-in and nothing else.
         assert sorted(p.name for p in state.iterdir()) == ["antigravity-oauth-token"]

@@ -1565,6 +1565,7 @@ class TestCoverageSourceSpec:
             return subprocess.CompletedProcess(cmd, 1, "", "")
 
         (tmp_path / "src").mkdir()
+        (tmp_path / "tests").mkdir()
         monkeypatch.setattr(cov_mod, "REPO_ROOT", tmp_path)
         monkeypatch.setattr(cov_mod, "SOURCE_DIRS", ["src/"])
         monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
@@ -1591,6 +1592,7 @@ class TestCoverageSourceSpec:
         from scripts.preflight import coverage as cov_mod
 
         (tmp_path / "src").mkdir()
+        (tmp_path / "tests").mkdir()
         monkeypatch.setattr(cov_mod, "REPO_ROOT", tmp_path)
         # The gate itself, which is skipped inside a test run.
         monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
@@ -2937,6 +2939,8 @@ class TestCredentialShapes:
             '"postgresql://alice' + ":K7a');s9" + '@db/prod"',
             "postgres://u" + ":${DB_PASS:-hunter2}" + "@db",
             "postgres://u" + ":{x!y-9}" + "@db",
+            "postgres://u" + ":#Ab9x!" + "@db",
+            "postgres://u" + ':ab"cd9' + "@db",
             "ya" + "29." + "a" * 30,
             "1/" + "/0" + "a" * 40,
             "GOC" + "SPX-" + "a" * 28,
@@ -2959,7 +2963,7 @@ class TestCredentialShapes:
              "url-placeholder-word-prefix",
              "url-upper-case-scheme", "url-query-chars-password", "url-dotted-user",
              "url-double-quoted-apostrophe", "url-shell-default-password",
-             "url-braced-password",
+             "url-braced-password", "url-hash-first-password", "url-dquote-password",
              "google-oauth-access", "google-oauth-refresh",
              "google-client-secret", "huggingface", "npm", "pypi", "google-api-key", "github-fine-grained", "github-app",
              "stripe-live", "slack", "slack-app", "slack-webhook", "discord-webhook",
@@ -2978,6 +2982,12 @@ class TestCredentialShapes:
         started = clock.monotonic()
         scrub_diff.scrub_line(line, False)
         assert clock.monotonic() - started < 2
+
+    def test_a_password_ending_in_a_backslash_is_redacted(self) -> None:
+        # Its backslash and the "@" were read as one escaped character, and there was
+        # no "@" left to end the password at.
+        line = "+dsn: 'postgresql://alice:" + "p4ss\\" + "@db/prod'\n"
+        assert scrub_diff.scrub_line(line, False) != line
 
     def test_an_escaped_apostrophe_closes_no_string(self) -> None:
         # Its \' was taken for the end of a single-quoted string, and the password
@@ -3044,6 +3054,7 @@ class TestCredentialShapes:
             "http://localhost:/@scope/pkg",
             "http://localhost:000080/@scope/pkg",
             "git+ssh://git@github.com:org/repo.git@v1.0",
+            "'https://example.com'.replace('x','mailto:ops@example.com')",
             "postgres://u:{{password}}@h",
             "postgres://u:{password!r}@h",
             "postgres://u:%(pw)d@h",
@@ -3298,6 +3309,15 @@ class TestSecretReads:
         for suffix in scrub_diff.SECRET_SUFFIXES:
             assert f"//**/*{suffix}" in SECRET_READS, suffix
 
+    @pytest.mark.parametrize(
+        "name", ["/home/a b", "/home/a(b)", "/home/a,b", "/home/*"]
+    )
+    def test_a_path_the_rule_syntax_reads_is_not_put_in_a_rule(self, name: str) -> None:
+        # Only whitespace was checked; a comma, parenthesis or glob in the path changed
+        # what the rule said.
+        assert not claude_tools.rule_safe(name)
+        assert claude_tools.rule_safe("/home/plain-name_1.x")
+
     def test_shell_startup_and_history_files_are_denied(self) -> None:
         # It was measured reading ~/.bashrc, where API keys are exported.
         for path in ("~/.bashrc", "~/.zshrc", "~/.bash_history", "~/.pgpass"):
@@ -3333,7 +3353,7 @@ class TestSecretReads:
         monkeypatch.setenv("HOME", str(tmp_path))
         assert claude_tools._secret_reads() == list(SECRET_READS)
         out = capsys.readouterr()
-        assert out.out == "" and "a space" in out.err
+        assert out.out == "" and "its name" in out.err
 
 
 class TestScrubText:
@@ -3546,6 +3566,15 @@ class TestScrubJson:
         code, out = self._scrub({key: 1, "other": 2})
         assert code == 1 and key not in json.dumps(out) and out["other"] == 2
 
+    def test_a_redacted_key_does_not_overwrite_another(self) -> None:
+        # Renamed to "<marker> <index>", it could equal a key already there, and one
+        # of the two values was lost.
+        key = "gh" + "p_" + "a" * 36
+        taken = f"{scrub_diff.REDACTED_TEXT} 0"
+        code, out = self._scrub({key: "x", taken: "kept"})
+        assert code == 1 and isinstance(out, dict) and len(out) == 2
+        assert out[taken] == "kept"
+
     def test_an_unknown_argument_is_an_error(self) -> None:
         # Taken for diff mode, an unprefixed line passed unscrubbed with exit 0.
         done = subprocess.run(
@@ -3612,3 +3641,35 @@ class TestCodexMcpOff:
         monkeypatch.setattr(reviewers, "codex_mcp_off", lambda cwd: ["-c", "x"])
         picked = reviewers._pick_backend(2, round_)
         assert picked is not None and picked.cmd[:4] == ["codex", "exec", "-c", "x"]
+
+
+class TestCoverageDirs:
+    """The coverage gate's directories, from review-config.json."""
+
+    @pytest.mark.parametrize("path", ["/", "///", "/etc", "../elsewhere"])
+    def test_a_directory_outside_the_repository_is_not_used(self, path: str) -> None:
+        # "/" stripped of its slash was the repository root itself, and passed.
+        from scripts.preflight import coverage
+
+        assert not coverage._inside(path)
+
+    def test_a_dropped_test_directory_is_said(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from scripts.preflight import coverage
+
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "src").mkdir()
+        monkeypatch.setattr(coverage, "REPO_ROOT", tmp_path)
+        monkeypatch.setattr(coverage, "TEST_DIRS", ["tests/", "/", "missing/"])
+        monkeypatch.setattr(coverage, "SOURCE_DIRS", ["src/"])
+        monkeypatch.setattr(coverage, "is_safe_relpath", lambda p: ".." not in p)
+        assert coverage._test_dirs() == ["tests/"]
+        warnings: list[str] = []
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+        monkeypatch.setattr(
+            coverage.subprocess, "run",
+            lambda *a, **k: subprocess.CompletedProcess([], 0, "", ""),
+        )  # fmt: skip
+        coverage._run_pytest_with_coverage(warnings)
+        assert any("test_dirs ignored" in w and "missing/" in w for w in warnings)

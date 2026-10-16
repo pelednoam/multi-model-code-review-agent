@@ -148,6 +148,10 @@ _URL_PLACEHOLDER = (
 #: that a long line is scanned in linear time.
 _SCHEME_NAME = r"[a-zA-Z][a-zA-Z0-9+.-]{0,31}:"
 _URL_SCHEME = r"(?<![a-zA-Z0-9+.-])" + _SCHEME_NAME
+#: After a quote, ' or ", what says the string goes on: not the end of a string --
+#: followed by , . ) ] } ; : + or a space, as in ['http://h:8080','ops@x'] or
+#: 'https://h'.format(...) -- or the pattern runs from one string into the next.
+_QUOTE_GOES_ON = r"(?![.,\])};:+\s])"
 #: The user: like the password (``_URL_PASSWORD_CHAR``), not past a quote that closes
 #: a string -- or it ran from one into the next: ['https://example.com','mailto:a@b'].
 #: Without an @ in it (``_URL_USER_NO_AT``) or with one (``_URL_USER_WITH_AT``), whose
@@ -156,7 +160,7 @@ _URL_SCHEME = r"(?<![a-zA-Z0-9+.-])" + _SCHEME_NAME
 _URL_USER_DOUBLE_QUOTED = r"//[^\s/:\"?#\[\]]{0,256}:"
 _URL_USER_DOUBLE_QUOTED_NO_AT = r"//[^\s/:\"?#\[\]@]{0,256}:"
 #: The user without an @ in it, and with one.
-_URL_USER_CHAR = r"(?:\\[^\s@]|[^\s/:\"?#\[\]'\\@]|'(?![,\])};:+\s]))"
+_URL_USER_CHAR = r"(?:\\[^\s@]|[^\s/:\"?#\[\]'\\@]|['\"]" + _QUOTE_GOES_ON + ")"
 _URL_USER_NO_AT = r"//" + _URL_USER_CHAR + r"{0,256}:"
 _URL_USER_WITH_AT = (
     r"//" + _URL_USER_CHAR + r"{0,256}@" + r"(?:" + _URL_USER_CHAR + r"|@){0,256}:"
@@ -171,21 +175,27 @@ _URL_USER_WITH_AT = (
 #: or a placeholder.
 _URL_PORT_FIELD = r"(?:" + _URL_FIELD + r"|\$\{[A-Za-z_]\w{0,64}:?[-=]\d{1,16}\})"
 _URL_NOT_A_PASSWORD = (
-    r"(?!\d{0,16}[/?#])(?!" + _URL_PORT_FIELD + r"[/?#])(?!" + _URL_PLACEHOLDER + r"@)"
+    r"(?!\d{1,16}[/?#]|/)(?!"
+    + _URL_PORT_FIELD
+    + r"[/?#])(?!"
+    + _URL_PLACEHOLDER
+    + r"@)"
 )
 #: A character of the password: it may hold ' (base64 and generated ones do), but
 #: not a quote that closes a string literal -- one followed by , ) ] } ; : + or a
 #: space -- or the pattern ran from one string into the next
 #: (['http://h:8080','ops@x']). A backslash and what follows it are one character, so
 #: an escaped quote (\') closes nothing.
-_URL_PASSWORD_CHAR = r"(?:\\[^\s]|[^\s@\"?#'\\]|'(?![,\])};:+\s]))"
+_URL_PASSWORD_CHAR = r"(?:\\[^\s@]|\\(?=@)|[^\s@\"?#'\\]|['\"]" + _QUOTE_GOES_ON + ")"
 #: The password: with no "/" in it, any length -- the scan stops at the next "/", and
 #: every URL after it has one, so it stays linear -- and it may hold ? and #, as
 #: generated ones do; or with a "/", which ends userinfo only by the RFC and is
 #: common in base64, up to 256 characters with no ? or #, which would then be a
 #: query or fragment.
 _URL_PASSWORD = (
-    r"(?:(?:\\[^\s/]|[^\s@\"'/\\]|'(?![,\])};:+\s]))+|"
+    r"(?:(?:\\[^\s/@]|\\(?=@)|[^\s@\"'/\\]|['\"]"
+    + _QUOTE_GOES_ON
+    + ")+|"
     + _URL_PASSWORD_CHAR
     + r"{1,256})"
 )
@@ -233,7 +243,9 @@ SHAPE_PATTERNS = [
         _URL_SCHEME
         + _URL_USER_WITH_AT
         + _URL_NOT_A_PASSWORD
-        + r"(?:\\[^\s/]|[^\s@\"'/\\]|'(?![,\])};:+\s]))+@"
+        + r"(?:\\[^\s/@]|\\(?=@)|[^\s@\"'/\\]|['\"]"
+        + _QUOTE_GOES_ON
+        + r")+@"
     ),
     # Inside double quotes, where a ' is no string's end and ends nothing: the password
     # runs to the "@" (K7a');s9 is one).
@@ -620,8 +632,12 @@ def scrub_json() -> int:
             out: dict[str, object] = {}
             for index, (key, value) in enumerate(node.items()):
                 name = walk(key)
-                if name == REDACTED_TEXT:
-                    name = f"{REDACTED_TEXT} {index}"  # keys stay distinct
+                if name != key:
+                    # Distinct from every other key, the document's own included: a
+                    # collision dropped one of the two values.
+                    name = f"{REDACTED_TEXT} {index}"
+                    while name in node or name in out:
+                        name += "_"
                 if _secret_field(key) and _holds_value(value):
                     redacted += 1
                     out[str(name)] = REDACTED_TEXT

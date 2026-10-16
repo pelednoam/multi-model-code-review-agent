@@ -14,14 +14,16 @@ from .config import COVERAGE_TARGET, REPO_ROOT, SOURCE_DIRS, TEST_DIRS
 from .git_state import is_safe_relpath
 
 
+def _inside(path: str) -> bool:
+    """Whether a directory named in review-config.json is a relative path inside the
+    repository: an absolute one ("/" among them) or one with ".." would measure, or
+    collect tests from, somewhere else."""
+    return not Path(path).is_absolute() and is_safe_relpath(path)
+
+
 def _test_dirs() -> list[str]:
-    """``TEST_DIRS`` that are directories inside the repository: a path from
-    review-config.json, absolute or with "..", would collect tests from elsewhere."""
-    return [
-        d
-        for d in TEST_DIRS
-        if is_safe_relpath(d.rstrip("/")) and (REPO_ROOT / d).is_dir()
-    ]
+    """``TEST_DIRS`` that are directories inside the repository."""
+    return [d for d in TEST_DIRS if _inside(d) and (REPO_ROOT / d).is_dir()]
 
 
 def _changed_impl_files(changed_files: list[str]) -> list[str]:
@@ -72,12 +74,22 @@ def _run_pytest_with_coverage(warnings: list[str]) -> dict[str, Any] | None:
     # still filtered down to the changed files below, so the audit output is
     # unchanged -- it just has data in it now.
     cov_sources = [
-        "--cov=" + d.rstrip("/") for d in SOURCE_DIRS if (REPO_ROOT / d).exists()
+        "--cov=" + d.rstrip("/")
+        for d in SOURCE_DIRS
+        if _inside(d) and (REPO_ROOT / d).exists()
     ]
     if not cov_sources:
         warnings.append(
             f"coverage gate inoperative: no SOURCE_DIRS exist on disk: {SOURCE_DIRS}"
         )
+        return None
+    test_dirs = _test_dirs()
+    dropped = [d for d in TEST_DIRS if d not in test_dirs]
+    if dropped:
+        # Said, not fallen back on in silence: a config.py promise.
+        warnings.append(f"test_dirs ignored (missing or outside the repo): {dropped}")
+    if not test_dirs:
+        warnings.append(f"no usable test_dirs in {TEST_DIRS}; coverage gate skipped")
         return None
     # coverage's own data file in a directory of its own, not the repository's root:
     # left there, it was an untracked file the next review's diff took in.
@@ -98,7 +110,7 @@ def _run_pytest_with_coverage(warnings: list[str]) -> dict[str, Any] | None:
                     # exist and stay inside it -- tests/ was hard-coded, whatever the
                     # project declared -- after "--", so none is taken for an option.
                     "--",
-                    *(_test_dirs() or ["tests/"]),
+                    *test_dirs,
                 ],
                 cwd=REPO_ROOT,
                 capture_output=True,

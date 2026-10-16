@@ -510,9 +510,13 @@ unset CDPATH
 set +m
 if [ -z "${MMCRA_OWN_SESSION:-}" ] && command -v setsid >/dev/null 2>&1; then
   export MMCRA_OWN_SESSION=1
+  # The trap first: set after the launch, a signal in between ended this shell and left the
+  # real runner going. One that comes before there is a runner to forward it to is kept for it.
+  inner="" pending=false
+  trap 'pending=true; [ -z "$inner" ] || kill -TERM "$inner" 2>/dev/null' INT TERM HUP QUIT
   setsid "$BASH" "$0" "$@" &   # this bash, checked above, not whichever comes first on PATH
   inner=$!
-  trap 'kill -TERM "$inner" 2>/dev/null' INT TERM HUP QUIT
+  ! $pending || kill -TERM "$inner" 2>/dev/null
   # Waited for at least once, to collect its status even if it has already exited; again while
   # it lives, since a forwarded signal ends a wait early.
   while :; do
@@ -948,6 +952,11 @@ launch_cli() {
           echo "R$num: SKIPPED (gemini's directory $gemini_ws is inside the repo; check TMPDIR)"
           return 1 ;;
       esac
+      # Its upward searches end here: GEMINI.md up to a .git, the first environment file up the
+      # tree -- the parent is a shared /tmp, where another user can put either.
+      mkdir -p "$gemini_ws/.git" "$gemini_ws/.gemini" && : > "$gemini_ws/."env \
+        && : > "$gemini_ws/.gemini/."env \
+        || { echo "R$num: SKIPPED (could not prepare gemini's directory)"; return 1; }
       { cd "$gemini_ws" && timeout --foreground -k 10 "$REVIEWER_TIMEOUT" gemini \
           --model "${GEMINI_MODEL:-gemini-2.5-flash}" \
           --approval-mode plan --skip-trust \

@@ -52,7 +52,7 @@ def _codex_check() -> int:
     return 0 if ok else 1
 
 
-def _agy_detect(prefer_hermes: str = "false") -> int:
+def _agy_detect(prefer_hermes: str = "true") -> int:
     """Print the model agy will run, or nothing if agy is not to be used.
 
     ``prefer_hermes`` is the runner's PREFER_HERMES. Anything but exactly ``false``
@@ -237,8 +237,13 @@ def _placeholder(out: str, slot: str, why: str) -> int:
         "model": "unknown",
         "findings": [],
         "overall_assessment": (
-            f"Reviewer {slot} failed: {why}. Check extract-result-{slot}.err"
-            f" and stderr-{slot}.txt."
+            f"Reviewer {slot} failed: {why}."
+            # A slot that never ran has neither file to look in.
+            + (
+                ""
+                if why.startswith("never launched")
+                else f" Check extract-result-{slot}.err and stderr-{slot}.txt."
+            )
         ),
     }
     Path(out).write_text(json.dumps(review, indent=2), encoding="utf-8")

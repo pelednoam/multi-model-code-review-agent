@@ -362,7 +362,12 @@ class TestRunnerCliInProcess:
 
         out = tmp_path / "result-3.json"
         assert runner_cli.main(["placeholder", str(out), "3", "timed out"]) == 0
-        assert "timed out" in json.loads(out.read_text())["overall_assessment"]
+        said = json.loads(out.read_text())["overall_assessment"]
+        assert "timed out" in said and "stderr-3.txt" in said
+        # A slot that never ran has no files to point to.
+        why = "never launched (no backend available for this slot)"
+        assert runner_cli.main(["placeholder", str(out), "3", why]) == 0
+        assert "stderr" not in json.loads(out.read_text())["overall_assessment"]
         assert runner_cli.main(["claude-deny", "Read Bash(git log:*)"]) == 0
         said = capsys.readouterr()
         assert "Bash" not in said.out.split() and "granted whole" in said.err

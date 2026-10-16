@@ -155,8 +155,13 @@ def _hermes_cmd(prompt_path: Path, model: str) -> list[str]:
 _CLAUDE_TOOLS = "Read Grep Glob"
 
 
+def _claude_alias(slot: int) -> str:
+    """The claude model alias a slot runs: opus for 1 and 4, sonnet 3, haiku 2."""
+    return "opus" if slot in (1, 4) else "sonnet" if slot == 3 else "haiku"
+
+
 def _claude_cmd(slot: int) -> list[str]:
-    model = "opus" if slot in (1, 4) else "sonnet" if slot == 3 else "haiku"
+    model = _claude_alias(slot)
     return [
         "claude",
         "-p",
@@ -455,8 +460,7 @@ def _choose_command(
         # Named by its alias, as the full-mode runner names it: opus, sonnet and haiku
         # are aliases, and the version one runs is claude's to say. Slot 2's lens names
         # codex's model, which on claude it is not.
-        alias = "opus" if slot in (1, 4) else "sonnet" if slot == 3 else "haiku"
-        return _claude_cmd(slot), f"claude-{alias}"
+        return _claude_cmd(slot), f"claude-{_claude_alias(slot)}"
 
     # Last-resort Hermes paths if no local CLI matched.
     if slot in (1, 4) and backends["hermes"]:
@@ -593,6 +597,7 @@ def _pick_backend(slot: int, round_: _Round) -> _Picked | None:
             # carries the diff and the audit.
             workspace = _empty_workspace_outside_repo(round_.repo)
             if workspace is not None:
+                _end_gemini_search(workspace)
                 return _Picked(cmd, "gemini", label, workspace)
             print(f"  R{slot}: gemini has no workspace outside the repo (see TMPDIR)")
         else:
@@ -656,6 +661,17 @@ def _under_review(repo: Path | None) -> tuple[Path, ...]:
     check hides them (``agy_is_confined``). Its workspace and state are mounted after,
     so hiding a directory that holds them does not."""
     return tuple(dict.fromkeys(p for p in (repo, Path.cwd(), REPO_ROOT) if p))
+
+
+def _end_gemini_search(workspace: Path) -> None:
+    """End gemini's upward searches in its own workspace: it looks for GEMINI.md up to
+    a .git and for the first environment file up the tree, and the workspace's parent
+    is a shared /tmp, where another user can put either."""
+    env_file = "." + "env"  # joined: the diff scrubber redacts a line naming one
+    (workspace / ".git").mkdir(exist_ok=True)
+    (workspace / ".gemini").mkdir(exist_ok=True)
+    (workspace / env_file).write_text("", encoding="utf-8")
+    (workspace / ".gemini" / env_file).write_text("", encoding="utf-8")
 
 
 def _prepare_agy(

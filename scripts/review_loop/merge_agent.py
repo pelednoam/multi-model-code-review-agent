@@ -47,9 +47,13 @@ _HOME_DOT_DENIED = ("~/.*", "~/.*/**")
 _MERGE_REPO_DENIED = (
     ".claude", ".vscode", ".idea", ".venv", "venv", ".direnv", ".husky", ".githooks",
     ".pre-commit-config.yaml", ".mcp.json", ".envrc",
-    # CI definitions: --auto-commit pushes what the agent writes, and CI runs them.
-    ".github/workflows", ".gitlab-ci.yml", ".circleci", ".buildkite",
-    "azure-pipelines.yml", "Jenkinsfile", ".travis.yml",
+    "lefthook.yml", ".lefthook.yml", "lefthook.yaml", ".lefthook", ".overcommit.yml",
+    # CI definitions, and what they include: --auto-commit pushes what the agent
+    # writes, and CI runs them.
+    ".github", ".gitlab", ".gitlab-ci.yml", ".circleci", ".buildkite",
+    "azure-pipelines.yml", ".azure-pipelines", "Jenkinsfile", ".travis.yml",
+    "bitbucket-pipelines.yml", ".drone.yml", ".woodpecker.yml", ".woodpecker",
+    "cloudbuild.yaml", ".tekton",
 )  # fmt: skip
 
 
@@ -82,27 +86,53 @@ def _homes() -> set[Path]:
     return homes
 
 
-def _home_dot_entries(repo: Path) -> tuple[list[Path], bool]:
-    """Every dotfile and dot-directory in either home but the one holding ``repo``,
-    and whether one does (~/.worktrees/project): that one the agent is there to fix,
-    and the rest stay denied, as ``_HOME_DOT_DENIED`` denies them all otherwise."""
-    entries: list[Path] = []
-    holding = False
-    for home in _homes():
-        try:
-            inside = repo.resolve().relative_to(home)
-        except ValueError:
-            inside = None
-        keep = inside.parts[0] if inside and inside.parts else None
-        if keep is not None and keep.startswith("."):
-            holding = True
+def _around(ancestor: Path, repo: Path) -> list[Path]:
+    """What is in ``ancestor`` other than the way down to ``repo``: at each level, the
+    entries beside the one leading to it. Denying these instead of all of ``ancestor``
+    keeps the repository writable, and the rest of ``ancestor`` denied."""
+    out: list[Path] = []
+    here = ancestor
+    for part in repo.relative_to(ancestor).parts:
         with contextlib.suppress(OSError):
-            entries += [
-                entry
-                for entry in home.iterdir()
-                if entry.name.startswith(".") and entry.name != keep
-            ]
-    return entries, holding
+            out += [entry for entry in here.iterdir() if entry.name != part]
+        here = here / part
+    return out
+
+
+def _home_denies(repo: Path) -> tuple[list[str], list[Path]]:
+    """The home's write denies for the merge agent: rules for ``_MERGE_WRITE_DENIED``
+    and ``_HOME_DOT_DENIED``, and paths for those that hold ``repo``.
+
+    A directory-wide one that holds the repository (~/.local/src/project,
+    ~/.worktrees/project) would deny the files the agent is there to fix: it is
+    replaced by what is around the way down to it (``_around``).
+    """
+    target = repo.resolve()
+    rules: list[str] = []
+    paths: list[Path] = []
+    holding = set()
+    for home in _homes():
+        if not target.is_relative_to(home):
+            continue
+        top = target.relative_to(home).parts[:1]
+        for pattern in _MERGE_WRITE_DENIED:
+            base = home / pattern[2:].removesuffix("/**")
+            if pattern.endswith("/**") and target.is_relative_to(base):
+                holding.add(pattern)
+                paths += _around(base, target)
+        if top and top[0].startswith("."):
+            # The home's other dot entries one by one, and around the way down within
+            # the one that holds the repository.
+            holding.update(_HOME_DOT_DENIED)
+            with contextlib.suppress(OSError):
+                paths += [
+                    entry
+                    for entry in home.iterdir()
+                    if entry.name.startswith(".") and entry.name != top[0]
+                ]
+            paths += _around(home / top[0], target)
+    rules = [p for p in (*_MERGE_WRITE_DENIED, *_HOME_DOT_DENIED) if p not in holding]
+    return with_account_home(tuple(rules)), paths
 
 
 def _trusted_checkout(repo: Path) -> list[Path]:
@@ -120,15 +150,15 @@ def _trusted_checkout(repo: Path) -> list[Path]:
 
 def _merge_denied(repo: Path) -> list[str]:
     """The merge agent's --disallowedTools: the reviewers' list for its tools, and
-    writes to the repository's git directories, ``_MERGE_REPO_DENIED``,
-    ``_MERGE_WRITE_DENIED`` and the home's other dot entries."""
+    writes to the repository's git directories, ``_MERGE_REPO_DENIED``, and the home's
+    files that run code (``_home_denies``)."""
     paths = ["//**/.git", "//**/.git/**"]  # every repository's hooks and config
-    dot_entries, in_dot_dir = _home_dot_entries(repo)
+    home_rules, home_paths = _home_denies(repo)
     protected = [
         *_git_dirs(repo),
         *(repo.resolve() / name for name in _MERGE_REPO_DENIED),
         *_trusted_checkout(repo),
-        *(dot_entries if in_dot_dir else []),
+        *home_paths,
     ]
     for path in protected:
         root = str(path).rstrip("/")
@@ -137,10 +167,7 @@ def _merge_denied(repo: Path) -> list[str]:
             print(f"  WARNING: the merge agent is not denied {root}: a space in it")
         else:
             paths += [f"/{root}", f"/{root}/**"]
-    denied = (
-        _MERGE_WRITE_DENIED if in_dot_dir else (*_MERGE_WRITE_DENIED, *_HOME_DOT_DENIED)
-    )
-    paths += with_account_home(denied)
+    paths += home_rules
     writes = [f"{tool}({path})" for path in paths for tool in ("Edit", "Write")]
     return [*claude_disallowed(_MERGE_TOOLS), *writes]
 

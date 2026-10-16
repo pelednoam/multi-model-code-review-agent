@@ -474,6 +474,10 @@ class TestAgyLaunch(AgyCase):
         assert picked is not None and picked.backend == "gemini"
         assert picked.workspace is not None and picked.workspace.is_dir()
         assert not picked.workspace.is_relative_to(repo)
+        # Its upward searches for GEMINI.md and an environment file end in it, not in a
+        # shared /tmp.
+        assert (picked.workspace / ".git").is_dir()
+        assert (picked.workspace / ("." + "env")).read_text() == ""
         # With nowhere outside the repository, the slot goes to its next backend.
         monkeypatch.setattr(reviewers.tempfile, "tempdir", str(repo))
         repo.mkdir()

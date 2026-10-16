@@ -564,16 +564,23 @@ project.
 
 ### 2. Configure for your project (optional)
 
-Edit `scripts/preflight/config.py` to set:
-- `SIGNED_MANIFESTS`: paths to your project's signed JSON artifacts
-- `ARTIFACT_DIRS`: directories containing JSON artifacts to audit
-- `SOURCE_DIRS`: directories that hold source code. Defaults to
-  `["src/", "research/"]`. **Override this for any layout that isn't
-  a "src layout"** -- e.g. `["backend/", "frontend/src/", "lib/"]` for
-  a typical full-stack app. If you skip this, the coverage gate is
-  silently inoperative: the audit will print "coverage gate inoperative"
-  when it detects Python files outside `SOURCE_DIRS`.
-- `TEST_DIRS`: directories that hold tests. Defaults to `["tests/"]`.
+Put the layout in `review-config.json` at the project root, which
+`install.sh` leaves alone (it overwrites `scripts/preflight/config.py`):
+
+```json
+{"source_dirs": ["backend/", "frontend/src/"], "test_dirs": ["tests/"]}
+```
+
+- `source_dirs`: directories that hold source code. Defaults to
+  `["src/", "research/"]`. **Set this for any layout that isn't a "src
+  layout"**. If you skip it, the coverage gate is silently inoperative:
+  the audit will print "coverage gate inoperative" when it detects
+  Python files outside them.
+- `test_dirs`: directories that hold tests. Defaults to `["tests/"]`.
+
+`SIGNED_MANIFESTS` (paths to your project's signed JSON artifacts) and
+`ARTIFACT_DIRS` (directories of JSON artifacts to audit) are still set in
+`scripts/preflight/config.py`; re-apply them after re-running `install.sh`.
 
 Defaults work fine for projects using the conventional `src/` /
 `tests/` layout. The audit will report no signed-manifest results

@@ -11,6 +11,17 @@ from pathlib import Path
 from typing import Any
 
 from .config import COVERAGE_TARGET, REPO_ROOT, SOURCE_DIRS, TEST_DIRS
+from .git_state import is_safe_relpath
+
+
+def _test_dirs() -> list[str]:
+    """``TEST_DIRS`` that are directories inside the repository: a path from
+    review-config.json, absolute or with "..", would collect tests from elsewhere."""
+    return [
+        d
+        for d in TEST_DIRS
+        if is_safe_relpath(d.rstrip("/")) and (REPO_ROOT / d).is_dir()
+    ]
 
 
 def _changed_impl_files(changed_files: list[str]) -> list[str]:
@@ -78,14 +89,16 @@ def _run_pytest_with_coverage(warnings: list[str]) -> dict[str, Any] | None:
                     _interpreter(),
                     "-m",
                     "pytest",
-                    # The project's own test directories (review-config.json), those that
-                    # exist: tests/ was hard-coded, whatever the project declared.
-                    *([d for d in TEST_DIRS if (REPO_ROOT / d).is_dir()] or ["tests/"]),
                     *cov_sources,
                     "--cov-report=json:" + str(cov_json),
                     "--cov-branch",
                     "-q",
                     "--no-header",
+                    # The project's own test directories (review-config.json), those that
+                    # exist and stay inside it -- tests/ was hard-coded, whatever the
+                    # project declared -- after "--", so none is taken for an option.
+                    "--",
+                    *(_test_dirs() or ["tests/"]),
                 ],
                 cwd=REPO_ROOT,
                 capture_output=True,

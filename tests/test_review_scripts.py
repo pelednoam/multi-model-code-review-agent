@@ -1405,6 +1405,18 @@ class TestMergeAgentPrompt:
         # The others stay denied, one by one: dropping them all left them writable.
         assert f"Write(/{tmp_path / '.bashrc.d'}/**)" in denied
         assert f"Write(/{tmp_path / '.worktrees'}/**)" not in denied
+        # Other worktrees beside it are not this one.
+        (tmp_path / ".worktrees" / "other").mkdir()
+        denied = merge_agent._merge_denied(hidden)
+        assert f"Write(/{tmp_path / '.worktrees' / 'other'}/**)" in denied
+        # A repository under ~/.local, which is denied whole, stays editable too.
+        local = tmp_path / ".local" / "src" / "project"
+        local.mkdir(parents=True)
+        (tmp_path / ".local" / "bin").mkdir()
+        denied = merge_agent._merge_denied(local)
+        assert "Write(~/.local/**)" not in denied
+        assert f"Write(/{local.resolve()}/**)" not in denied
+        assert f"Write(/{tmp_path / '.local' / 'bin'}/**)" in denied
         # Nor where HOME points elsewhere and the repository is in the account's.
         monkeypatch.setattr(merge_agent, "_homes", lambda: {Path("/x"), tmp_path})
         assert "Write(~/.*/**)" not in merge_agent._merge_denied(hidden)
@@ -1419,7 +1431,7 @@ class TestMergeAgentPrompt:
         assert "Write(//**/.git/**)" in denied
         assert f"Write(/{REPO_ROOT.resolve()}/**)" in denied
         # CI definitions, which --auto-commit would push and CI would run.
-        assert f"Write(/{plain.resolve()}/.github/workflows/**)" in denied
+        assert f"Write(/{plain.resolve()}/.github/**)" in denied
 
     def test_a_worktree_inside_this_checkout_stays_editable(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -3033,6 +3045,8 @@ class TestCredentialShapes:
             "http://localhost:000080/@scope/pkg",
             "git+ssh://git@github.com:org/repo.git@v1.0",
             "postgres://u:{{password}}@h",
+            "postgres://u:{password!r}@h",
+            "postgres://u:%(pw)d@h",
             "postgres://u:{0}@h",
             "['http://localhost:8080','ops@example.com']",
             "redis://h:6379/0?x=a@b",
@@ -3518,6 +3532,14 @@ class TestScrubJson:
             "token": scrub_diff.REDACTED_TEXT,
             "tags": ["a", "b"],
         }
+
+    def test_a_key_kept_as_a_list_of_lines_is_redacted(self) -> None:
+        # Each line alone says nothing, and the body passed.
+        begin = "-----BEGIN RSA PRIVATE " + "KEY-----"
+        end = "-----END RSA PRIVATE " + "KEY-----"
+        code, out = self._scrub({"k": [begin, "MIIbody1", "MIIbody2", end, "after"]})
+        assert code == 1
+        assert out == {"k": [scrub_diff.REDACTED_TEXT] * 4 + ["after"]}
 
     def test_a_key_shaped_like_a_credential_is_redacted(self) -> None:
         key = "gh" + "p_" + "a" * 36

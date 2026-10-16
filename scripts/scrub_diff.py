@@ -121,13 +121,15 @@ KEYWORD_PATTERNS = [
 ]
 
 #: A URL password that is no password: a template's field, named as a template names
-#: one -- {password}, {{password}}, {0}, ${DB_PASS}, %(pw)s, <password> -- not any text
+#: one -- {password}, {password!r}, {{password}}, {0}, ${DB_PASS}, %(pw)s, %(pw)d,
+#: <password> -- not any text
 #: in braces, which a password can be. A port can be a field too (localhost:{port}/...),
 #: so before a "/" it is no password either. Each part bounded, as the pattern's are,
 #: so that a line of unfinished ones is scanned in linear time.
 _URL_FIELD = (
-    r"(?:\{\{?[A-Za-z_][\w.]{0,63}\}?\}|\{\d{0,3}\}|\$\{[A-Za-z_]\w{0,64}\}"
-    + r"|\$[A-Z_][A-Z0-9_]{0,64}|%\([A-Za-z_]\w{0,63}\)s|%[sd]|<[A-Za-z_][\w.-]{0,63}>)"
+    r"(?:\{\{?[A-Za-z_][\w.]{0,63}(?:![sra])?\}?\}|\{\d{0,3}(?:![sra])?\}"
+    + r"|\$\{[A-Za-z_]\w{0,64}\}|\$[A-Z_][A-Z0-9_]{0,64}|%\([A-Za-z_]\w{0,63}\)[sd]"
+    + r"|%[sd]|<[A-Za-z_][\w.-]{0,63}>)"
 )
 
 #: Or a placeholder word or mask, but only as the whole password: before a "/" it is
@@ -602,7 +604,18 @@ def scrub_json() -> int:
                 return REDACTED_TEXT
             return node
         if isinstance(node, list):
-            return [walk(item) for item in node]
+            # A private key kept as a list of lines: its body lines say nothing alone,
+            # so from a BEGIN to its END every string is redacted.
+            cleaned: list[object] = []
+            in_key = False
+            for item in node:
+                if isinstance(item, str) and (in_key or _opens_key(item)):
+                    in_key = _key_open_after(item, in_key)
+                    redacted += 1
+                    cleaned.append(REDACTED_TEXT)
+                else:
+                    cleaned.append(walk(item))
+            return cleaned
         if isinstance(node, dict):
             out: dict[str, object] = {}
             for index, (key, value) in enumerate(node.items()):

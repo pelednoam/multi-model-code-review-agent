@@ -149,10 +149,12 @@ next backend.
 - `REVIEW_USE_AGY` set to anything but `1`, `true`, `yes` or `on` (`0`, empty, a
   typo): do not use agy. It is on by default wherever it is installed, and then sends
   the scrubbed diff, audit and context to Google. Every round that does so says so.
-- `REVIEW_USE_AGY=1`: in a project pinned to Bedrock, let agy answer slot 3 when
-  Hermes is not installed (with Hermes, Hermes answers it).
-- `MMCRA_AGY_STRICT_SOCKETS=1`: refuse every abstract socket that takes connections,
-  whoever owns it, not only your own (see above).
+- `REVIEW_USE_AGY=1` (or `true`, `yes`, `on`): in a project pinned to Bedrock, let
+  agy answer slot 3 when Hermes is not installed (with Hermes, Hermes answers it).
+- `MMCRA_AGY_STRICT_SOCKETS=1` (or `true`, `yes`, `on`): refuse every abstract socket
+  that takes connections, whoever owns it, not only your own (see above).
+- `AGY_MODEL=<slug>`: run this model instead of the best Gemini model `agy models`
+  lists (no listing call is made).
 - `MMCRA_SKIP_AGY_SANDBOX_CHECK=1` (or `true`, `yes`, `on`): run agy without the
   wrapper, on a host that is already a sandbox. `0`, or any other value, keeps the
   sandbox.

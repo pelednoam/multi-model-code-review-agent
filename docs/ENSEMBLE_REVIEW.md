@@ -145,8 +145,10 @@ API calls (2x Opus, 1x Haiku, 1x Sonnet): for a typical feature branch
 
 ## Privacy
 
-- The diff and audit are scrubbed of credential-shaped lines first, and a
-  redaction stops the review
+- The diff, the audit and the context bundle are scrubbed of
+  credential-shaped lines first. A redaction in the diff stops the review;
+  in the audit's quoted lines and in the context bundle the line is
+  replaced and the review goes on
 - agy, on by default wherever it is installed, sends them to Google;
   `REVIEW_USE_AGY=0` switches it off
 - Codex calls go through ChatGPT's backend API, and codex can read your
@@ -166,6 +168,8 @@ API calls (2x Opus, 1x Haiku, 1x Sonnet): for a typical feature branch
 | `docs/ensemble_review_result_schema.json` | Strict reviewer output schema |
 | `scripts/review_until_converged.py` | Convergence loop |
 | `scripts/review_loop/` | The loop's package; also the full-mode runner's checks, extraction and agy's sandbox |
+| `docs/agy-sandbox.md` | What agy's bubblewrap sandbox closes, what it does not, and its switches |
+| `docs/codex-sandbox.md` | Why codex's sandbox is verified before use, and how to fix a host where it is not read-only |
 | `tests/` | Test suite |
 | `data/reviews/` | Persisted review packets (gitignored) |
 

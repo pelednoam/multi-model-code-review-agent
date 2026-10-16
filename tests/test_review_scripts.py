@@ -2042,7 +2042,10 @@ class TestCodexEnvOverrides:
     # The two safety flags are always present, whatever the env says. A reviewer that can
     # edit the code it reviews breaks this tool's central promise, and `-s read-only` alone
     # is not enough: a global `approvals_reviewer = "auto_review"` overrides it.
-    SAFETY = ["-s", "read-only", "-c", 'approvals_reviewer="user"']
+    SAFETY = [
+        "-s", "read-only", "-c", 'approvals_reviewer="user"',
+        "-c", "project_doc_max_bytes=0",
+    ]  # fmt: skip
 
     def test_no_env_still_pins_the_safety_flags(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from scripts.review_loop.reviewers import _codex_extra_args
@@ -2679,11 +2682,27 @@ class TestRunnerScript:
         denied = cmd[cmd.index("--disallowedTools") + 1].split()
         assert {"Bash", "Write", "WebFetch", "WebSearch"} <= set(denied)
 
+    def test_no_reviewer_reads_the_branchs_own_instructions(self) -> None:
+        # The repository is the reviewers' working directory, and its AGENTS.md (codex,
+        # hermes) or CLAUDE.md (claude) would be read as instructions, outside the diff's
+        # fence. Measured: codex followed an AGENTS.md until project_doc_max_bytes=0;
+        # claude ignored a CLAUDE.md under --setting-sources user.
+        from scripts.review_loop import reviewers
+
+        assert "project_doc_max_bytes=0" in reviewers._codex_extra_args()
+        assert "--ignore-rules" in reviewers._hermes_cmd(Path("p"), "m")
+        claude = reviewers._claude_cmd(1)
+        assert claude[claude.index("--setting-sources") + 1] == "user"
+        runner = runner_script()
+        assert "--provider bedrock -t file --yolo --ignore-rules" in runner
+        assert "-c project_doc_max_bytes=0" in runner
+
     def test_codex_is_pinned_and_checked_as_in_the_loop(self) -> None:
         # The doc said codex was sandboxed in full mode; the runner passed no flag.
         runner = runner_script()
         codex = runner[runner.index("    codex)") : runner.index("    gemini)")]
         assert "-s read-only -c 'approvals_reviewer=\"user\"'" in codex
+        assert "-c project_doc_max_bytes=0" in codex
         doc = AGENT_DOC.read_text()
         detection = doc[doc.index("HAS_CODEX=false") : doc.index("HAS_AGY=false")]
         assert "review_helper codex-check || HAS_CODEX=false" in detection
@@ -2829,6 +2848,7 @@ class TestCredentialShapes:
             "postgres://u" + ":a#b?c9" + "@db",
             "postgres://app.user" + ":hunter2" + "@db",
             '"postgresql://alice' + ":K7a');s9" + '@db/prod"',
+            "postgres://u" + ":${DB_PASS:-hunter2}" + "@db",
             "ya" + "29." + "a" * 30,
             "1/" + "/0" + "a" * 40,
             "GOC" + "SPX-" + "a" * 28,
@@ -2850,7 +2870,7 @@ class TestCredentialShapes:
              "url-long-password", "url-no-user-slash-password",
              "url-placeholder-word-prefix",
              "url-upper-case-scheme", "url-query-chars-password", "url-dotted-user",
-             "url-double-quoted-apostrophe",
+             "url-double-quoted-apostrophe", "url-shell-default-password",
              "google-oauth-access", "google-oauth-refresh",
              "google-client-secret", "huggingface", "npm", "pypi", "google-api-key", "github-fine-grained", "github-app",
              "stripe-live", "slack", "slack-app", "slack-webhook", "discord-webhook",
@@ -2923,6 +2943,9 @@ class TestCredentialShapes:
             "redis://h:6379/0?x=a@b",
             "redis://localhost:6379/@x",
             "redis://cache:6379/@x",
+            "['https://example.com','mailto:ops@example.com']",
+            "postgres://u:${PORT:-5432}/x@y",
+            "http://localhost:${PORT:-8080}/@scope/pkg",
             "amqp://rabbit:5672/@vhost",
             # RFC 3986: userinfo ends at the first "/", so this is host u, port 8080.
             "postgres://u:8080/abc@db/prod",
@@ -3231,6 +3254,45 @@ class TestScrubText:
         assert "MIIbody" not in done.stdout
         assert done.stdout.startswith("a\n") and done.stdout.endswith("b\n")
 
+    def test_a_key_on_one_line_does_not_swallow_the_rest(self) -> None:
+        # Escaped onto one line, BEGIN and END together opened a block that never
+        # closed, and every later line of the bundle was redacted.
+        begin = "-----BEGIN RSA PRIVATE " + "KEY-----"
+        end = "-----END RSA PRIVATE " + "KEY-----"
+        done = self._scrub(f'"key": "{begin}\\nMIIbody\\n{end}"\nafter\n')
+        assert done.returncode == 1
+        assert "MIIbody" not in done.stdout and done.stdout.endswith("after\n")
+
+    def test_a_key_on_one_line_in_a_diff_does_not_swallow_the_hunk(self) -> None:
+        begin = "-----BEGIN RSA PRIVATE " + "KEY-----"
+        end = "-----END RSA PRIVATE " + "KEY-----"
+        diff = (
+            "diff --git a/c.json b/c.json\n@@ -0,0 +1,2 @@\n"
+            f'+"key": "{begin}\\nMIIbody\\n{end}"\n+after\n'
+        )
+        done = subprocess.run(
+            [sys.executable, str(SCRUB_SCRIPT)], input=diff, capture_output=True,
+            text=True, timeout=30,
+        )  # fmt: skip
+        assert "MIIbody" not in done.stdout and done.stdout.endswith("+after\n")
+
     def test_clean_text_passes_through(self) -> None:
         done = self._scrub("nothing here\n")
         assert done.returncode == 0 and done.stdout == "nothing here\n"
+
+
+class TestTamper:
+    """The loop's check that the reviewers left the tree as they found it."""
+
+    def test_a_new_file_under_an_ignored_path_is_reported(self, tmp_path: Path) -> None:
+        # Hermes writes under --yolo; a file it put in .venv or .claude, both commonly
+        # ignored, was invisible to the check.
+        from scripts.review_loop import tamper
+
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        (tmp_path / ".gitignore").write_text(".claude/\n")
+        before = tamper.snapshot(tmp_path)
+        (tmp_path / ".claude").mkdir()
+        (tmp_path / ".claude" / "settings.local.json").write_text("{}")
+        touched = tamper.report(tmp_path, before)
+        assert any(".claude" in line for line in touched)

@@ -35,6 +35,16 @@ _MERGE_WRITE_DENIED = (
     # The CLIs' and tools' own configs, each of which can name a command to run.
     "~/.codex/**", "~/.gemini/**", "~/.hermes/**", "~/.aws/**", "~/.docker/**",
     "~/.kube/**", "~/.gnupg/**",
+    # And every other dotfile and dot-directory in the home: the list above cannot keep
+    # up with what reads one and runs a command.
+    "~/.*", "~/.*/**",
+)  # fmt: skip
+
+#: In the repository, what runs code outside a review: the editor's and Claude Code's
+#: settings (their hooks run in the user's next session), virtualenvs and direnv, and
+#: hook managers' directories.
+_MERGE_REPO_DENIED = (
+    ".claude", ".vscode", ".idea", ".venv", "venv", ".direnv", ".husky", ".githooks",
 )  # fmt: skip
 
 
@@ -54,9 +64,13 @@ def _git_dirs(repo: Path) -> list[Path]:
 
 def _merge_denied(repo: Path) -> list[str]:
     """The merge agent's --disallowedTools: the reviewers' list for its tools, and
-    writes to the repository's git directories and to ``_MERGE_WRITE_DENIED``."""
+    writes to the repository's git directories, ``_MERGE_REPO_DENIED`` and
+    ``_MERGE_WRITE_DENIED``."""
     paths = []
-    for git in _git_dirs(repo):
+    for git in [
+        *_git_dirs(repo),
+        *(repo.resolve() / name for name in _MERGE_REPO_DENIED),
+    ]:
         root = str(git).rstrip("/")
         if any(c.isspace() for c in root):
             # --disallowedTools takes its rules space-separated: this one would be two.

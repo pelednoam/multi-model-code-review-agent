@@ -131,14 +131,21 @@ _URL_PLACEHOLDER = (
 #: that a long line is scanned in linear time.
 _SCHEME_NAME = r"[a-zA-Z][a-zA-Z0-9+.-]{0,31}:"
 _URL_SCHEME = r"(?<![a-zA-Z0-9+.-])" + _SCHEME_NAME
-_URL_USER = r"//[^\s/:\"?#\[\]]{0,256}:"
+#: The user: like the password (``_URL_PASSWORD_CHAR``), not past a quote that closes
+#: a string -- or it ran from one into the next: ['https://example.com','mailto:a@b'].
+#: Inside double quotes, where a ' ends nothing, any ' (``_URL_USER_DOUBLE_QUOTED``).
+_URL_USER = r"//(?:[^\s/:\"?#\[\]']|'(?![,\])};:+\s])){0,256}:"
+_URL_USER_DOUBLE_QUOTED = r"//[^\s/:\"?#\[\]]{0,256}:"
 #: What follows that ":" is no password when it is a port -- digits, then the path,
 #: query or fragment (http://host:8080/@scope/pkg, redis://cache:6379/0?x=a@b) --
 #: whatever the scheme, as RFC 3986 reads it: a URL's userinfo ends at its first "/",
 #: so a postgres URL with "8080/abc" there has a host and a port, not a password.
-#: Nor when it is a template's field in a port's place, or a placeholder.
+#: Nor when it is a template's field in a port's place -- a shell default among them,
+#: ${PORT:-5432}, which is no password's placeholder: its default can be a real one --
+#: or a placeholder.
+_URL_PORT_FIELD = r"(?:" + _URL_FIELD + r"|\$\{[A-Za-z_]\w{0,64}:?[-=]\d{1,5}\})"
 _URL_NOT_A_PASSWORD = (
-    r"(?!\d{1,5}[/?#])(?!" + _URL_FIELD + r"[/?#])(?!" + _URL_PLACEHOLDER + r"@)"
+    r"(?!\d{1,5}[/?#])(?!" + _URL_PORT_FIELD + r"[/?#])(?!" + _URL_PLACEHOLDER + r"@)"
 )
 #: A character of the password: it may hold ' (base64 and generated ones do), but
 #: not a quote that closes a string literal -- one followed by , ) ] } ; : + or a
@@ -191,7 +198,11 @@ SHAPE_PATTERNS = [
     # Inside double quotes, where a ' is no string's end and ends nothing: the password
     # runs to the "@" (K7a');s9 is one).
     re.compile(
-        r'"' + _URL_SCHEME + _URL_USER + _URL_NOT_A_PASSWORD + r'[^"\s@]{1,256}@'
+        r'"'
+        + _URL_SCHEME
+        + _URL_USER_DOUBLE_QUOTED
+        + _URL_NOT_A_PASSWORD
+        + r'[^"\s@]{1,256}@'
     ),
     # And with no user name, where nothing before the ":" is a host, so nothing after
     # it is a port.
@@ -451,6 +462,13 @@ def _force_utf8(stream: object) -> None:
         reconfigure(encoding="utf-8", errors="replace")
 
 
+def _opens_key(line: str) -> bool:
+    """Whether ``line`` begins a private key whose body is on the lines after it: a
+    BEGIN marker with no END after it on the same line."""
+    begin = _PEM_BEGIN.search(line)
+    return begin is not None and not _PEM_END.search(line, begin.end())
+
+
 def scrub_text() -> int:
     """``--text``: scrub stdin as plain text rather than a diff -- every line is
     content, as an added line is -- writing it to stdout. Returns the number of
@@ -465,7 +483,9 @@ def scrub_text() -> int:
             in_key = not _PEM_END.search(line)
         else:
             clean = scrub_line("+" + line, False, in_hunk=True)[1:]
-            in_key = clean != line and bool(_PEM_BEGIN.search(line))
+            # A key on one line -- JSON- or \n-escaped -- opens no block: its END is on
+            # that line too, and everything after it was redacted as its body.
+            in_key = clean != line and _opens_key(line)
         sys.stdout.write(clean)
         if REDACTED in clean and clean != line:
             n_redacted += 1
@@ -517,8 +537,10 @@ def main() -> None:
             clean = scrub_line(line, in_safe, in_hunk=in_hunk, in_secret_file=in_secret)
             # Only a *redacted* BEGIN line opens a block. In a safe file the
             # banner is an intentional fixture and passes through, and the
-            # fixture's body must not then be swallowed.
-            if clean != line and _PEM_BEGIN.search(line):
+            # fixture's body must not then be swallowed. Nor does a key whose END
+            # is on the same line (JSON- or \n-escaped), or the rest of the hunk
+            # was redacted as its body.
+            if clean != line and _opens_key(line):
                 in_key = True
 
         sys.stdout.write(clean)

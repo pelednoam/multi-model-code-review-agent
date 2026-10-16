@@ -779,8 +779,9 @@ have detected it via fingerprint matching and exited with code 2
 
 For sensitive/FDA-path code where data-at-rest guarantees matter, use
 Hermes+Bedrock for all reviewers. Its writes are not prevented, so prefer
-the convergence loop, whose tamper check reports them (full mode does not
-check).
+the convergence loop, whose tamper check reports them -- in tracked,
+untracked and newly created ignored files, not a change to an ignored file
+already there (full mode does not check).
 
 ## Customization
 

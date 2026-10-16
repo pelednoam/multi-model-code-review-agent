@@ -12,11 +12,11 @@ from .config import (
 from .git_state import is_safe_relpath
 
 try:  # run as scripts/review_preflight.py, with scripts/ on the path
-    from scrub_diff import CREDENTIAL_PATTERNS
     from scrub_diff import REDACTED as _DIFF_REDACTED
+    from scrub_diff import scrub_line
 except ImportError:  # imported as the scripts package
-    from scripts.scrub_diff import CREDENTIAL_PATTERNS
     from scripts.scrub_diff import REDACTED as _DIFF_REDACTED
+    from scripts.scrub_diff import scrub_line
 
 #: What a quoted line becomes when it looks like it holds a credential: the diff's own
 #: marker, without the "# " that keeps a redacted diff line a comment.
@@ -30,7 +30,8 @@ def _quoted(line: str) -> str:
     these lines come from whole changed files, not only the changed lines the diff
     holds, so the diff's scrubbing never saw them.
     """
-    if any(pattern.search(line) for pattern in CREDENTIAL_PATTERNS):
+    added = "+" + line.rstrip("\n") + "\n"  # read as an added line of the diff is
+    if scrub_line(added, False) != added:
         return REDACTED
     return line.strip()[:120]
 

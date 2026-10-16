@@ -144,6 +144,9 @@ def _hermes_cmd(prompt_path: Path, model: str) -> list[str]:
         "-t",
         "file",
         "--yolo",
+        # Not the repository's AGENTS.md, SOUL.md or .cursorrules -- chosen by the branch
+        # under review, read as instructions outside the diff's fence -- nor memory.
+        "--ignore-rules",
     ]
 
 
@@ -344,10 +347,17 @@ def _codex_extra_args() -> list[str]:
     #                           succeeded; with "user" the same prompt got
     #                           "Read-only file system". Pinning it here means a reviewer's
     #                           confinement no longer depends on a user's global settings.
+    #   project_doc_max_bytes=0 no AGENTS.md: codex reads the repository's -- the branch
+    #                           under review chose it -- as instructions, outside the
+    #                           diff's fence. Measured: told there to end every answer
+    #                           with a word, codex did; with this, it did not.
     #
     # This is belt AND braces: backends.codex_is_confined() still canary-tests the result,
     # because a flag that is silently overridden is exactly the failure being defended against.
-    args: list[str] = ["-s", "read-only", "-c", 'approvals_reviewer="user"']
+    args: list[str] = [
+        "-s", "read-only", "-c", 'approvals_reviewer="user"',
+        "-c", "project_doc_max_bytes=0",
+    ]  # fmt: skip
     model = os.environ.get("CODEX_MODEL")
     if model:
         args.extend(["-m", model])

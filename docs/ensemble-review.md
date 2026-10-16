@@ -154,7 +154,7 @@ Bedrock opt-in precedence (PREFER_HERMES=true), used for regulated codebases tha
 | CLI | Non-interactive | Read-only | Input | Output |
 |---|---|---|---|---|
 | `claude` | `-p` | `--tools Read,Grep,Glob` (the only tools it has at all; `claude_tools.claude_tool_names`, the runner's from `claude-tools`) and `--allowedTools "Read Grep Glob"` **plus** `--disallowedTools "Edit Write MultiEdit NotebookEdit Bash WebFetch WebSearch ReportFindings"` and `Read(...)` of each credential location (`claude_tools.SECRET_READS`; the runner gets the list from `claude-deny`), `--strict-mcp-config` (no MCP servers), `--setting-sources user` (no project hooks) and `--permission-mode dontAsk` -- `--allowedTools` alone only skips the permission prompt, it does *not* confine the agent | stdin (`< prompt.txt`) | `--output-format json` wraps in `{"result":"..."}` |
-| `codex` | `codex exec` **plus `-s read-only` and `-c approvals_reviewer="user"`** (in both the convergence loop and this runner) -- both are pinned by the tool and neither is optional: no sandbox flag was passed at all before, and `-s read-only` on its own is silently overridden by a global `approvals_reviewer = "auto_review"` (see docs/codex-sandbox.md). Codex is also canary-tested at launch and its slot is DROPPED if the sandbox does not actually refuse a write (optional `-m <model> -c model_reasoning_effort=<level>` -- override via `CODEX_MODEL`, `CODEX_REASONING_EFFORT`; `=high` is the "GPT-5.5 Pro" equivalent) | verified read-only for writes, not assumed; its reads are not confined -- it can read your home directory, credentials included, and what it reads goes to OpenAI | stdin (file) | `-o <file>` writes last message |
+| `codex` | `codex exec` **plus `-s read-only`, `-c approvals_reviewer="user"` and `-c project_doc_max_bytes=0`** (no AGENTS.md from the branch) (in both the convergence loop and this runner) -- both are pinned by the tool and neither is optional: no sandbox flag was passed at all before, and `-s read-only` on its own is silently overridden by a global `approvals_reviewer = "auto_review"` (see docs/codex-sandbox.md). Codex is also canary-tested at launch and its slot is DROPPED if the sandbox does not actually refuse a write (optional `-m <model> -c model_reasoning_effort=<level>` -- override via `CODEX_MODEL`, `CODEX_REASONING_EFFORT`; `=high` is the "GPT-5.5 Pro" equivalent) | verified read-only for writes, not assumed; its reads are not confined -- it can read your home directory, credentials included, and what it reads goes to OpenAI | stdin (file) | `-o <file>` writes last message |
 | `gemini` | `-p` | `--model <m> --approval-mode plan --skip-trust` (default `<m>` is `gemini-2.5-flash` for free-tier compatibility; override via `GEMINI_MODEL`) | stdin (file) | stdout (text, may have fences) |
 | `agy` | `--input-format stream-json --output-format stream-json` (no `-p`: the prompt is one JSON line on stdin, because a single argument is capped at 128 KB) **plus `--sandbox --disable-slash-commands`**, pinned. On by default where installed; `REVIEW_USE_AGY=0` switches it off. Model: `AGY_MODEL` if set, else the best Gemini model `agy models` lists, picked each run. agy has no deny list and was measured writing outside its workspace, so it runs under **bubblewrap** (see docs/agy-sandbox.md), verified at startup without a model call and again before each launch; the slot goes to its next backend if that fails. The prompt opens with a no-tools preamble: a refused tool call ends agy's turn with no answer | bubblewrap read-only filesystem, verified; `--sandbox --disable-slash-commands` (no `--mode=plan`: it is a slash command, so a no-op once expansion is off) | stdin (one stream-json line) | stream-json; the last `result` event carries `structured_output` (enforced by `--json-schema`) |
 | `hermes` | `-z --yolo` | none: `-t file` limits it to the file toolset, which writes under `--yolo`; only the convergence loop's tamper check reports writes | `-z` flag (has ARG_MAX risk for large prompts) | stdout (the answer text; the prompt asks for the JSON in the reply, not in a file) |
@@ -718,7 +718,8 @@ ROUND_DEADLINE=$((REVIEWER_TIMEOUT + 90))
 # would fail instantly and record a bogus status for a reviewer that is still running.
 
 # Launch via Hermes. Its data stays in your AWS account, but -t file --yolo can still write files:
-# its writes are not prevented, only seen afterwards. Its JSON answer is read from stdout-N.txt.
+# its writes are not prevented, only seen afterwards. --ignore-rules: not the repository's
+# AGENTS.md, SOUL.md or .cursorrules, which the branch under review chose, nor memory. Its JSON answer is read from stdout-N.txt.
 # Hermes -z takes prompt as argument (no stdin mode). This means:
 # - Subject to ARG_MAX for very large diffs (use Claude CLI instead)
 # - Prompt content visible in /proc/PID/cmdline to local users
@@ -726,7 +727,7 @@ ROUND_DEADLINE=$((REVIEWER_TIMEOUT + 90))
 launch_hermes() {
   local num=$1 hermes_model=$2 prompt_file=$3
   { timeout --foreground -k 10 "$REVIEWER_TIMEOUT" hermes -z "$(cat "$prompt_file")" \
-      -m "$hermes_model" --provider bedrock -t file --yolo \
+      -m "$hermes_model" --provider bedrock -t file --yolo --ignore-rules \
       1>"$OUT_DIR/stdout-$num.txt" \
       2>"$OUT_DIR/stderr-$num.txt"
     mark_done "$num" $?; } &
@@ -788,9 +789,10 @@ prepare_agy() {
   AGY_ENVP=("${wrap[@]:1:${wrap[0]}}")
   AGY_BWRAP=("${wrap[@]:$((1 + wrap[0]))}")
   # Fail closed: the process substitution's status is not seen, so the wrapper itself is checked
-  # -- bwrap first, "--" last -- unless the host is trusted to be the sandbox.
+  # -- env -i, then bwrap first and "--" last -- unless the host is trusted to be the sandbox.
   if ! review_helper flag MMCRA_SKIP_AGY_SANDBOX_CHECK; then
-    [ "${#AGY_BWRAP[@]}" -ge 2 ] && [ "${AGY_BWRAP[-1]}" = -- ] \
+    [ "${#AGY_ENVP[@]}" -ge 2 ] && [[ "${AGY_ENVP[0]##*/}" == env ]] && [ "${AGY_ENVP[1]}" = -i ] \
+      && [ "${#AGY_BWRAP[@]}" -ge 2 ] && [ "${AGY_BWRAP[-1]}" = -- ] \
       && [[ "${AGY_BWRAP[0]##*/}" == bwrap ]] \
       || { echo "R$num: SKIPPED (agy's sandbox wrapper is incomplete)"; return 1; }
   fi
@@ -880,9 +882,10 @@ launch_cli() {
       #   CODEX_REASONING_EFFORT=high    -- "GPT-5.5 Pro" equivalent
       # Defaults: whatever ~/.codex/config.toml has (usually
       # model=gpt-5.5 + model_reasoning_effort=medium).
-      # The two safety flags are pinned, as in the convergence loop (_codex_extra_args): -s read-only,
-      # and approvals_reviewer="user", because a global "auto_review" escalates past read-only.
-      local codex_extra=(-s read-only -c 'approvals_reviewer="user"')
+      # The safety flags are pinned, as in the convergence loop (_codex_extra_args): -s read-only;
+      # approvals_reviewer="user", because a global "auto_review" escalates past read-only; and
+      # project_doc_max_bytes=0, so that the branch's own AGENTS.md is not read as instructions.
+      local codex_extra=(-s read-only -c 'approvals_reviewer="user"' -c project_doc_max_bytes=0)
       [ -n "${CODEX_MODEL:-}" ] && codex_extra+=(-m "$CODEX_MODEL")
       [ -n "${CODEX_REASONING_EFFORT:-}" ] && \
         codex_extra+=(-c "model_reasoning_effort=$CODEX_REASONING_EFFORT")
@@ -1446,4 +1449,4 @@ concluding anything from a probe, and never suppress its output.
 
 - **Quick mode**: stays within Anthropic (Claude Code subagents).
 - **Full mode**: Hermes reviewers stay in your AWS. CLI reviewers go through their respective provider's infrastructure.
-- **For sensitive/FDA-path code**: use Hermes+Bedrock for all 4 reviewers (data-at-rest in your AWS account; writes are not prevented, so prefer the convergence loop, whose tamper check reports them).
+- **For sensitive/FDA-path code**: use Hermes+Bedrock for all 4 reviewers (data-at-rest in your AWS account; writes are not prevented, so prefer the convergence loop, whose tamper check reports them -- in tracked, untracked and newly created ignored files, not a change to an ignored file already there).

@@ -43,12 +43,19 @@ def snapshot(repo: Path) -> str:
     """Everything git can see about the working tree, as one string.
 
     ``--porcelain`` covers tracked modifications, staged changes and untracked
-    files, which is all three of the ways a reviewer can leave a mark. It does
-    not cover a file whose content changed and changed back, which is not a
-    shape anything here produces.
+    files, and ``--ignored=matching`` new files under ignored paths -- a
+    reviewer's write to .venv or .claude was invisible without it. Not covered: a
+    change to a file that was already there and is ignored, which git does not
+    look at, and a file whose content changed and changed back.
     """
     done = subprocess.run(
-        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        [
+            "git",
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--ignored=matching",
+        ],  # fmt: skip
         cwd=repo,
         capture_output=True,
         text=True,

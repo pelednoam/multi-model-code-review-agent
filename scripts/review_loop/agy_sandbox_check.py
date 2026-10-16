@@ -528,4 +528,7 @@ def agy_is_confined(also_hide: tuple[Path, ...] = ()) -> tuple[bool, str]:
         return False, f"agy sandbox check failed: {_timed_out(exc)}"
     except OSError as exc:
         return False, f"agy sandbox check failed: {exc}"
-    return True, "agy sandbox verified (read-only; home, /tmp, /run hidden; no env)"
+    return True, (
+        "agy sandbox verified (read-only; home, /tmp, /run hidden; no env,"
+        " capabilities or reachable sockets)"
+    )

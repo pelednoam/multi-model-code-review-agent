@@ -72,18 +72,36 @@ def snapshot(repo: Path, exclude: Path | None = None, before: str | None = None)
     # loop imports late would otherwise leave a __pycache__ the check calls a write.
     sys.dont_write_bytecode = True
     control = _control_lines(repo)
+    # And what the round wrote for the reviewers before they started, which they may
+    # not rewrite either: what they were given is what the round reports they read.
+    inputs = (
+        []
+        if exclude is None
+        else [
+            f"round {_shown(exclude / name)} {_fingerprint(exclude / name, False)}"
+            for name in _ROUND_INPUTS
+        ]
+    )
     # Compared whole: one deleted (an attributes file, a hook) changes what git runs too.
     if before is not None and set(control) != {
         line for line in before.splitlines() if line.startswith(("git ", "home "))
     }:
-        return "\n".join([*control, "?? git status not run: its control files changed"])
-    return "\n".join(sorted({*_status_lines(repo, exclude), *control})) + "\n"
+        skipped = "?? git status not run: its control files changed"
+        return "\n".join([*control, *inputs, skipped])
+    return "\n".join(sorted({*_status_lines(repo, exclude), *control, *inputs})) + "\n"
 
 
 def _status_lines(repo: Path, exclude: Path | None) -> list[str]:
     """A line for each path ``git status`` lists, with what is in it."""
+    # Every filter configured switched off, and the hooks: a filter already set up runs
+    # a script in the tree (python3 tools/normalize.py), which a reviewer can rewrite
+    # without touching a control file, and git status runs it on a file it changed.
+    off = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"]
+    for name in _filters(repo):
+        for key, value in (("clean", ""), ("process", ""), ("required", "false")):
+            off += ["-c", f"filter.{name}.{key}={value}"]
     cmd = [
-        GIT, "-c", "core.fsmonitor=false", "status", "--porcelain=v1", "-z",
+        GIT, *off, "status", "--porcelain=v1", "-z",
         "--untracked-files=all", "--ignored=traditional", "--", ".",
     ]  # fmt: skip
     if exclude is not None:
@@ -116,6 +134,35 @@ def _status_lines(repo: Path, exclude: Path | None) -> list[str]:
     return lines
 
 
+def _filters(repo: Path) -> set[str]:
+    """The names of the filters configured for ``repo`` and its submodules, by reading
+    their configs: ``git config`` runs none of them."""
+    from .merge_agent import _git_dirs
+
+    configs: list[list[str]] = [[]]  # the repository's own, with the global and system
+    for git_dir in _git_dirs(repo):
+        configs += [["--file", str(found)] for found in _module_configs(git_dir)]
+    names = set()
+    for where in configs:
+        found = subprocess.run(
+            [GIT, "config", *where, "--name-only", "--get-regexp", r"^filter\."],
+            cwd=repo, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+            check=False,
+        )  # fmt: skip
+        for key in found.stdout.splitlines():
+            # filter.<name>.<key>, and a name may hold dots.
+            if key.count(".") >= 2:
+                names.add(key.split(".", 1)[1].rsplit(".", 1)[0])
+    return names
+
+
+def _module_configs(git_dir: Path) -> list[Path]:
+    """The configs of the submodules under ``git_dir/modules``, which git status reads
+    when it looks inside each."""
+    modules = git_dir / "modules"
+    return sorted(modules.rglob("config")) if modules.is_dir() else []
+
+
 def _control_lines(repo: Path) -> list[str]:
     """A line for each file outside git's own listing that a reviewer's write turns
     into a command the loop runs, read without running git on the tree."""
@@ -132,6 +179,9 @@ def _control_lines(repo: Path) -> list[str]:
             if not (git_dir / "HEAD").exists()
             else [git_dir / n for n in names]
         )
+        # And each submodule's, whose config and hooks git status reads in it too.
+        for config in _module_configs(git_dir):
+            parts += [config.parent / n for n in names]
         for part in parts:
             for control in _files(part):
                 lines.append(f"git {_shown(control)} {_fingerprint(control, False)}")
@@ -164,7 +214,11 @@ def _control_lines(repo: Path) -> list[str]:
 def _shown(name: str | Path) -> str:
     """``name`` with what does not print as itself escaped: a snapshot is a line per
     path, and a reviewer's file name with a line break in it was two."""
-    return "".join(c if c.isprintable() else f"\\x{ord(c):02x}" for c in str(name))
+    # A backslash too: a name holding the four characters \x0a was another's with a
+    # line break in it.
+    return "".join(
+        c if c.isprintable() and c != "\\" else f"\\x{ord(c):02x}" for c in str(name)
+    )
 
 
 def _files(path: Path) -> list[Path]:
@@ -247,9 +301,11 @@ def changed(before: str, after: str) -> list[str]:
 #: diff and audit before the reviewers start, each slot's prompt and backend, and the
 #: outputs published once they stop (``reviewers._OUTPUTS``).
 _ROUND_FILES = re.compile(
-    r"(?:diff\.patch|audit\.json|\.audit\.raw\.json"
-    r"|(?:prompt|backend|raw|stderr|codex-out)-[1-4]\.txt)"
+    r"(?:diff\.patch|audit\.json|(?:prompt|backend|raw|stderr|codex-out)-[1-4]\.txt)"
 )
+
+#: Of those, what is there before the reviewers start.
+_ROUND_INPUTS = ("diff.patch", "audit.json")
 
 
 def _strangers(round_dir: Path) -> list[str]:

@@ -2575,8 +2575,11 @@ class TestRunnerScript:
         script = tmp_path / "t.sh"
         script.write_text(
             wrapper
+            # The trap before the line the test waits for: after it, a TERM sent on
+            # reading the line could come first, and end the shell with no word said.
+            + "trap 'echo got-TERM; exit 143' TERM\n"
             + 'echo "leader=$([ "$(ps -o sid= -p $$ | tr -d " ")" = "$$" ] && echo yes)"\n'
-            + "trap 'echo got-TERM; exit 143' TERM\nsleep 20 >/dev/null & wait $!\n"
+            + "sleep 20 >/dev/null & wait $!\n"
         )
         proc = subprocess.Popen(
             ["bash", str(script)], stdout=subprocess.PIPE, text=True
@@ -3368,6 +3371,10 @@ class TestAMissingReviewerIsNotConvergence:
         # But not to "converged" when nothing is blocking.
         code, _, said = self._round(tmp_path, clean, report_only=True, touched=planted)
         assert code == 12 and "NOT CONVERGED" in said
+        # Nor to "incomplete": the write is what the round must say.
+        partial = [None] + [self._clean(n) for n in "bcd"]
+        code, _, _ = self._round(tmp_path, partial, report_only=True, touched=planted)
+        assert code == 12
 
     def test_the_new_exit_code_is_documented(self) -> None:
         readme = (REPO_ROOT / "README.md").read_text()
@@ -3821,6 +3828,62 @@ class TestTamperHardening:
         listed = capsys.readouterr().out.split("Inspect before committing:\n")[1]
         assert "\x1b" not in listed and listed.count("\n") == 1
 
+    def test_a_configured_filters_script_is_not_run_by_the_check(
+        self, tmp_path: Path
+    ) -> None:
+        # The filter's command is set before the review; the script it runs is a tree
+        # file a reviewer can rewrite, and no control file changes.
+        from scripts.review_loop import tamper
+
+        repo = self._repo(tmp_path / "r")
+        (repo / "norm.sh").write_text("cat\n")
+        (repo / ".gitattributes").write_text("*.txt filter=norm\n")
+        subprocess.run(
+            ["git", "-C", str(repo), "config", "filter.norm.clean", "sh norm.sh"],
+            check=True,
+        )
+        before = tamper.snapshot(repo)
+        marker = tmp_path / "ran"
+        (repo / "norm.sh").write_text(f"touch {marker}; cat\n")
+        (repo / "a.txt").write_text("changed\n")
+        touched = tamper.report(repo, before)
+        assert not marker.exists()
+        assert any(line.startswith("AM a.txt ") for line in touched)
+
+    def test_a_submodules_config_is_a_control_file(self, tmp_path: Path) -> None:
+        from scripts.review_loop import tamper
+
+        repo = self._repo(tmp_path / "r")
+        module = repo / ".git" / "modules" / "lib"
+        module.mkdir(parents=True)
+        (module / "config").write_text("[core]\n")
+        before = tamper.snapshot(repo)
+        (module / "config").write_text('[filter "x"]\n\tclean = evil\n')
+        touched = tamper.changed(before, tamper.snapshot(repo, None, before))
+        assert any("git status not run" in line for line in touched)
+
+    def test_two_names_that_escape_alike_are_two(self) -> None:
+        from scripts.review_loop.tamper import _shown
+
+        assert _shown("a\nb") != _shown("a\\x0ab")
+        assert "\n" not in _shown("a\nb")
+
+    def test_the_rounds_inputs_may_not_be_rewritten(self, tmp_path: Path) -> None:
+        # The round directory is excluded as a whole; what the reviewers were given in
+        # it is what the round says they read.
+        from scripts.review_loop import tamper
+
+        repo = self._repo(tmp_path / "r")
+        round_dir = repo / "data" / "reviews" / "round-1"
+        round_dir.mkdir(parents=True)
+        (round_dir / "diff.patch").write_text("+real\n")
+        (round_dir / "audit.json").write_text("{}")
+        before = tamper.snapshot(repo, round_dir)
+        (round_dir / "diff.patch").write_text("+forged\n")
+        (round_dir / "audit.json").unlink()
+        touched = tamper.report(repo, before, round_dir)
+        assert sum(line.startswith("round ") for line in touched) == 2
+
     def test_no_home_at_all_is_no_crash(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import pwd
 
@@ -3910,6 +3973,22 @@ class TestAuditScrub:
         time.sleep(0.3)
         stat = Path(f"/proc/{child}/stat")
         assert not stat.exists() or stat.read_text().split()[2] == "Z"
+
+    def test_a_child_in_a_session_of_its_own_does_not_hold_the_deadline(
+        self, tmp_path: Path
+    ) -> None:
+        # Out of the session the kill reached, it held the pipes open, and the wait for
+        # them to close outlasted the deadline by as long as it ran.
+        from scripts.review_loop import diff
+
+        cmd = [sys.executable, "-c", (
+            "import subprocess, time; subprocess.Popen(['sleep', '30'], "
+            "start_new_session=True); time.sleep(60)"
+        )]  # fmt: skip
+        started = time.monotonic()
+        with pytest.raises(RuntimeError, match="did not finish"):
+            diff._run_tree(cmd, tmp_path, 1)
+        assert time.monotonic() - started < 15
 
     def test_no_raw_audit_is_left_in_the_round(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

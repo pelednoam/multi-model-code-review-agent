@@ -7,8 +7,8 @@ Stops when:
   - Same blocking findings appear twice in a row (stuck)
   - Tests fail after fixes (regression -- stops without rollback)
   - Max rounds reached
-  - A reviewer changed the working tree (exit 12; fix mode only -- --report-only
-    reports it and goes on)
+  - A reviewer changed the working tree (exit 12; --report-only reports it and
+    goes on, to 10 when something is blocking and to 12 when nothing is)
 
 Usage:
     python scripts/review_until_converged.py \\
@@ -208,6 +208,14 @@ def _run_one_round(
     blocking = collect_blocking_findings(results)
     print(f"Blocking findings: {len(blocking)} (blocking=true or critical)")
     if not blocking:
+        if touched:
+            # --report-only goes on past a write, to report; but a round a reviewer
+            # wrote in is no clean bill, whatever it found -- nor one merely partial.
+            print(
+                "\nNOT CONVERGED: nothing blocking, but the reviewers changed the "
+                "working tree. Inspect the files listed above."
+            )
+            return 12, previous_fp
         if missing:
             print(
                 "\nNOT CONVERGED: nothing blocking among the reviewers that answered, "
@@ -215,14 +223,6 @@ def _run_one_round(
                 "(see its stderr file) and re-run."
             )
             return 11, previous_fp
-        if touched:
-            # --report-only goes on past a write, to report; but a round a reviewer
-            # wrote in is no clean bill, whatever it found.
-            print(
-                "\nNOT CONVERGED: nothing blocking, but the reviewers changed the "
-                "working tree. Inspect the files listed above."
-            )
-            return 12, previous_fp
         print("\nCONVERGED: only suggestions remain.")
         return 0, previous_fp
 

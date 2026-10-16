@@ -261,7 +261,7 @@ key past a scrubber.
 | 9 | **Scrubber failed** | `scrub_diff.py` aborted part-way through. The patch on disk is truncated and its tail was never scrubbed, so it is not shown to a reviewer. Nothing needs rotating; fix the input or the environment and re-run |
 | 10 | **Report only** | `--report-only` was set and there are blocking findings. Nothing was changed; read them and fix them yourself |
 | 11 | **Incomplete** | No blocking findings among the reviewers that answered, but at least one produced nothing (a revoked key, a network drop, a timeout). Its findings are unknown, so this is not convergence: fix what stopped it -- `stderr-N.txt` says -- and re-run. Every round with a missing reviewer also prints `INCOMPLETE:` naming it, whatever else happens |
-| 12 | **Tampered** | A reviewer changed the working tree (the tamper check lists what). Fix mode stops before the merge agent, the gate and any commit, rather than build on files nobody wrote; `--report-only` reports it, and returns 12 rather than 0 for a round with nothing blocking |
+| 12 | **Tampered** | A reviewer changed the working tree (the tamper check lists what). Fix mode stops before the merge agent, the gate and any commit, rather than build on files nobody wrote; `--report-only` reports it, and returns 12 rather than 0 (or 11) for a round with nothing blocking |
 
 **Watching a round.** Four models on a large diff is fifteen minutes, and the
 loop used to say nothing during it. It now prints a line every 30 seconds

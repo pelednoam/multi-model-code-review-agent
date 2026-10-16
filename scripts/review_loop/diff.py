@@ -305,12 +305,18 @@ def _run_tree(
 
 
 def _kill_tree(proc: subprocess.Popen[str] | None) -> None:
-    """Kill ``proc``'s session, if it started, and reap it."""
+    """Kill ``proc``'s session, if it started, and reap it -- without waiting for its
+    pipes to close: a test that started a session of its own holds them open past the
+    kill, for as long as it runs, and the output is not wanted."""
     if proc is None:
         return
     with contextlib.suppress(OSError):
         os.killpg(proc.pid, signal.SIGKILL)
-    proc.communicate()
+    for stream in (proc.stdout, proc.stderr):
+        if stream is not None:
+            stream.close()
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        proc.wait(timeout=10)
 
 
 def run_preflight(round_dir: Path, repo: Path) -> Path:

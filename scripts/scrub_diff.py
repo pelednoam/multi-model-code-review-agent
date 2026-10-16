@@ -248,7 +248,7 @@ SHAPE_PATTERNS = [
         + r")+@"
     ),
     # Inside single quotes or backticks, a password whose quote of the other kind is
-    # followed by punctuation (`postgres://u:p4ss");x@db`): there that quote ends
+    # followed by punctuation (a " then ")" in a single-quoted DSN): there that quote ends
     # nothing either.
     re.compile(
         r"'"

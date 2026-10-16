@@ -33,7 +33,23 @@ def claude_denied(tools: str) -> tuple[list[str], list[str]]:
     which only the permission prompt enforces, and settings can turn that prompt off:
     the caller says so.
     """
-    granted: set[str] = set()
+    granted, scoped = _granted(tools)
+    denied = [tool for tool in CLAUDE_DENIED if tool not in granted]
+    return denied, [tool for tool in scoped if tool in CLAUDE_DENIED]
+
+
+def claude_tool_names(tools: str) -> str:
+    """The --tools value for a claude reviewer allowed ``tools``: the names it grants,
+    comma-separated -- the only tools claude then has at all, a second layer under the
+    deny list for any tool that list does not name. Empty, which is no tools, for a
+    spec that grants nothing."""
+    return ",".join(_granted(tools)[0])
+
+
+def _granted(tools: str) -> tuple[list[str], list[str]]:
+    """The tool names an --allowedTools spec grants, in order, and those granted with a
+    scope. An unbalanced spec grants nothing."""
+    granted: list[str] = []
     scoped: list[str] = []
     # One pass: ``depth`` counts open parentheses, and only text outside them is a
     # name -- ended by a separator, or marked scoped by the "(" that follows it.
@@ -48,14 +64,14 @@ def claude_denied(tools: str) -> tuple[list[str], list[str]]:
             if depth < 0:
                 break
         elif depth == 0 and c in ", \t\n":
-            granted.add(name)
+            if name and name not in granted:
+                granted.append(name)
             name = ""
         elif depth == 0:
             name += c
     if depth != 0:
-        granted, scoped = set(), []
-    denied = [tool for tool in CLAUDE_DENIED if tool not in granted]
-    return denied, [tool for tool in scoped if tool in CLAUDE_DENIED]
+        return [], []
+    return granted, scoped
 
 
 #: Where credentials live, which a claude reviewer is never allowed to read, whatever
@@ -90,6 +106,16 @@ SECRET_READS = (
     # remote's URL in .git/config can carry a token.
     "//**/.git/config", "//**/.git-credentials", "//**/.npmrc", "//**/.pypirc",
     "//**/.netrc", "//**/.docker/config.json",
+    # What the diff scrubber holds to be a credential whole, by name or suffix
+    # (scrub_diff.SECRET_NAMES, SECRET_SUFFIXES; a test keeps the two in step -- the
+    # runner's private copy of this package has no scrubber to import). Joined where
+    # the scrubber would redact the line.
+    "//**/token", "//**/.htpasswd", "//**/credentials", "//**/id_rsa", "//**/id_dsa",
+    "//**/id_ecdsa", "//**/id_ed25519", "//**/*.pem", "//**/*.key", "//**/*.p12",
+    "//**/*.pfx", "//**/*.jks", "//**/*.keystore",
+    # The CLIs' and build tools' own sign-ins.
+    "~/.claude.json", "~/.config/github-copilot/**", "~/.m2/settings.xml",
+    "~/.gradle/gradle.properties", "~/.config/pip/**", "~/.pip/**", "~/.terraformrc",
     # agy's throwaway copy of its sign-in token, wherever its scratch directory is, and
     # the loop's private directories for the reviewers' outputs and hermes's prompts.
     "//**/antigravity-oauth-token", "//**/mmcra-out-*/**", "//**/mmcra-prompt-*/**",

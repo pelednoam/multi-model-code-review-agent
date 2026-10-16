@@ -297,6 +297,42 @@ def _check_schema_shape(schema: object, path: Path) -> None:
     missing = sorted(REVIEW_KEYS - set(required))
     if missing:
         raise fail(f"it does not require {', '.join(missing)}")
+    # Without jsonschema, the commonest way a part is broken: a "type" that names no
+    # JSON type, anywhere in it, which agy would reject only after launch.
+    bad = _bad_type(schema)
+    if bad is not None:
+        raise fail(f"{bad!r} is not a JSON type")
+
+
+#: The types a JSON Schema "type" keyword may name.
+_JSON_TYPES = frozenset(
+    {"object", "array", "string", "number", "integer", "boolean", "null"}
+)
+
+
+def _bad_type(node: object) -> object | None:
+    """The first "type" value under ``node`` that names no JSON type, or None. Not
+    under "properties", whose keys are names, not keywords -- a property may be
+    called "type"."""
+    if isinstance(node, list):
+        return next((b for b in map(_bad_type, node) if b is not None), None)
+    if not isinstance(node, dict):
+        return None
+    kind = node.get("type")
+    if kind is not None:
+        kinds = kind if isinstance(kind, list) else [kind]
+        if not kinds or any(k not in _JSON_TYPES for k in kinds):
+            return kind
+    for key, value in node.items():
+        if key == "properties" and isinstance(value, dict):
+            found = _bad_type(list(value.values()))
+        elif key != "type":
+            found = _bad_type(value)
+        else:
+            continue
+        if found is not None:
+            return found
+    return None
 
 
 def agy_message(prompt: str) -> str:

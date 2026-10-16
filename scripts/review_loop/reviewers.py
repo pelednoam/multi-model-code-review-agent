@@ -26,7 +26,7 @@ from .agy import (
 )
 from .agy_sandbox import agy_seed_state, agy_wrapper
 from .agy_sandbox_check import agy_reachable
-from .claude_tools import claude_disallowed
+from .claude_tools import claude_disallowed, claude_tool_names
 from .config import (
     LATE_RESULT_GRACE,
     POLL_INTERVAL,
@@ -157,6 +157,10 @@ def _claude_cmd(slot: int) -> list[str]:
         "-p",
         "--model",
         model,
+        # The only tools it has at all: a second layer under the deny list, for a tool
+        # that list does not name (measured: a reviewer given these lists these alone).
+        "--tools",
+        claude_tool_names(_CLAUDE_TOOLS),
         "--allowedTools",
         _CLAUDE_TOOLS,
         # --allowedTools only exempts these from the permission prompt; it

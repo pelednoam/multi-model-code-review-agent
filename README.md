@@ -174,6 +174,12 @@ and branch arcs. The correctness reviewer is instructed to turn each
 gap into a concrete test-case finding with `suggested_fix` containing
 the runnable test code -- not a description.
 
+Coverage is measured in the pytest process only: code your tests run in a
+subprocess (a script invoked through `subprocess.run`, say) shows as a gap
+though it is tested. Configure coverage to follow subprocesses (its
+`patch = ["subprocess"]` setting, coverage 7.10 or later) if your project
+tests that way, or read such gaps knowing this.
+
 The merge agent applies those test cases verbatim, so a single
 convergence round closes the loop: detect uncovered code -> write the
 test -> verify coverage rises -> pass the gate -> commit.
@@ -369,6 +375,13 @@ only:
 It cannot see prior conversation, prior rounds, or the orchestrator's
 notes. Findings either get applied verbatim or not at all -- there's
 no negotiation in the loop.
+
+It has no Bash, and it may not write the repository's `.git` or the
+shells' startup files. That does not make fix mode safe on a branch you
+would not run: the findings it applies come from reviewing that branch,
+the gate then runs the project's tests -- which it may have just
+edited -- and a commit runs the project's hooks. Run fix mode, like the
+tests, only on code you trust; `--report-only` runs no merge agent.
 
 ### Invoking the loop
 

@@ -136,10 +136,21 @@ _URL_SCHEME = r"(?<![a-zA-Z0-9+.-])" + _SCHEME_NAME
 _WEB_SCHEME = r"(?<![a-zA-Z0-9+.-])(?i:https?|wss?):"
 _OTHER_SCHEME = r"(?<![a-zA-Z0-9+.-])(?!(?i:https?|wss?):)" + _SCHEME_NAME
 _URL_USER = r"//[^\s/:\"?#\[\]]{0,256}:"
+#: In any other scheme -- postgres, redis, amqp -- what comes before the ":" says which
+#: it is: a host (localhost, or a name with a dot in it: redis://localhost:6379/@x)
+#: has a port after it, a user name a password -- "8080/abc" before the @ of a
+#: postgres URL whose user is "u".
+_URL_HOST = r"//(?:localhost|[^\s/:\"?#\[\].]{0,256}\.[^\s/:\"?#\[\]]{0,256}):"
+_URL_NAME = r"//(?!localhost:)[^\s/:\"?#\[\].]{0,256}:"
 #: A character of the password: it may hold ' or / (base64 often has one), but not a
 #: quote that closes a string literal -- one followed by , ) ] } ; : + or a space --
 #: or the pattern ran from one string into the next (['http://h:8080','ops@x']).
 _URL_PASSWORD_CHAR = r"(?:[^\s@\"?#']|'(?![,\])};:+\s]))"
+#: After a user name, a password may hold ? and #, as generated ones do -- but not
+#: with a "/" before them, which is a port, a path and a query (redis://h:6379/0?a@b).
+_URL_NAME_PASSWORD = (
+    r"(?:(?:[^\s@\"'/]|'(?![,\])};:+\s])){1,256}|" + _URL_PASSWORD_CHAR + r"{1,256})"
+)
 
 
 # SHAPE_PATTERNS recognise a credential by its own shape, with no help from a
@@ -187,18 +198,30 @@ SHAPE_PATTERNS = [
         + _URL_PASSWORD_CHAR
         + r"{1,256}@"
     ),
-    # Any other scheme -- postgres, redis, amqp -- has no port to mistake: "8080/abc"
-    # before the "@" is a password there.
+    # Any other scheme after a host: a port, then a path, is no password there either.
     re.compile(
         _OTHER_SCHEME
-        + _URL_USER
-        + r"(?!"
+        + _URL_HOST
+        + r"(?!\d{1,5}/)(?!"
         + _URL_FIELD
         + r"/)(?!"
         + _URL_PLACEHOLDER
         + r"@)"
         + _URL_PASSWORD_CHAR
         + r"{1,256}@"
+    ),
+    # After a user name, there is no port to mistake: "8080/abc" before the "@" is a
+    # password (``_URL_NAME_PASSWORD``).
+    re.compile(
+        _OTHER_SCHEME
+        + _URL_NAME
+        + r"(?!"
+        + _URL_FIELD
+        + r"/)(?!"
+        + _URL_PLACEHOLDER
+        + r"@)"
+        + _URL_NAME_PASSWORD
+        + r"@"
     ),
     # The same with no "/" in the password, which may then be any length: the scan
     # stops at the next "/", and every URL after it has one, so it stays linear.

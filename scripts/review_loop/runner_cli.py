@@ -28,7 +28,7 @@ from .agy import (
 from .agy_sandbox import agy_seed_state, agy_wrapper_parts
 from .agy_sandbox_check import agy_reachable
 from .backends import codex_usable, detect_backends
-from .claude_tools import claude_denied, claude_disallowed
+from .claude_tools import claude_denied, claude_disallowed, claude_tool_names
 from .config import env_flag
 from .findings import validate_result
 from .results import (
@@ -151,6 +151,11 @@ def _extract(raw: str, out: str, slot: str, backend: str = "", model: str = "") 
     agy's stream is read as such only when agy ran the slot, and only a finished turn
     counts. Then the loop's own ``validate_result``: the required keys, a list of
     findings that are objects, and the reviewer named by the slot, not by the model.
+
+    One difference from the loop: ``model``, the model the runner launched, replaces
+    the one the review names. The loop keeps what the reviewer reported -- the model
+    its prompt told it it was, which is the one launched unless the reviewer says
+    otherwise.
     """
     text = Path(raw).read_text(encoding="utf-8", errors="replace")
     if backend == "agy":
@@ -197,6 +202,13 @@ def _claude_deny(tools: str) -> int:
     return 0
 
 
+def _claude_tools(tools: str) -> int:
+    """Print the --tools value for a claude reviewer allowed ``tools``: the names it
+    grants, comma-separated (``claude_tools.claude_tool_names``)."""
+    print(claude_tool_names(tools))
+    return 0
+
+
 def _flag(name: str) -> int:
     """Exit 0 if the environment variable ``name`` says yes (``config.env_flag``)."""
     return 0 if env_flag(name) else 1
@@ -227,6 +239,7 @@ _COMMANDS: dict[str, Callable[..., int]] = {
     "extract": _extract,
     "placeholder": _placeholder,
     "claude-deny": _claude_deny,
+    "claude-tools": _claude_tools,
     "flag": _flag,
 }
 

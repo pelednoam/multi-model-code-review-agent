@@ -251,6 +251,9 @@ Then scrub it as the diff is -- it quotes project files, and goes into every pro
 
 ```bash
 python scripts/scrub_diff.py --text < "$REVIEW_TMP/context.raw.md" > "$REVIEW_TMP/context.md"
+echo "scrub exit $?"
+# Not left beside the prompts for the round, where a claude reviewer or the gemini CLI could read it.
+rm -f "$REVIEW_TMP/context.raw.md"
 ```
 
 Exit 1 means it redacted something: `context.md` is the redacted copy and safe to send, so say how many lines it redacted (its stderr) and go on -- prose about a project mentions environment files often, and that alone is redacted. Exit 2 means it failed and `context.md` is incomplete: **STOP**.
@@ -796,10 +799,13 @@ prepare_agy() {
 # and that TOOLS does not name, is denied -- the convergence loop's list and its parsing
 # (claude_tools.claude_denied), so the two cannot drift. A tool granted with a scope is granted whole
 # as far as the deny list goes, which the helper says.
-CLAUDE_DENY=()
+CLAUDE_DENY=() CLAUDE_TOOLS=""
 claude_deny() {
   local num=$1 tools=$2 denied
   CLAUDE_DENY=()
+  # And the only tools it has at all (--tools): a second layer, for a tool the deny list does not
+  # name.
+  CLAUDE_TOOLS="$(review_helper claude-tools "$tools")" || return 1
   denied="$(review_helper claude-deny "$tools" 2>"$OUT_DIR/claude-deny-$num.err")" || return 1
   sed "s/^/R$num: note: /" "$OUT_DIR/claude-deny-$num.err"
   [ -z "$denied" ] || CLAUDE_DENY=(--disallowedTools "$denied")
@@ -833,7 +839,7 @@ launch_cli() {
       # list covers. --permission-mode dontAsk: only what is allowed, whatever mode the user's
       # settings choose (bypassPermissions would run anything).
       { timeout --foreground -k 10 "$REVIEWER_TIMEOUT" claude -p --model "$model" \
-          --allowedTools "$tools" "${CLAUDE_DENY[@]}" \
+          --tools "$CLAUDE_TOOLS" --allowedTools "$tools" "${CLAUDE_DENY[@]}" \
           --strict-mcp-config --setting-sources user --permission-mode dontAsk \
           --output-format json < "$prompt_file" \
           1>"$OUT_DIR/claude-raw-$num.json" \

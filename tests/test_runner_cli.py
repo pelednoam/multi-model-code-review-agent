@@ -297,6 +297,28 @@ class TestRunnerCli:
         done = self._cli("agy-schema", str(schema))
         assert done.returncode == 1 and "nested too deeply" in done.stderr
 
+    def test_a_part_of_no_json_type_is_refused_without_jsonschema(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Without jsonschema, a schema with a broken part passed the check, for agy
+        # to reject only after launch, when the slot could not go to another backend.
+        from scripts.review_loop import agy
+
+        monkeypatch.setitem(sys.modules, "jsonschema", None)
+        schema = json.loads(SCHEMA_PATH.read_text())
+        schema["properties"]["findings"]["items"] = {"type": 5}
+        bad = tmp_path / "s.json"
+        bad.write_text(json.dumps(schema))
+        with pytest.raises(ValueError, match="not a JSON type"):
+            agy.agy_schema(bad)
+        # A property called "type" is a name, not the keyword.
+        schema["properties"]["findings"]["items"] = {
+            "type": "object",
+            "properties": {"type": {"type": "string"}},
+        }
+        bad.write_text(json.dumps(schema))
+        assert json.loads(agy.agy_schema(bad))["type"] == "object"
+
     def test_the_real_schema_is_usable(self) -> None:
         done = self._cli("agy-schema", str(SCHEMA_PATH))
         assert done.returncode == 0 and json.loads(done.stdout)["type"] == "object"

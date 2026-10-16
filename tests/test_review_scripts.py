@@ -1338,6 +1338,12 @@ class TestMergeAgentPrompt:
         assert cmd[cmd.index("--setting-sources") + 1] == "user"
         assert "--strict-mcp-config" in cmd
         assert cmd[cmd.index("--permission-mode") + 1] == "dontAsk"
+        assert cmd[cmd.index("--tools") + 1] == "Read,Edit,Write,Grep,Glob"
+        # Nor may it write what runs code on its own: the repository's git hooks, the
+        # shells' startup files (a scope on Edit does not confine it; a deny does).
+        assert f"Edit(/{tmp_path.resolve()}/.git/**)" in denied.split()
+        assert f"Write(/{tmp_path.resolve()}/.git/**)" in denied.split()
+        assert "Write(~/.bashrc)" in denied.split()
 
 
 class TestAuditIsData:
@@ -2791,6 +2797,8 @@ class TestCredentialShapes:
             "postgres://u" + ":pass/W0rd9" + "@db/prod",
             "postgres://u" + ":8080/abc" + "@db/prod",
             "HTTPS://u" + ":p4ssw0rd9" + "@proxy:3128",
+            "postgres://u" + ":a#b?c9" + "@db",
+            "postgres://app.user" + ":hunter2" + "@db",
             "ya" + "29." + "a" * 30,
             "1/" + "/0" + "a" * 40,
             "GOC" + "SPX-" + "a" * 28,
@@ -2811,7 +2819,7 @@ class TestCredentialShapes:
              "url-quote-password", "url-azure-user", "url-ipv6-host", "url-dollar-password", "url-numeric-password",
              "url-long-password", "url-no-user-slash-password",
              "url-placeholder-word-prefix", "url-digits-slash-password",
-             "url-upper-case-scheme",
+             "url-upper-case-scheme", "url-query-chars-password", "url-dotted-user",
              "google-oauth-access", "google-oauth-refresh",
              "google-client-secret", "huggingface", "npm", "pypi", "google-api-key", "github-fine-grained", "github-app",
              "stripe-live", "slack", "slack-app", "slack-webhook", "discord-webhook",
@@ -2873,6 +2881,9 @@ class TestCredentialShapes:
             "http://localhost:${PORT}/@scope/pkg",
             "['http://localhost:8080','ops@example.com']",
             "redis://h:6379/0?x=a@b",
+            "redis://localhost:6379/@x",
+            "amqp://broker.internal:5672/@vhost",
+            "redis://10.0.0.1:6379/0@x",
         ],
     )
     def test_a_query_or_fragment_with_an_at_is_kept(self, url: str) -> None:
@@ -3087,6 +3098,29 @@ class TestAMissingReviewerIsNotConvergence:
 
 class TestSecretReads:
     """What a claude reviewer may never read."""
+
+    def test_only_the_granted_tools_exist_for_a_reviewer(self) -> None:
+        # The deny list names what it denies; --tools leaves claude nothing else, for
+        # a tool the list does not name (measured: given these, it listed these alone).
+        from scripts.review_loop import reviewers
+
+        cmd = reviewers._claude_cmd(1)
+        assert cmd[cmd.index("--tools") + 1] == "Read,Grep,Glob"
+        assert claude_tools.claude_tool_names("Read Bash(git log:*), Grep") == (
+            "Read,Bash,Grep"
+        )
+        assert claude_tools.claude_tool_names("Read (") == ""  # unbalanced: nothing
+        runner = runner_script()
+        assert '--tools "$CLAUDE_TOOLS" --allowedTools "$tools"' in runner
+
+    def test_the_scrubbers_secret_files_are_denied_too(self) -> None:
+        # The scrubber would not send their contents; a reviewer could read them.
+        for name in scrub_diff.SECRET_NAMES:
+            assert f"//**/{name}" in SECRET_READS or any(
+                rule.endswith(f"/{name}") for rule in SECRET_READS
+            ), name
+        for suffix in scrub_diff.SECRET_SUFFIXES:
+            assert f"//**/*{suffix}" in SECRET_READS, suffix
 
     def test_shell_startup_and_history_files_are_denied(self) -> None:
         # It was measured reading ~/.bashrc, where API keys are exported.

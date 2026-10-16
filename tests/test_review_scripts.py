@@ -1438,6 +1438,20 @@ class TestMergeAgentPrompt:
         # CI definitions, which --auto-commit would push and CI would run.
         assert f"Write(/{plain.resolve()}/.github/**)" in denied
 
+    def test_a_home_no_rule_can_name_falls_back_to_its_tilde_form(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Dropped in silence, its denies were gone altogether.
+        from scripts.review_loop import merge_agent
+
+        odd = tmp_path / "a (b)"
+        odd.mkdir()
+        monkeypatch.setattr(merge_agent, "_homes", lambda: {odd})
+        (tmp_path / "repo").mkdir()
+        denied = merge_agent._merge_denied(tmp_path / "repo")
+        assert "Write(~/.bashrc)" in denied
+        assert not any("(b)" in rule for rule in denied)
+
     def test_a_worktree_inside_this_checkout_stays_editable(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -3293,9 +3307,28 @@ class TestAMissingReviewerIsNotConvergence:
         assert "INCOMPLETE: R2 produced no result" in said
         assert "Blocking findings: 1" in said
 
+    def test_a_tampered_tree_stops_fix_mode_with_12(self, tmp_path: Path) -> None:
+        # The merge agent, the gate and --auto-commit would have built on what a
+        # reviewer wrote.
+        import scripts.review_until_converged as loop
+
+        results = [self._blocking("a")] + [self._clean(n) for n in "bcd"]
+        with (
+            mock.patch.object(loop.tamper, "report", return_value=["?? planted.py x"]),
+            mock.patch.object(loop, "apply_fixes") as fixes,
+        ):
+            code, _, said = self._round(tmp_path, results)
+        assert code == 12 and "ABORT: the reviewers changed the working tree" in said
+        fixes.assert_not_called()
+        # --report-only reports it, and goes on to its own exit.
+        with mock.patch.object(loop.tamper, "report", return_value=["?? planted.py x"]):
+            code, _, _ = self._round(tmp_path, results, report_only=True)
+        assert code == 10
+
     def test_the_new_exit_code_is_documented(self) -> None:
         readme = (REPO_ROOT / "README.md").read_text()
         assert "| 11 | **Incomplete** |" in readme
+        assert "| 12 | **Tampered** |" in readme
 
 
 class TestSecretReads:
@@ -3498,7 +3531,44 @@ class TestTamper:
         # The round's own outputs are not a reviewer's.
         (round_dir / "raw-1.txt").write_text("")
         touched = tamper.report(tmp_path, before, round_dir)
-        assert touched == ["!! .venv/sitecustomize.py"]
+        assert len(touched) == 1 and touched[0].startswith("!! .venv/sitecustomize.py ")
+
+    def test_a_second_write_to_a_changed_file_is_reported(self, tmp_path: Path) -> None:
+        # Its status line was "M a.py" before and after: a reviewer's edit to a file
+        # already modified, or already untracked, was not seen.
+        from scripts.review_loop import tamper
+
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        git = ["git", "-C", str(tmp_path), "-c", "user.email=a@b", "-c", "user.name=a"]
+        (tmp_path / "a.py").write_text("x = 1\n")
+        subprocess.run([*git, "add", "a.py"], check=True)
+        subprocess.run([*git, "commit", "-q", "-m", "base"], check=True)
+        (tmp_path / "a.py").write_text("x = 2\n")  # the author's own change
+        (tmp_path / "new.py").write_text("y = 1\n")  # and an untracked file
+        before = tamper.snapshot(tmp_path)
+        (tmp_path / "a.py").write_text("x = 3\n")
+        (tmp_path / "new.py").write_text("y = 2\n")
+        touched = tamper.changed(before, tamper.snapshot(tmp_path))
+        assert any(" a.py " in line for line in touched)
+        assert any(" new.py " in line for line in touched)
+
+    def test_a_write_to_a_git_hook_is_reported(self, tmp_path: Path) -> None:
+        # Where a write becomes a command the loop's own git runs.
+        from scripts.review_loop import tamper
+
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        before = tamper.snapshot(tmp_path)
+        (tmp_path / ".git" / "hooks" / "pre-commit").write_text("#!/bin/sh\n")
+        touched = tamper.changed(before, tamper.snapshot(tmp_path))
+        assert any("pre-commit" in line for line in touched)
+
+    def test_an_unchanged_tree_reports_nothing(self, tmp_path: Path) -> None:
+        from scripts.review_loop import tamper
+
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        (tmp_path / "a.py").write_text("x\n")
+        before = tamper.snapshot(tmp_path)
+        assert tamper.changed(before, tamper.snapshot(tmp_path)) == []
 
 
 class TestAuditScrub:
@@ -3811,3 +3881,17 @@ class TestPlainDiff:
         assert set(diff._PLAIN) == {"--no-color", "--no-ext-diff", "--no-textconv"}
         doc = AGENT_DOC.read_text()
         assert "git diff --no-color --no-ext-diff --no-textconv --merge-base" in doc
+
+
+class TestSafeFileHeader:
+    def test_a_name_that_spells_a_safe_header_is_not_safe(self) -> None:
+        # Split into tokens, every a/ and b/ one named the scrubber, and the file's
+        # credentials passed as the scrubber's own fixtures.
+        spoof = "scripts/scrub_diff.py b/scripts/scrub_diff.py"
+        assert not scrub_diff._is_safe_file(f"diff --git a/{spoof} b/{spoof}\n")
+        assert scrub_diff._is_safe_file(
+            "diff --git a/scripts/scrub_diff.py b/scripts/scrub_diff.py\n"
+        )
+        assert not scrub_diff._is_safe_file(
+            "diff --git a/scripts/scrub_diff.py b/elsewhere.py\n"
+        )

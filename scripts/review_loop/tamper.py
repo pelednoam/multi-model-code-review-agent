@@ -33,7 +33,11 @@ backend added tomorrow is covered on the day it is added.
 from __future__ import annotations
 
 import contextlib
+import hashlib
+import os
 import subprocess
+import sys
+import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -41,35 +45,91 @@ if TYPE_CHECKING:
 
 
 def snapshot(repo: Path, exclude: Path | None = None) -> str:
-    """Everything git can see about the working tree, as one string.
+    """Everything git can see about the working tree, as one string: a line per path,
+    with what is in it.
 
-    ``--porcelain`` covers tracked modifications, staged changes and untracked
-    files, and ``--ignored=traditional`` every file under ignored paths, one per
-    line -- a reviewer's write into an existing .venv or .claude was invisible
-    without it, and with ``matching`` too, which names only the directory. Not
-    covered: a change to an ignored file already there, which git does not look
-    at, and a file whose content changed and changed back.
+    ``--porcelain`` lists tracked modifications, staged changes and untracked files,
+    and ``--ignored=traditional`` every file under ignored paths -- a reviewer's
+    write into an existing .venv or .claude was invisible without it. Each with a
+    fingerprint of its content (its size and mtime, for an ignored one): a status
+    line alone did not change when a file already modified, or already untracked,
+    was written again. And the repository's own git control files -- hooks, config,
+    info -- where a write becomes a command the loop's own git runs.
 
     ``exclude`` is the round's own directory, when it is inside the repository:
-    the round writes its outputs there, and they are no reviewer's doing.
+    the round writes its outputs there, and they are no reviewer's doing. Not
+    covered: a change to an ignored file that keeps its size and mtime.
     """
+    # No bytecode written into the tree from here on, by this process: a module the
+    # loop imports late would otherwise leave a __pycache__ the check calls a write.
+    sys.dont_write_bytecode = True
     cmd = [
-        "git", "status", "--porcelain=v1", "--untracked-files=all",
-        "--ignored=traditional", "--", ".",
+        "git", "-c", "core.fsmonitor=false", "status", "--porcelain=v1", "-z",
+        "--untracked-files=all", "--ignored=traditional", "--", ".",
     ]  # fmt: skip
     if exclude is not None:
         with contextlib.suppress(ValueError):
             # literal: its name is a path, not a glob ([ ] in it matched something else).
             relative = exclude.resolve().relative_to(repo.resolve())
             cmd.append(f":(exclude,literal){relative}")
-    done = subprocess.run(cmd, cwd=repo, capture_output=True, text=True, check=False)
-    return done.stdout
+    done = subprocess.run(
+        cmd, cwd=repo, capture_output=True, stdin=subprocess.DEVNULL, check=False
+    )
+    if done.returncode != 0:
+        # Not knowing is not "unchanged": a line no other snapshot has.
+        return f"?? git status failed ({done.returncode}) at {time.monotonic_ns()}\n"
+    lines = []
+    entries = done.stdout.decode("utf-8", errors="replace").split("\0")
+    skip = False
+    for entry in entries:
+        if skip:  # a rename's or copy's source path
+            skip = False
+            continue
+        if len(entry) < 4:
+            continue
+        status, path = entry[:2], entry[3:]
+        skip = status[0] in "RC"
+        lines.append(f"{status} {path} {_fingerprint(repo / path, status == '!!')}")
+    from .merge_agent import _git_dirs  # the same git directories it may not write
+
+    for git_dir in _git_dirs(repo):
+        for name in ("config", "hooks", "info"):
+            for control in _files(git_dir / name):
+                lines.append(f"git {control} {_fingerprint(control, False)}")
+    return "\n".join(sorted(set(lines))) + "\n"
+
+
+def _files(path: Path) -> list[Path]:
+    """``path`` if it is a file, or the files under it if it is a directory."""
+    if path.is_file() or path.is_symlink():
+        return [path]
+    if path.is_dir():
+        return sorted(p for p in path.rglob("*") if p.is_file() or p.is_symlink())
+    return []
+
+
+def _fingerprint(path: Path, cheap: bool) -> str:
+    """What is in ``path``: its content's hash, a link's target, or -- ``cheap``, for
+    the many files under an ignored path -- its size and mtime."""
+    try:
+        if path.is_symlink():
+            return "link:" + os.readlink(path)
+        if path.is_dir():
+            return "dir"
+        if cheap:
+            info = path.stat()
+            return f"{info.st_size}:{info.st_mtime_ns}"
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as exc:
+        return f"unreadable:{exc.errno}"
 
 
 def changed(before: str, after: str) -> list[str]:
-    """Every line the reviewers added to the tree's status, if any."""
-    was = set(before.splitlines())
-    return sorted(line for line in after.splitlines() if line not in was)
+    """What the reviewers changed: each path whose line is new or different, and
+    each that is gone."""
+    was, now = set(before.splitlines()), set(after.splitlines())
+    gone = [f"gone: {line}" for line in sorted(was - now)]
+    return sorted(now - was) + gone
 
 
 def report(repo: Path, before: str, exclude: Path | None = None) -> list[str]:

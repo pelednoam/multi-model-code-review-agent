@@ -7,6 +7,8 @@ Stops when:
   - Same blocking findings appear twice in a row (stuck)
   - Tests fail after fixes (regression -- stops without rollback)
   - Max rounds reached
+  - A reviewer changed the working tree (exit 12; fix mode only -- --report-only
+    reports it and goes on)
 
 Usage:
     python scripts/review_until_converged.py \\
@@ -167,14 +169,6 @@ def _run_one_round(
     )
     print(f"Reviewers finished in {time.time() - t0:.0f}s")
     touched = tamper.report(repo, untouched, round_dir)
-    if touched and not report_only:
-        # Not on top of what a reviewer wrote: the merge agent would edit beside it, the
-        # gate run it, and --auto-commit's `git add -A` commit and push it.
-        print(
-            "\nABORT: the reviewers changed the working tree; not applying fixes, "
-            "running the gate or committing. Inspect the files above."
-        )
-        return 12, previous_fp
 
     results = extract_results(round_dir, answered_by)
     print(_describe_results(results, n_lines))
@@ -232,6 +226,16 @@ def _run_one_round(
         # "max rounds without convergence" (6), which already owned 6.
         print("\nREPORT ONLY: findings written, nothing changed.")
         return 10, current_fp
+
+    if touched:
+        # Not on top of what a reviewer wrote: the merge agent would edit beside it, the
+        # gate run it, and --auto-commit's `git add -A` commit and push it. The round's
+        # findings and outputs are written all the same, above.
+        print(
+            "\nABORT: the reviewers changed the working tree; not applying fixes, "
+            "running the gate or committing. Inspect the files listed above."
+        )
+        return 12, current_fp
 
     if not apply_fixes(blocking, round_dir, backends, repo):
         print("\nMerge agent failed -- stopping.")

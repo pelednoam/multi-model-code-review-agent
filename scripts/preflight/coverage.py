@@ -155,8 +155,8 @@ def measure_test_coverage(
     Emits a warning when the diff contains Python files but none of
     them match the configured SOURCE_DIRS -- that's a signal the
     coverage gate is silently inoperative for this repo and the user
-    should override SOURCE_DIRS for their layout (e.g. add "backend/",
-    "app/", "lib/").
+    should set "source_dirs" in review-config.json at the repo root for their
+    layout (e.g. ["backend/", "app/", "lib/"]).
     """
     impl_files = _changed_impl_files(changed_files)
     if not impl_files:

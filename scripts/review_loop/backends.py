@@ -132,7 +132,7 @@ def codex_mcp_off(cwd: Path | None = None) -> list[str] | None:
             ["codex", "mcp", "list", "--json"], cwd=cwd, timeout=_CODEX_CHECK_TIMEOUT
         )
         servers = json.loads(done.stdout) if done.returncode == 0 else None
-    except (OSError, subprocess.TimeoutExpired, ValueError):
+    except (OSError, subprocess.TimeoutExpired, ValueError, RecursionError):
         return None
     if not isinstance(servers, list):
         return None

@@ -103,7 +103,7 @@ def _home_denies(repo: Path) -> tuple[list[str], list[Path]]:
     home only. Decided once for both, the exception in one took the other's denies.
     """
     target = repo.resolve()
-    rules: list[str] = []
+    rules: list[tuple[str, str]] = []  # each rule, and its ~/ form to fall back on
     paths: list[Path] = []
     for home in _homes():
         inside = target.relative_to(home) if target.is_relative_to(home) else None
@@ -118,7 +118,7 @@ def _home_denies(repo: Path) -> tuple[list[str], list[Path]]:
             ):
                 paths += around(base, target)
             else:
-                rules.append(f"/{home}/{pattern[2:]}")
+                rules.append((f"/{home}/{pattern[2:]}", pattern))
         if in_dot:
             # The home's other dot entries one by one, and around the way down within
             # the one that holds the repository.
@@ -130,8 +130,21 @@ def _home_denies(repo: Path) -> tuple[list[str], list[Path]]:
                 ]
             paths += around(home / str(top), target)
         else:
-            rules += [f"/{home}/{pattern[2:]}" for pattern in _HOME_DOT_DENIED]
-    return [rule for rule in rules if rule_safe(rule.replace("*", ""))], paths
+            rules += [
+                (f"/{home}/{pattern[2:]}", pattern) for pattern in _HOME_DOT_DENIED
+            ]
+    out = []
+    for rule, tilde in rules:
+        if rule_safe(rule.replace("*", "")):
+            out.append(rule)
+        elif tilde not in out:
+            # A home a rule cannot name: its ~/ form at least, which claude reads as
+            # $HOME, and said, not dropped in silence.
+            print(
+                f"  WARNING: the merge agent's deny {rule!r} cannot be written as it is"
+            )
+            out.append(tilde)
+    return out, paths
 
 
 def _trusted_checkout(repo: Path) -> list[Path]:

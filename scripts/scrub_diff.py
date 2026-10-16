@@ -325,19 +325,13 @@ _SCRUBBER_SAFE_FILES = frozenset(
 def _is_safe_file(diff_header: str) -> bool:
     """Check if a diff --git header names a safe file.
 
-    Parses both the a/ and b/ paths from the header and checks
-    that BOTH (stripped of the a/ or b/ prefix) are in the
-    safe-file set. This prevents rename-based bypass where one
-    side is a safe file but the other is attacker-controlled.
+    The header must be exactly a safe file's, both sides the same path: not a rename
+    of one, where the other side is attacker-controlled, and not a name whose spaces
+    make its tokens look like one (``scripts/scrub_diff.py b/scripts/scrub_diff.py``,
+    as a file name, gave a header of nothing but safe-looking tokens).
     """
-    parts = diff_header.split()
-    ab_paths = []
-    for part in parts:
-        if part.startswith("a/") or part.startswith("b/"):
-            ab_paths.append(part[2:])
-    if not ab_paths:
-        return False
-    return all(p in _SCRUBBER_SAFE_FILES for p in ab_paths)
+    header = diff_header.rstrip("\n")
+    return any(header == f"diff --git a/{p} b/{p}" for p in _SCRUBBER_SAFE_FILES)
 
 
 def _is_secret_file(diff_header: str) -> bool:

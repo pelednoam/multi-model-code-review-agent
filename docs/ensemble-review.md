@@ -236,8 +236,9 @@ If the diff is empty, fall back to `git diff --no-color --no-ext-diff --no-textc
 ```bash
 source .venv/bin/activate
 python3 scripts/review_preflight.py --output "$REVIEW_TMP/runtime-audit.raw.json"
-# Its strings scrubbed, as the diff is: it quotes the files under review, and a project's own
-# installed preflight may be too old to scrub them itself.
+# Each quoted line re-read whole from its source -- an older installed preflight cuts them at 120
+# characters, part of a credential with them -- then its strings scrubbed, as the diff is.
+python3 -I scripts/review_loop/runner_entry.py audit-requote "$REVIEW_TMP/runtime-audit.raw.json" "$PWD"
 python3 scripts/scrub_diff.py --json < "$REVIEW_TMP/runtime-audit.raw.json" \
   > "$REVIEW_TMP/runtime-audit.json"
 status=$?

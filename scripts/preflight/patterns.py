@@ -50,8 +50,10 @@ def scan_suspicious_patterns(
             continue
         try:
             # Numbered at "\n" alone, as git and the loop's re-quote number them, and
-            # read as UTF-8, which a non-ASCII file under LC_ALL=C raised on.
-            lines = path.read_text(encoding="utf-8", errors="replace").split("\n")
+            # read as UTF-8, which a non-ASCII file under LC_ALL=C raised on. As bytes:
+            # read as text, a "\r" became a line break anyway, between a credential's
+            # name and its value, and neither half was a credential to the scrub.
+            lines = path.read_bytes().decode("utf-8", errors="replace").split("\n")
         except OSError:
             continue
 

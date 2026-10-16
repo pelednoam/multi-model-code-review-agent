@@ -419,3 +419,20 @@ class TestHelperCopy:
         )  # fmt: skip
         assert done.returncode == 0, done.stderr
         assert done.stdout.strip() == "Read,Grep"
+
+
+class TestAuditRequote:
+    def test_full_mode_re_reads_cut_quotes_too(self, tmp_path: Path) -> None:
+        # The loop re-read them; full mode, which has the same older preflights, did not.
+        from scripts.review_loop import runner_cli
+
+        key = "gh" + "p_" + "a" * 36
+        source = "x = 1  # " + "." * 100 + f" t = '{key}'"
+        (tmp_path / "a.py").write_text(source + "\n")
+        raw = tmp_path / "raw.json"
+        quote = {"file": "a.py", "line": 1, "text": source[:120]}
+        raw.write_text(json.dumps({"suspicious_patterns": [quote]}))
+        assert runner_cli.main(["audit-requote", str(raw), str(tmp_path)]) == 0
+        assert (
+            "REDACTED" in json.loads(raw.read_text())["suspicious_patterns"][0]["text"]
+        )

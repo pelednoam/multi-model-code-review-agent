@@ -507,6 +507,10 @@ def scrub_line(
     return line
 
 
+#: A terminal colour or style escape, as git writes one.
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
 def _force_utf8(stream: object) -> None:
     """Pin a standard stream to UTF-8 with replacement.
 
@@ -553,7 +557,12 @@ def scrub_text() -> int:
             clean = _redact_preserving_prefix("+" + line)[1:]
             in_key = _key_open_after(line, True)
         else:
-            clean = scrub_line("+" + line, False, in_hunk=True)[1:]
+            # Read as the audit's quotes are (``redacts``), the literal URL check among
+            # it: text is not source, and a quote in it ends no string.
+            content = line.rstrip("\n")
+            clean = (
+                _redact_preserving_prefix("+" + line)[1:] if redacts(content) else line
+            )
             # A key on one line -- JSON- or \n-escaped -- opens no block: its END is on
             # that line too, and everything after it was redacted as its body.
             in_key = clean != line and _opens_key(line)
@@ -575,8 +584,11 @@ REDACTED_TEXT = REDACTED.removeprefix("# ")
 _LITERAL_URL_PASSWORD = re.compile(
     _URL_SCHEME
     + r"//[^\s/:?#\[\]]{0,256}:"
-    + _URL_NOT_A_PASSWORD
-    + r"[^\s@/?#]{1,256}@"
+    # No port to mistake, either: a wrong match here only replaces a value, so digits
+    # then ? or # (2024#Sec9) are read as the password they may be.
+    + r"(?!"
+    + _URL_PLACEHOLDER
+    + r"@)[^\s@/]{1,256}@"
 )
 
 
@@ -584,7 +596,9 @@ def redacts(text: str) -> bool:
     """Whether the scrubber would redact any line of ``text`` read as an added line of
     a diff, or it holds a URL password read literally (``_LITERAL_URL_PASSWORD``) --
     the one test the audit's quotes and a JSON document's strings share."""
-    for part in text.splitlines() or [text]:
+    # At "\n" alone: splitlines() also broke at "\r" and Unicode's separators, and a
+    # credential's name and value on either side of one went through apart.
+    for part in text.split("\n"):
         added = "+" + part + "\n"
         if scrub_line(added, False) != added or _LITERAL_URL_PASSWORD.search(part):
             return True
@@ -698,6 +712,9 @@ def main() -> None:
     in_hunk = False
 
     for line in sys.stdin:
+        # Colour codes off first: a diff in colour (color.diff=always) has an escape
+        # before every "+", and read as it came, no line was content.
+        line = _ANSI.sub("", line)
         # Fail closed on every header form, not just `diff --git`. `in_safe`
         # used to latch: a `diff --cc` section from a merge commit following a
         # safe file inherited its bypass, and any line in it containing

@@ -155,7 +155,7 @@ Bedrock opt-in precedence (PREFER_HERMES=true), used for regulated codebases tha
 |---|---|---|---|---|
 | `claude` | `-p` | `--tools Read,Grep,Glob` (the only tools it has at all; `claude_tools.claude_tool_names`, the runner's from `claude-tools`) and `--allowedTools "Read Grep Glob"` **plus** `--disallowedTools "Edit Write MultiEdit NotebookEdit Bash WebFetch WebSearch ReportFindings"` and `Read(...)` of each credential location (`claude_tools.SECRET_READS`; the runner gets the list from `claude-deny`), `--strict-mcp-config` (no MCP servers), `--setting-sources user` (no project hooks) and `--permission-mode dontAsk` -- `--allowedTools` alone only skips the permission prompt, it does *not* confine the agent | stdin (`< prompt.txt`) | `--output-format json` wraps in `{"result":"..."}` |
 | `codex` | `codex exec` **plus `-s read-only`, `-c approvals_reviewer="user"` and `-c project_doc_max_bytes=0`** (no AGENTS.md from the branch) (in both the convergence loop and this runner) -- all are pinned by the tool and none is optional (with `-c notify=[]`, and each configured MCP server turned off by name with `-c mcp_servers.<name>.enabled=false` -- `mcp_servers={}` leaves them on, measured -- so a configured or project-level `.codex/config.toml` runs nothing; a server whose name cannot be written so drops codex's slot; codex reads one only in a project you have marked trusted -- measured, an untrusted one's `model` was ignored -- and there its other keys, `model_provider` among them, would apply: do not mark a repository you review as trusted): no sandbox flag was passed at all before, and `-s read-only` on its own is silently overridden by a global `approvals_reviewer = "auto_review"` (see docs/codex-sandbox.md). Codex is also canary-tested at launch and its slot is DROPPED if the sandbox does not actually refuse a write (optional `-m <model> -c model_reasoning_effort=<level>` -- override via `CODEX_MODEL`, `CODEX_REASONING_EFFORT`; `=high` is the "GPT-5.5 Pro" equivalent) | verified read-only for writes, not assumed; its reads are not confined -- it can read your home directory, credentials included, and what it reads goes to OpenAI | stdin (file) | `-o <file>` writes last message |
-| `gemini` | `-p` | `--model <m> --approval-mode plan --skip-trust` (default `<m>` is `gemini-2.5-flash` for free-tier compatibility; override via `GEMINI_MODEL`) | stdin (file) | stdout (text, may have fences) |
+| `gemini` | (no `-p`: the prompt is on stdin, and gemini runs headless when stdin is not a terminal) | `--model <m> --approval-mode plan --skip-trust` (default `<m>` is `gemini-2.5-flash` for free-tier compatibility; override via `GEMINI_MODEL`) | stdin (file) | stdout (text, may have fences) |
 | `agy` | `--input-format stream-json --output-format stream-json` (no `-p`: the prompt is one JSON line on stdin, because a single argument is capped at 128 KB) **plus `--sandbox --disable-slash-commands`**, pinned. On by default where installed; `REVIEW_USE_AGY=0` switches it off. Model: `AGY_MODEL` if set, else the best Gemini model `agy models` lists, picked each run. agy has no deny list and was measured writing outside its workspace, so it runs under **bubblewrap** (see docs/agy-sandbox.md), verified at startup without a model call and again before each launch; the slot goes to its next backend if that fails. The prompt opens with a no-tools preamble: a refused tool call ends agy's turn with no answer | bubblewrap read-only filesystem, verified; `--sandbox --disable-slash-commands` (no `--mode=plan`: it is a slash command, so a no-op once expansion is off) | stdin (one stream-json line) | stream-json; the last `result` event carries `structured_output` (enforced by `--json-schema`) |
 | `hermes` | `-z --yolo --ignore-rules` (not the branch's AGENTS.md, SOUL.md or .cursorrules, nor memory) | none: `-t file` limits it to the file toolset, which writes under `--yolo`; only the convergence loop's tamper check reports writes | `-z` flag (has ARG_MAX risk for large prompts) | stdout (the answer text; the prompt asks for the JSON in the reply, not in a file) |
 
@@ -216,7 +216,9 @@ Collect ALL of these, not just the merge-base diff. Use a private temp directory
 # Named mmcra-review-*: a claude reviewer may not read it (claude_tools.SECRET_READS).
 REVIEW_TMP=$(mktemp -d /tmp/mmcra-review-XXXXXXXX)
 
-git diff --merge-base origin/main -- . \
+# --no-color --no-ext-diff --no-textconv: plain lines, whatever git's config says --
+# color.diff=always put an escape before every "+", and the scrubber passed each line.
+git diff --no-color --no-ext-diff --no-textconv --merge-base origin/main -- . \
   | python3 scripts/scrub_diff.py \
   > "$REVIEW_TMP/diff.patch"
 
@@ -227,7 +229,7 @@ git ls-files --others --exclude-standard > "$REVIEW_TMP/untracked.txt"
 
 If the scrubber exits non-zero, **STOP**. Secrets must be removed from the branch and rotated before re-running.
 
-If the diff is empty, fall back to `git diff HEAD~1 | python3 scripts/scrub_diff.py`. If still empty, ask what to review.
+If the diff is empty, fall back to `git diff --no-color --no-ext-diff --no-textconv HEAD~1 | python3 scripts/scrub_diff.py`. If still empty, ask what to review.
 
 ## 2. Run the deterministic preflight audit
 

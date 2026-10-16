@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from typing import TYPE_CHECKING
@@ -81,6 +82,12 @@ def _warn_of_vendored_changes(repo: Path, diff_range: list[str]) -> None:
         )
 
 
+#: A diff the scrubber can read, whatever the user's git config says: color.diff=always
+#: put an escape before every +, and the scrubber, seeing no +, passed each line; an
+#: external diff tool or a textconv filter changes the lines altogether.
+_PLAIN = ("--no-color", "--no-ext-diff", "--no-textconv")
+
+
 def _git_diff(cmd: list[str], repo: Path) -> subprocess.CompletedProcess[str]:
     """A git diff's output, decoded but not translated: read as text, a lone "\r" in
     a changed line became a line break, and what followed it reached the scrubber as
@@ -129,10 +136,12 @@ def collect_diff(round_dir: Path, repo: Path, base: str = DEFAULT_BASE) -> tuple
     pathspec = diff_pathspec(repo)
     untracked = _untracked(repo, pathspec)
     diff_range = ["--merge-base", base]
-    git = _git_diff(["git", "diff", *diff_range, "--", *pathspec], repo)
+    git = _git_diff(["git", "diff", *_PLAIN, *diff_range, "--", *pathspec], repo)
     if git.returncode != 0:
         diff_range = ["HEAD~1"]
-        fallback = _git_diff(["git", "diff", *diff_range, "--", *pathspec], repo)
+        fallback = _git_diff(
+            ["git", "diff", *_PLAIN, *diff_range, "--", *pathspec], repo
+        )
         if fallback.returncode != 0:
             raise RuntimeError(
                 f"failed to collect diff: {git.stderr}\n{fallback.stderr}"
@@ -145,7 +154,7 @@ def collect_diff(round_dir: Path, repo: Path, base: str = DEFAULT_BASE) -> tuple
         # change, and reviewing the last commit instead would review the
         # wrong thing without saying so.
         diff_range = ["HEAD~1"]
-        git = _git_diff(["git", "diff", *diff_range, "--", *pathspec], repo)
+        git = _git_diff(["git", "diff", *_PLAIN, *diff_range, "--", *pathspec], repo)
     _warn_of_vendored_changes(repo, diff_range)
     diff_input = (git.stdout or "") + untracked
     # Every hop is pinned to UTF-8 with replacement. scrub_diff.py pins its own
@@ -212,7 +221,9 @@ def _untracked(repo: Path, pathspec: list[str]) -> str:
         raise RuntimeError(f"failed to list untracked files: {listed.stderr}")
     parts: list[str] = []
     for name in (one for one in listed.stdout.split("\0") if one):
-        added = _git_diff(["git", "diff", "--no-index", "--", "/dev/null", name], repo)
+        added = _git_diff(
+            ["git", "diff", *_PLAIN, "--no-index", "--", "/dev/null", name], repo
+        )
         # --no-index exits 1 when the two sides differ, which a new file
         # against /dev/null always does; anything else is git failing.
         if added.returncode not in (0, 1):
@@ -264,10 +275,48 @@ def run_preflight(round_dir: Path, repo: Path) -> Path:
                 f"preflight failed (no audit JSON, exit {result.returncode}): "
                 f"{result.stderr}"
             )
+        _requote_from_source(raw, repo)
         _scrub_audit(raw, audit_path)
     finally:
         raw.unlink(missing_ok=True)
     return audit_path
+
+
+def _requote_from_source(raw: Path, repo: Path) -> None:
+    """Redact, in the raw audit, each quoted line whose whole source line holds a
+    credential. An installed preflight older than this checkout quotes lines cut to
+    120 characters, and a credential cut at the boundary was only partly there for
+    the scrub after it to see; the file and line it names are read whole here."""
+    # Here, not at the top: the full-mode runner's private copy of this package has no
+    # scrub_diff beside it, and imports this module (the package's __init__ does).
+    from scripts.scrub_diff import REDACTED_TEXT, redacts
+
+    try:
+        audit = json.loads(raw.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError):
+        return  # the scrub after this refuses it
+    hits = audit.get("suspicious_patterns") if isinstance(audit, dict) else None
+    if not isinstance(hits, list):
+        return
+    root = repo.resolve()
+    changed = False
+    for hit in hits:
+        file = hit.get("file") if isinstance(hit, dict) else None
+        number = hit.get("line") if isinstance(hit, dict) else None
+        if not isinstance(file, str) or not isinstance(number, int) or number < 1:
+            continue
+        path = (root / file).resolve()
+        if not path.is_relative_to(root):
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").split("\n")
+        except OSError:
+            continue
+        if number <= len(lines) and redacts(lines[number - 1]):
+            hit["text"] = REDACTED_TEXT
+            changed = True
+    if changed:
+        raw.write_text(json.dumps(audit), encoding="utf-8")
 
 
 def _scrub_audit(raw: Path, audit_path: Path) -> None:

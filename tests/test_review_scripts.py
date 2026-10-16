@@ -3440,6 +3440,12 @@ class TestScrubText:
         )  # fmt: skip
         assert "MIIsecond" not in done.stdout and done.stdout.endswith("+after\n")
 
+    def test_a_quote_in_a_text_url_password_ends_nothing(self) -> None:
+        # Scrubbed as source, its ' followed by ")" was taken for a string's end.
+        url = "postgresql://alice:" + "K7a');s9" + "@db/prod"
+        done = self._scrub(f"see {url} here\n")
+        assert done.returncode == 1 and url not in done.stdout
+
     def test_clean_text_passes_through(self) -> None:
         done = self._scrub("nothing here\n")
         assert done.returncode == 0 and done.stdout == "nothing here\n"
@@ -3509,6 +3515,23 @@ class TestAuditScrub:
             diff._scrub_audit(raw, tmp_path / "audit.json")
         # Nothing written for the prompts to read.
         assert not (tmp_path / "audit.json").exists()
+
+    def test_a_quote_cut_by_an_older_preflight_is_read_whole(
+        self, tmp_path: Path
+    ) -> None:
+        # Cut to 120 characters, a credential at the boundary was only partly there for
+        # the scrub to see; the source line is read whole.
+        from scripts.review_loop import diff
+
+        key = "gh" + "p_" + "a" * 36
+        source = "x = 1  # " + "." * 100 + f" t = '{key}'"
+        (tmp_path / "a.py").write_text(source + "\n")
+        raw = tmp_path / "raw.json"
+        quote = {"file": "a.py", "line": 1, "text": source[:120]}
+        raw.write_text(json.dumps({"suspicious_patterns": [quote]}))
+        diff._requote_from_source(raw, tmp_path)
+        hit = json.loads(raw.read_text())["suspicious_patterns"][0]
+        assert hit["text"] == scrub_diff.REDACTED_TEXT
 
     def test_no_raw_audit_is_left_in_the_round(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -3596,6 +3619,17 @@ class TestScrubJson:
         assert code == 1
         home = "http://host:8080/@scope/p"
         assert out == {"dsn": scrub_diff.REDACTED_TEXT, "home": home}
+
+    def test_a_credential_across_a_carriage_return_is_redacted(self) -> None:
+        # splitlines() broke the string at the CR, between the name and its value.
+        field = "pass" + "word"
+        code, out = self._scrub({"notes": f'{field} = "x\rhunter2"'})
+        assert code == 1 and out == {"notes": scrub_diff.REDACTED_TEXT}
+
+    def test_a_digit_led_password_in_a_decoded_url_is_redacted(self) -> None:
+        url = "postgres://u:" + "2024#Sec9" + "@db"
+        code, out = self._scrub({"dsn": url})
+        assert code == 1 and out == {"dsn": scrub_diff.REDACTED_TEXT}
 
     def test_a_redacted_key_does_not_overwrite_another(self) -> None:
         # Renamed to "<marker> <index>", it could equal a key already there, and one
@@ -3730,3 +3764,28 @@ class TestCarriageReturn:
         with pytest.raises(diff.SecretsDetectedError):
             diff.collect_diff(round_dir, repo, base)
         assert key not in (round_dir / "diff.patch").read_text(errors="replace")
+
+
+class TestPlainDiff:
+    """The diff the scrubber reads is plain, whatever git's config says."""
+
+    def test_a_colour_diff_is_still_scrubbed(self) -> None:
+        # color.diff=always put an escape before every "+": no line was content, and
+        # the scrubber passed them all with exit 0.
+        key = "gh" + "p_" + "a" * 36
+        diff = (
+            "\x1b[1mdiff --git a/a.py b/a.py\x1b[m\n\x1b[36m@@ -1 +1,2 @@\x1b[m\n"
+            f"\x1b[32m+t = '{key}'\x1b[m\n"
+        )
+        done = subprocess.run(
+            [sys.executable, str(SCRUB_SCRIPT)], input=diff, capture_output=True,
+            text=True, timeout=30,
+        )  # fmt: skip
+        assert done.returncode == 1 and key not in done.stdout
+
+    def test_the_loop_asks_git_for_a_plain_diff(self) -> None:
+        from scripts.review_loop import diff
+
+        assert set(diff._PLAIN) == {"--no-color", "--no-ext-diff", "--no-textconv"}
+        doc = AGENT_DOC.read_text()
+        assert "git diff --no-color --no-ext-diff --no-textconv --merge-base" in doc

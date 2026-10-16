@@ -775,8 +775,14 @@ have detected it via fingerprint matching and exited with code 2
   to its private temporary directory, in the loop beside the round's
   `audit.json` -- scrubbed, and the raw copy removed whatever happens; a
   failed scrub stops the review.
-  Exits non-zero on redaction, blocking the review until secrets are
-  removed and rotated.
+  A redaction in the diff exits 1 and blocks the review until the secret
+  is removed and rotated; in the audit or context bundle the line is
+  replaced and the review goes on. The scrub covers what is put in the
+  prompts: reviewers that read the repository themselves (claude's Read
+  and Grep, codex, gemini) see its files as they are, so a credential
+  kept in the tree is readable to them -- the credential read denies
+  cover common locations, not every file. Only agy has the repository
+  hidden.
 - **Evidence-based convergence**: a single finding with artifact
   evidence is high-priority even if only one reviewer flags it.
 - **Strict schema**: `additionalProperties: false` at both levels.

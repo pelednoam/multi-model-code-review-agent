@@ -78,9 +78,13 @@ def _run_pytest_with_coverage(warnings: list[str]) -> dict[str, Any] | None:
         for d in SOURCE_DIRS
         if _inside(d) and (REPO_ROOT / d).exists()
     ]
+    outside = [d for d in SOURCE_DIRS if not _inside(d)]
+    if outside:
+        warnings.append(f"source_dirs ignored (outside the repo): {outside}")
     if not cov_sources:
         warnings.append(
-            f"coverage gate inoperative: no SOURCE_DIRS exist on disk: {SOURCE_DIRS}"
+            "coverage gate inoperative: no usable SOURCE_DIRS (missing or outside"
+            f" the repo): {SOURCE_DIRS}"
         )
         return None
     test_dirs = _test_dirs()

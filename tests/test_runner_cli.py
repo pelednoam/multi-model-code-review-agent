@@ -402,3 +402,19 @@ class TestRunnerCliInProcess:
         with pytest.raises(SystemExit) as done:
             runpy.run_path(str(REPO_ROOT / TestRunnerCli.ENTRY), run_name="__main__")
         assert done.value.code == 1
+
+
+class TestHelperCopy:
+    def test_the_package_alone_still_runs(self, tmp_path: Path) -> None:
+        # The runner runs a private copy of scripts/review_loop with nothing beside it;
+        # a top-level import of scripts.scrub_diff in the package broke every command.
+        copy = tmp_path / "scripts"
+        copy.mkdir()
+        shutil.copytree(REPO_ROOT / "scripts" / "review_loop", copy / "review_loop")
+        done = subprocess.run(
+            [sys.executable, "-I", str(copy / "review_loop" / "runner_entry.py"),
+             "claude-tools", "Read Grep"],
+            capture_output=True, text=True, timeout=60,
+        )  # fmt: skip
+        assert done.returncode == 0, done.stderr
+        assert done.stdout.strip() == "Read,Grep"

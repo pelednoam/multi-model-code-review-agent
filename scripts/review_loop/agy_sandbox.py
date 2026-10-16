@@ -247,8 +247,13 @@ def agy_wrapper_parts(
             wrap += ["--ro-bind", target, path]
     wrap += ["--bind", str(state), str(real)]
     for name in _AGY_STATE_SHARED:
-        if (real / name).is_dir():
-            wrap += ["--ro-bind", str(real / name), str(real / name)]
+        shared = real / name
+        if shared.is_symlink():
+            # Mounted where it points, a link to the home would put the home, hidden
+            # above, back inside.
+            raise OSError(f"{shared} is a symlink; agy's sandbox will not mount it")
+        if shared.is_dir():
+            wrap += ["--ro-bind", str(shared), str(shared)]
     wrap += ["--bind", str(workspace), str(workspace)]
     values = {var: os.environ[var] for var in _AGY_ENV if var in os.environ}
     # The home its state was mounted under, resolved: a HOME that is a link -- from

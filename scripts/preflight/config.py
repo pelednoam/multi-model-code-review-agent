@@ -105,7 +105,8 @@ ARTIFACT_DIRS: list[str] = [
 # project you almost certainly need to override.
 SOURCE_DIRS: list[str] = _dirs("source_dirs", ["src/", "research/"])
 
-# Directories that hold tests. Used by the test/impl alignment warning.
+# Directories that hold tests. The coverage gate runs pytest on these (those that exist
+# inside the repository), and the test/impl alignment warning reads them.
 TEST_DIRS: list[str] = _dirs("test_dirs", ["tests/"])
 
 SUSPICIOUS_COMPILED: list[tuple[re.Pattern[str], str]] = [

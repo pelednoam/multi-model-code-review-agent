@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import IO, Any
 
 from .claude_tools import (
+    around,
     claude_disallowed,
     claude_tool_names,
     rule_safe,
@@ -91,29 +92,15 @@ def _homes() -> set[Path]:
     return homes
 
 
-def _around(ancestor: Path, repo: Path) -> list[Path]:
-    """What is in ``ancestor`` other than the way down to ``repo``: at each level, the
-    entries beside the one leading to it. Denying these instead of all of ``ancestor``
-    keeps the repository writable, and the rest of ``ancestor`` denied."""
-    out: list[Path] = []
-    here = ancestor
-    for part in repo.relative_to(ancestor).parts:
-        with contextlib.suppress(OSError):
-            out += [entry for entry in here.iterdir() if entry.name != part]
-        here = here / part
-    return out
-
-
 def _home_denies(repo: Path) -> tuple[list[str], list[Path]]:
     """The home's write denies for the merge agent: rules for ``_MERGE_WRITE_DENIED``
     and ``_HOME_DOT_DENIED``, and paths for those that hold ``repo``.
 
     A directory-wide one that holds the repository (~/.local/src/project,
     ~/.worktrees/project) would deny the files the agent is there to fix: it is
-    replaced by what is around the way down to it (``_around``).
+    replaced by what is around the way down to it (``claude_tools.around``).
     """
     target = repo.resolve()
-    rules: list[str] = []
     paths: list[Path] = []
     holding = set()
     for home in _homes():
@@ -124,7 +111,7 @@ def _home_denies(repo: Path) -> tuple[list[str], list[Path]]:
             base = home / pattern[2:].removesuffix("/**")
             if pattern.endswith("/**") and target.is_relative_to(base):
                 holding.add(pattern)
-                paths += _around(base, target)
+                paths += around(base, target)
         if top and top[0].startswith("."):
             # The home's other dot entries one by one, and around the way down within
             # the one that holds the repository.
@@ -135,7 +122,7 @@ def _home_denies(repo: Path) -> tuple[list[str], list[Path]]:
                     for entry in home.iterdir()
                     if entry.name.startswith(".") and entry.name != top[0]
                 ]
-            paths += _around(home / top[0], target)
+            paths += around(home / top[0], target)
     rules = [p for p in (*_MERGE_WRITE_DENIED, *_HOME_DOT_DENIED) if p not in holding]
     return with_account_home(tuple(rules)), paths
 
@@ -175,7 +162,7 @@ def _merge_denied(repo: Path) -> list[str]:
             paths += [f"/{root}", f"/{root}/**"]
     paths += home_rules
     writes = [f"{tool}({path})" for path in paths for tool in ("Edit", "Write")]
-    return [*claude_disallowed(_MERGE_TOOLS), *writes]
+    return [*claude_disallowed(_MERGE_TOOLS, repo), *writes]
 
 
 def _format_fixes(findings: list[dict[str, Any]]) -> str:

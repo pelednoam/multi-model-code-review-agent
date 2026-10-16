@@ -3320,6 +3320,22 @@ class TestSecretReads:
         assert not claude_tools.rule_safe(name)
         assert claude_tools.rule_safe("/home/plain-name_1.x")
 
+    def test_a_repository_under_a_denied_directory_stays_readable(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Denied ~/.docker/** whole, a repository kept under it could not be read by
+        # its own reviewers.
+        monkeypatch.setenv("HOME", str(tmp_path))
+        repo = tmp_path / ".docker" / "src" / "project"
+        repo.mkdir(parents=True)
+        (tmp_path / ".docker" / "config.json").write_text("{}")
+        denied = claude_tools.claude_disallowed("Read Grep Glob", repo)
+        assert "Read(~/.docker/**)" not in denied
+        assert f"Read(/{tmp_path / '.docker' / 'config.json'})" in denied
+        assert not any(str(repo) in rule for rule in denied)
+        # Elsewhere, the rule stands.
+        assert "Read(~/.docker/**)" in claude_tools.claude_disallowed("Read", tmp_path)
+
     def test_shell_startup_and_history_files_are_denied(self) -> None:
         # It was measured reading ~/.bashrc, where API keys are exported.
         for path in ("~/.bashrc", "~/.zshrc", "~/.bash_history", "~/.pgpass"):
@@ -3573,6 +3589,14 @@ class TestScrubJson:
         code, out = self._scrub({key: 1, "other": 2})
         assert code == 1 and key not in json.dumps(out) and out["other"] == 2
 
+    def test_an_apostrophe_in_a_decoded_url_password_ends_nothing(self) -> None:
+        # Read as source, its ' followed by a comma was taken for a string's end.
+        url = "postgresql://alice:" + "p4ss',x" + "@db/prod"
+        code, out = self._scrub({"dsn": url, "home": "http://host:8080/@scope/p"})
+        assert code == 1
+        home = "http://host:8080/@scope/p"
+        assert out == {"dsn": scrub_diff.REDACTED_TEXT, "home": home}
+
     def test_a_redacted_key_does_not_overwrite_another(self) -> None:
         # Renamed to "<marker> <index>", it could equal a key already there, and one
         # of the two values was lost.
@@ -3680,3 +3704,29 @@ class TestCoverageDirs:
         )  # fmt: skip
         coverage._run_pytest_with_coverage(warnings)
         assert any("test_dirs ignored" in w and "missing/" in w for w in warnings)
+
+
+class TestCarriageReturn:
+    """A lone carriage return in a changed line."""
+
+    def test_a_credential_after_a_lone_cr_is_redacted(self, tmp_path: Path) -> None:
+        # Read as text, git's output had the CR turned into a line break, and what
+        # followed reached the scrubber with no + -- metadata to it -- and went out.
+        from scripts.review_loop import diff
+
+        repo = tmp_path / "repo"
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        git = ["git", "-C", str(repo), "-c", "user.email=a@b", "-c", "user.name=a"]
+        (repo / "a.py").write_text("x = 1\n")
+        subprocess.run([*git, "add", "a.py"], check=True)
+        subprocess.run([*git, "commit", "-q", "-m", "base"], check=True)
+        key = "gh" + "p_" + "a" * 36
+        (repo / "a.py").write_bytes(b"x = 1\ny = 2\r" + key.encode() + b"\n")
+        round_dir = tmp_path / "round"
+        round_dir.mkdir()
+        base = subprocess.run(
+            [*git, "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+        ).stdout.strip()
+        with pytest.raises(diff.SecretsDetectedError):
+            diff.collect_diff(round_dir, repo, base)
+        assert key not in (round_dir / "diff.patch").read_text(errors="replace")

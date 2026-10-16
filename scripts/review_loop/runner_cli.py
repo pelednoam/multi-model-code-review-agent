@@ -188,7 +188,7 @@ def _extract(raw: str, out: str, slot: str, backend: str = "", model: str = "") 
     return 0
 
 
-def _claude_deny(tools: str) -> int:
+def _claude_deny(tools: str, repo: str = "") -> int:
     """Print what a claude reviewer allowed ``tools`` is denied, space-separated.
 
     ``claude_tools.claude_disallowed``: the tools it is not granted, and reads of the
@@ -202,7 +202,7 @@ def _claude_deny(tools: str) -> int:
             " each use, which settings can turn off",
             file=sys.stderr,
         )
-    print(" ".join(claude_disallowed(tools)))
+    print(" ".join(claude_disallowed(tools, Path(repo) if repo else None)))
     return 0
 
 

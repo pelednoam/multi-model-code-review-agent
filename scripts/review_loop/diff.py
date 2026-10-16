@@ -81,6 +81,21 @@ def _warn_of_vendored_changes(repo: Path, diff_range: list[str]) -> None:
         )
 
 
+def _git_diff(cmd: list[str], repo: Path) -> subprocess.CompletedProcess[str]:
+    """A git diff's output, decoded but not translated: read as text, a lone "\r" in
+    a changed line became a line break, and what followed it reached the scrubber as
+    a line with no +, - or space -- metadata to it, and passed unscrubbed."""
+    done = subprocess.run(
+        cmd, cwd=repo, capture_output=True, stdin=subprocess.DEVNULL, check=False
+    )
+    return subprocess.CompletedProcess(
+        cmd,
+        done.returncode,
+        done.stdout.decode("utf-8", errors="replace"),
+        done.stderr.decode("utf-8", errors="replace"),
+    )
+
+
 def collect_diff(round_dir: Path, repo: Path, base: str = DEFAULT_BASE) -> tuple[Path, int]:
     """Collect the scrubbed diff between ``base`` and the working tree.
 
@@ -114,10 +129,10 @@ def collect_diff(round_dir: Path, repo: Path, base: str = DEFAULT_BASE) -> tuple
     pathspec = diff_pathspec(repo)
     untracked = _untracked(repo, pathspec)
     diff_range = ["--merge-base", base]
-    git = run(["git", "diff", *diff_range, "--", *pathspec], cwd=repo)
+    git = _git_diff(["git", "diff", *diff_range, "--", *pathspec], repo)
     if git.returncode != 0:
         diff_range = ["HEAD~1"]
-        fallback = run(["git", "diff", *diff_range, "--", *pathspec], cwd=repo)
+        fallback = _git_diff(["git", "diff", *diff_range, "--", *pathspec], repo)
         if fallback.returncode != 0:
             raise RuntimeError(
                 f"failed to collect diff: {git.stderr}\n{fallback.stderr}"
@@ -130,7 +145,7 @@ def collect_diff(round_dir: Path, repo: Path, base: str = DEFAULT_BASE) -> tuple
         # change, and reviewing the last commit instead would review the
         # wrong thing without saying so.
         diff_range = ["HEAD~1"]
-        git = run(["git", "diff", *diff_range, "--", *pathspec], cwd=repo)
+        git = _git_diff(["git", "diff", *diff_range, "--", *pathspec], repo)
     _warn_of_vendored_changes(repo, diff_range)
     diff_input = (git.stdout or "") + untracked
     # Every hop is pinned to UTF-8 with replacement. scrub_diff.py pins its own
@@ -197,7 +212,7 @@ def _untracked(repo: Path, pathspec: list[str]) -> str:
         raise RuntimeError(f"failed to list untracked files: {listed.stderr}")
     parts: list[str] = []
     for name in (one for one in listed.stdout.split("\0") if one):
-        added = run(["git", "diff", "--no-index", "--", "/dev/null", name], cwd=repo)
+        added = _git_diff(["git", "diff", "--no-index", "--", "/dev/null", name], repo)
         # --no-index exits 1 when the two sides differ, which a new file
         # against /dev/null always does; anything else is git failing.
         if added.returncode not in (0, 1):

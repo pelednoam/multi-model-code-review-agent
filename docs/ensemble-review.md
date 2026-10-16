@@ -848,7 +848,8 @@ claude_deny() {
   # And the only tools it has at all (--tools): a second layer, for a tool the deny list does not
   # name.
   CLAUDE_TOOLS="$(review_helper claude-tools "$tools")" || return 1
-  denied="$(review_helper claude-deny "$tools" 2>"$OUT_DIR/claude-deny-$num.err")" || return 1
+  denied="$(review_helper claude-deny "$tools" "$REVIEW_ROOT" 2>"$OUT_DIR/claude-deny-$num.err")" \
+    || return 1
   sed "s/^/R$num: note: /" "$OUT_DIR/claude-deny-$num.err"
   [ -z "$denied" ] || CLAUDE_DENY=(--disallowedTools "$denied")
 }
@@ -1284,9 +1285,16 @@ python3 scripts/validate_review_results.py "$REVIEW_TMP"/result-{1,2,3,4}.json
 BRANCH_SAFE=$(git rev-parse --abbrev-ref HEAD | tr -c 'a-zA-Z0-9._-' '_')
 REVIEW_DIR="data/reviews/$(date +%Y%m%d_%H%M%S)_${BRANCH_SAFE}"
 mkdir -p "$REVIEW_DIR"
+# What the round left, each only if it is there (a slot that did not run has no output).
+for f in diff.patch context.md runtime-audit.json round.log report.md \
+    prompt-{1,2,3,4}.txt result-{1,2,3,4}.json backend-{1,2,3,4}.txt \
+    stdout-{1,2,3,4}.txt claude-raw-{1,2,3,4}.json codex-out-{1,2,3,4}.txt \
+    stderr-{1,2,3,4}.txt extract-result-{1,2,3,4}.err; do
+  [ -f "$REVIEW_TMP/$f" ] && cp -- "$REVIEW_TMP/$f" "$REVIEW_DIR/"
+done
 ```
 
-Copy diff, context, audit, prompts, results, and report.
+`report.md` is written in section 9; copy it into `$REVIEW_DIR` then.
 
 ---
 

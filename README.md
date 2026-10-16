@@ -378,7 +378,8 @@ notes. Findings either get applied verbatim or not at all -- there's
 no negotiation in the loop.
 
 It has no Bash, and it may not write the repository's git directories
-(except one whose path holds a space, which the loop warns about) or the
+(except one whose path holds whitespace, a comma, a parenthesis or a glob
+character, which a permission rule cannot express; the loop warns about it) or the
 shells' startup files. That does not make fix mode safe on a branch you
 would not run: the findings it applies come from reviewing that branch,
 the gate then runs the project's tests -- which it may have just

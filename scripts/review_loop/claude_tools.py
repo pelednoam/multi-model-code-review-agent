@@ -6,6 +6,7 @@ One copy, for the convergence loop's claude reviewers and the full-mode runner's
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 from pathlib import Path
@@ -138,12 +139,55 @@ SECRET_READS = (
 )  # fmt: skip
 
 
-def claude_disallowed(tools: str) -> list[str]:
+def claude_disallowed(tools: str, repo: Path | None = None) -> list[str]:
     """The --disallowedTools entries for a claude reviewer allowed ``tools``: the
     tools of ``CLAUDE_DENIED`` it is not granted (``claude_denied``), and reads of
-    ``SECRET_READS``, which no grant lifts."""
+    ``SECRET_READS``, which no grant lifts -- but not of ``repo``, the repository
+    under review, where one of those holds it (``_reads_around``)."""
     denied, _ = claude_denied(tools)
-    return [*denied, *(f"Read({path})" for path in _secret_reads())]
+    reads = _secret_reads() if repo is None else _reads_around(_secret_reads(), repo)
+    return [*denied, *(f"Read({path})" for path in reads)]
+
+
+def around(ancestor: Path, target: Path) -> list[Path]:
+    """What is in ``ancestor`` other than the way down to ``target``: at each level,
+    the entries beside the one leading to it. Denying these instead of all of
+    ``ancestor`` leaves ``target`` reachable, and the rest of ``ancestor`` denied."""
+    out: list[Path] = []
+    here = ancestor
+    for part in target.relative_to(ancestor).parts:
+        with contextlib.suppress(OSError):
+            out += [entry for entry in here.iterdir() if entry.name != part]
+        here = here / part
+    return out
+
+
+def _rule_dir(rule: str) -> Path | None:
+    """The directory a ``.../**`` rule denies whole, or None for any other rule."""
+    if not rule.endswith("/**") or any(c in rule[:-3] for c in "*?[]{}"):
+        return None
+    if rule.startswith("~/"):
+        return Path(os.path.expanduser("~")) / rule[2:-3]
+    if rule.startswith("//"):
+        return Path(rule[1:-3])
+    return None
+
+
+def _reads_around(reads: list[str], repo: Path) -> list[str]:
+    """``reads``, but each that denies a directory holding ``repo`` -- one kept under
+    ~/.config, say -- replaced by what is around the way down to it: the reviewer is
+    there to read the repository, and the rest stays denied."""
+    target = repo.resolve()
+    out: list[str] = []
+    for rule in reads:
+        base = _rule_dir(rule)
+        if base is None or not target.is_relative_to(base.resolve()):
+            out.append(rule)
+            continue
+        for entry in around(base.resolve(), target):
+            if rule_safe(str(entry)):
+                out += [f"/{entry}", f"/{entry}/**"]
+    return out
 
 
 def rule_safe(path: str) -> bool:

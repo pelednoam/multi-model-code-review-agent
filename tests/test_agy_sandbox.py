@@ -725,3 +725,13 @@ class TestAgySandboxCheck(AgyCase):
             if p != Path("/")
         ]
         assert wrap == agy_sandbox.agy_wrapper(workspace, state, hidden)
+
+
+class TestAgySharedState(AgyCase):
+    def test_a_symlinked_shared_directory_is_not_mounted(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Mounted where it pointed, a link to the home put the hidden home back.
+        (agy_sandbox.agy_state_dir() / "builtin").symlink_to(tmp_path)
+        with pytest.raises(OSError, match="symlink"):
+            agy_sandbox.agy_wrapper(tmp_path / "ws", tmp_path / "st")

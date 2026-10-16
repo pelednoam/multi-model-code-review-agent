@@ -160,7 +160,7 @@ def _claude_alias(slot: int) -> str:
     return "opus" if slot in (1, 4) else "sonnet" if slot == 3 else "haiku"
 
 
-def _claude_cmd(slot: int) -> list[str]:
+def _claude_cmd(slot: int, repo: Path | None = None) -> list[str]:
     model = _claude_alias(slot)
     return [
         "claude",
@@ -181,7 +181,7 @@ def _claude_cmd(slot: int) -> list[str]:
         "--disallowedTools",
         # Built per launch: whether it repeats the ~/ rules under the account's own home
         # depends on $HOME at the time (claude_tools._secret_reads).
-        " ".join(claude_disallowed(_CLAUDE_TOOLS)),
+        " ".join(claude_disallowed(_CLAUDE_TOOLS, repo)),
         # No MCP servers: the user's own, configured for their sessions, would
         # each be a tool the deny list does not name.
         "--strict-mcp-config",
@@ -590,6 +590,9 @@ def _pick_backend(slot: int, round_: _Round) -> _Picked | None:
                 backends["codex"] = False
                 continue
             cmd = [*cmd[:2], *off, *cmd[2:]]
+        if cmd[0] == "claude":
+            # Its read denies made around the repository, where one would hold it.
+            cmd = _claude_cmd(slot, round_.repo)
         if cmd[0] not in ("agy", "gemini"):
             # In the repository under review, whose files its tools read: from the
             # directory the loop was started in -- a trusted checkout of this agent,
@@ -601,10 +604,15 @@ def _pick_backend(slot: int, round_: _Round) -> _Picked | None:
             # an empty directory of its own, checked to be outside it. Its prompt
             # carries the diff and the audit.
             workspace = _empty_workspace_outside_repo(round_.repo)
-            if workspace is not None:
-                _end_gemini_search(workspace)
-                return _Picked(cmd, "gemini", label, workspace)
-            print(f"  R{slot}: gemini has no workspace outside the repo (see TMPDIR)")
+            if workspace is None:
+                print(f"  R{slot}: gemini has no workspace outside the repo (TMPDIR?)")
+            else:
+                try:
+                    _end_gemini_search(workspace)
+                except OSError as exc:
+                    print(f"  R{slot}: could not prepare gemini's workspace ({exc})")
+                else:
+                    return _Picked(cmd, "gemini", label, workspace)
         else:
             prepared = _prepare_agy(slot, cmd, round_.repo, round_.round_dir.parent)
             if prepared is not None:

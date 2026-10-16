@@ -516,10 +516,14 @@ def _force_utf8(stream: object) -> None:
     mid-stream, and the exception escapes after an unknown number of lines have
     already been written: a truncated patch whose tail was never scrubbed.
     Replacement characters in a reviewer's diff are a far better outcome.
+
+    And lines split at "\n" alone, as git splits them: read with universal newlines,
+    a lone "\r" ended a line, and what followed it was a line of its own with no
+    +, - or space -- taken for metadata, and passed unscrubbed.
     """
     reconfigure = getattr(stream, "reconfigure", None)
     if reconfigure is not None:  # pragma: no branch - always a TextIOWrapper
-        reconfigure(encoding="utf-8", errors="replace")
+        reconfigure(encoding="utf-8", errors="replace", newline="\n")
 
 
 def _key_open_after(line: str, before: bool) -> bool:
@@ -564,12 +568,25 @@ def scrub_text() -> int:
 REDACTED_TEXT = REDACTED.removeprefix("# ")
 
 
+#: A URL's password in text that is not source: a decoded JSON value, a quoted line.
+#: There a quote ends no string literal, so the source patterns' rules for quotes do
+#: not apply (alice:p4ss',x@db is a password). Not in the diff's own scrub, where a
+#: wrong match aborts the review; here it only replaces a value.
+_LITERAL_URL_PASSWORD = re.compile(
+    _URL_SCHEME
+    + r"//[^\s/:?#\[\]]{0,256}:"
+    + _URL_NOT_A_PASSWORD
+    + r"[^\s@/?#]{1,256}@"
+)
+
+
 def redacts(text: str) -> bool:
     """Whether the scrubber would redact any line of ``text`` read as an added line of
-    a diff -- the one test the audit's quotes and a JSON document's strings share."""
+    a diff, or it holds a URL password read literally (``_LITERAL_URL_PASSWORD``) --
+    the one test the audit's quotes and a JSON document's strings share."""
     for part in text.splitlines() or [text]:
         added = "+" + part + "\n"
-        if scrub_line(added, False) != added:
+        if scrub_line(added, False) != added or _LITERAL_URL_PASSWORD.search(part):
             return True
     return False
 

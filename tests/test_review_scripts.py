@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
+from typing import Any
 
 import pytest
 
@@ -1324,7 +1325,11 @@ class TestMergeAgentPrompt:
         class Stop(Exception):
             pass
 
-        def popen(cmd: list[str], **_: object) -> None:
+        real_popen = subprocess.Popen
+
+        def popen(cmd: list[str], **kw: Any) -> object:
+            if cmd[0] != "claude":  # git, asked where the repository's git dirs are
+                return real_popen(cmd, **kw)
             seen.append(cmd)
             raise Stop
 
@@ -1344,6 +1349,32 @@ class TestMergeAgentPrompt:
         assert f"Edit(/{tmp_path.resolve()}/.git/**)" in denied.split()
         assert f"Write(/{tmp_path.resolve()}/.git/**)" in denied.split()
         assert "Write(~/.bashrc)" in denied.split()
+
+    def test_a_worktrees_own_git_directories_are_denied_too(
+        self, tmp_path: Path
+    ) -> None:
+        # In a linked worktree .git is a file naming the git directory elsewhere, and
+        # its hooks and config are in the shared one: denying <repo>/.git/** left both
+        # writable.
+        from scripts.review_loop import merge_agent
+
+        main = tmp_path / "main"
+        subprocess.run(["git", "init", "-q", str(main)], check=True)
+        subprocess.run(
+            ["git", "-C", str(main), "-c", "user.email=a@b", "-c", "user.name=a",
+             "commit", "-q", "--allow-empty", "-m", "x"],
+            check=True,
+        )  # fmt: skip
+        tree = tmp_path / "tree"
+        subprocess.run(
+            ["git", "-C", str(main), "worktree", "add", "-q", str(tree)], check=True
+        )
+        denied = merge_agent._merge_denied(tree)
+        common = (main / ".git").resolve()
+        assert f"Write(/{common}/**)" in denied
+        own = next(p for p in (common / "worktrees").iterdir())
+        assert f"Edit(/{own.resolve()}/**)" in denied
+        assert f"Edit(/{tree.resolve()}/.git)" in denied
 
 
 class TestAuditIsData:
@@ -2795,7 +2826,6 @@ class TestCredentialShapes:
             "postgres://u" + ":" + "q7A_" * 80 + "@db/prod",
             "redis://" + ":8080/abc" + "@cache:6379/0",
             "postgres://u" + ":pass/W0rd9" + "@db/prod",
-            "postgres://u" + ":8080/abc" + "@db/prod",
             "HTTPS://u" + ":p4ssw0rd9" + "@proxy:3128",
             "postgres://u" + ":a#b?c9" + "@db",
             "postgres://app.user" + ":hunter2" + "@db",
@@ -2818,7 +2848,7 @@ class TestCredentialShapes:
         ids=["url-userinfo", "url-no-user", "url-short-password", "url-slash-password",
              "url-quote-password", "url-azure-user", "url-ipv6-host", "url-dollar-password", "url-numeric-password",
              "url-long-password", "url-no-user-slash-password",
-             "url-placeholder-word-prefix", "url-digits-slash-password",
+             "url-placeholder-word-prefix",
              "url-upper-case-scheme", "url-query-chars-password", "url-dotted-user",
              "google-oauth-access", "google-oauth-refresh",
              "google-client-secret", "huggingface", "npm", "pypi", "google-api-key", "github-fine-grained", "github-app",
@@ -2882,6 +2912,10 @@ class TestCredentialShapes:
             "['http://localhost:8080','ops@example.com']",
             "redis://h:6379/0?x=a@b",
             "redis://localhost:6379/@x",
+            "redis://cache:6379/@x",
+            "amqp://rabbit:5672/@vhost",
+            # RFC 3986: userinfo ends at the first "/", so this is host u, port 8080.
+            "postgres://u:8080/abc@db/prod",
             "amqp://broker.internal:5672/@vhost",
             "redis://10.0.0.1:6379/0@x",
         ],

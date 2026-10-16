@@ -376,7 +376,8 @@ It cannot see prior conversation, prior rounds, or the orchestrator's
 notes. Findings either get applied verbatim or not at all -- there's
 no negotiation in the loop.
 
-It has no Bash, and it may not write the repository's `.git` or the
+It has no Bash, and it may not write the repository's git directories
+(except one whose path holds a space, which the loop warns about) or the
 shells' startup files. That does not make fix mode safe on a branch you
 would not run: the findings it applies come from reviewing that branch,
 the gate then runs the project's tests -- which it may have just

@@ -7,8 +7,9 @@ import tempfile
 import uuid
 from typing import TYPE_CHECKING, Any
 
-from .claude_tools import claude_disallowed, claude_tool_names
+from .claude_tools import claude_disallowed, claude_tool_names, with_account_home
 from .config import MERGE_TIMEOUT
+from .proc import run
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -25,21 +26,39 @@ _MERGE_TOOLS = "Read Edit Write Grep Glob"
 #: the tests the agent may have just edited, and the commit the project's own hooks,
 #: which are left on: they are the project's checks (README, "The convergence loop").
 _MERGE_WRITE_DENIED = (
-    "~/.bashrc", "~/.bash_profile", "~/.profile", "~/.zshrc", "~/.zshenv",
-    "~/.zprofile", "~/.config/**", "~/.local/**", "~/.ssh/**", "~/.claude/**",
+    "~/.bashrc", "~/.bash_profile", "~/.bash_login", "~/.bash_logout", "~/.profile",
+    "~/.zshrc", "~/.zshenv", "~/.zprofile", "~/.zlogin", "~/.zlogout",
+    "~/.gitconfig", "~/.npmrc", "~/.pythonrc*", "~/bin/**", "~/.cargo/**",
+    "~/.pip/**", "~/.config/**", "~/.local/**", "~/.ssh/**", "~/.claude/**",
 )  # fmt: skip
+
+
+def _git_dirs(repo: Path) -> list[Path]:
+    """The repository's git directories: its .git, and where git says they are -- in
+    a linked worktree .git is a file naming one elsewhere, with the shared hooks and
+    config in another."""
+    dirs = [repo / ".git", repo.resolve() / ".git"]
+    found = run(
+        ["git", "rev-parse", "--absolute-git-dir", "--git-common-dir"], cwd=repo
+    )
+    if found.returncode == 0:
+        # --git-common-dir may be relative, to the directory git ran in.
+        dirs += [(repo / line).resolve() for line in found.stdout.split("\n") if line]
+    return list(dict.fromkeys(dirs))
 
 
 def _merge_denied(repo: Path) -> list[str]:
     """The merge agent's --disallowedTools: the reviewers' list for its tools, and
-    writes to the repository's .git and to ``_MERGE_WRITE_DENIED``."""
-    root = str(repo.resolve()).rstrip("/")
-    paths: tuple[str, ...] = _MERGE_WRITE_DENIED
-    if any(c.isspace() for c in root):
-        # --disallowedTools takes its rules space-separated: this one would be two.
-        print(f"  WARNING: the merge agent is not denied {root}/.git: a space in it")
-    else:
-        paths = (f"/{root}/.git/**", *paths)
+    writes to the repository's git directories and to ``_MERGE_WRITE_DENIED``."""
+    paths = []
+    for git in _git_dirs(repo):
+        root = str(git).rstrip("/")
+        if any(c.isspace() for c in root):
+            # --disallowedTools takes its rules space-separated: this one would be two.
+            print(f"  WARNING: the merge agent is not denied {root}: a space in it")
+        else:
+            paths += [f"/{root}", f"/{root}/**"]
+    paths += with_account_home(_MERGE_WRITE_DENIED)
     writes = [f"{tool}({path})" for path in paths for tool in ("Edit", "Write")]
     return [*claude_disallowed(_MERGE_TOOLS), *writes]
 

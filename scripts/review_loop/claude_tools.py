@@ -119,6 +119,7 @@ SECRET_READS = (
     # agy's throwaway copy of its sign-in token, wherever its scratch directory is, and
     # the loop's private directories for the reviewers' outputs and hermes's prompts.
     "//**/antigravity-oauth-token", "//**/mmcra-out-*/**", "//**/mmcra-prompt-*/**",
+    "//**/mmcra-review-*/**",
     # All of /proc: processes' environments, this one's and the CLI's own among them,
     # and the aliases (/proc/self/root, /proc/<pid>/cwd) that reach every file above
     # by another path.
@@ -136,9 +137,15 @@ def claude_disallowed(tools: str) -> list[str]:
 
 def _secret_reads() -> list[str]:
     """``SECRET_READS``, and its ``~/`` entries again under the account's own home
-    when $HOME names another directory (CI, ``sudo -E``, a wrapper): ``~`` in a rule
-    is $HOME, and the credentials are in the account's."""
-    reads = list(SECRET_READS)
+    (``with_account_home``)."""
+    return with_account_home(SECRET_READS)
+
+
+def with_account_home(paths: tuple[str, ...]) -> list[str]:
+    """``paths``, and their ``~/`` entries again under the account's own home when
+    $HOME names another directory (CI, ``sudo -E``, a wrapper): ``~`` in a rule is
+    $HOME, and the files are in the account's."""
+    reads = list(paths)
     try:
         import pwd
 
@@ -157,4 +164,4 @@ def _secret_reads() -> list[str]:
             file=sys.stderr,
         )
         return reads
-    return reads + [f"/{root}/{path[2:]}" for path in SECRET_READS if path[:2] == "~/"]
+    return reads + [f"/{root}/{path[2:]}" for path in paths if path[:2] == "~/"]

@@ -280,6 +280,18 @@ class TestAgyLaunch(AgyCase):
         # And the full-mode runner says the same thing.
         assert agy.AGY_EGRESS in runner_script()
 
+    def test_an_incomplete_wrapper_is_not_launched(self, tmp_path: Path) -> None:
+        # The helper's status is not seen through the process substitution: a wrapper
+        # with no bwrap in it ran agy unsandboxed.
+        empty = "    agy-sandbox) printf '0\\0'; return 0 ;;\n"
+        done, _ = self._run_prepare_agy(tmp_path, helper_case=empty)
+        assert done.returncode == 1 and "wrapper is incomplete" in done.stdout
+        # Where the host is trusted to be the sandbox, no wrapper is the point.
+        done, _ = self._run_prepare_agy(
+            tmp_path, helper_case=empty, MMCRA_SKIP_AGY_SANDBOX_CHECK="1"
+        )
+        assert done.returncode == 0, done.stdout + done.stderr
+
     def test_the_runner_keeps_values_off_timeouts_command_line(
         self, tmp_path: Path
     ) -> None:

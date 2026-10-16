@@ -153,8 +153,8 @@ Bedrock opt-in precedence (PREFER_HERMES=true), used for regulated codebases tha
 
 | CLI | Non-interactive | Read-only | Input | Output |
 |---|---|---|---|---|
-| `claude` | `-p` | `--allowedTools "Read Grep Glob"` **plus** `--disallowedTools "Edit Write MultiEdit NotebookEdit Bash WebFetch WebSearch ReportFindings"` and `Read(...)` of each credential location (`claude_tools.SECRET_READS`; the runner gets the list from `claude-deny`), `--strict-mcp-config` (no MCP servers), `--setting-sources user` (no project hooks) and `--permission-mode dontAsk` -- `--allowedTools` alone only skips the permission prompt, it does *not* confine the agent | stdin (`< prompt.txt`) | `--output-format json` wraps in `{"result":"..."}` |
-| `codex` | `codex exec` **plus `-s read-only` and `-c approvals_reviewer="user"`** (in both the convergence loop and this runner) -- both are pinned by the tool and neither is optional: no sandbox flag was passed at all before, and `-s read-only` on its own is silently overridden by a global `approvals_reviewer = "auto_review"` (see docs/codex-sandbox.md). Codex is also canary-tested at launch and its slot is DROPPED if the sandbox does not actually refuse a write (optional `-m <model> -c model_reasoning_effort=<level>` -- override via `CODEX_MODEL`, `CODEX_REASONING_EFFORT`; `=high` is the "GPT-5.5 Pro" equivalent) | verified read-only, not assumed | stdin (file) | `-o <file>` writes last message |
+| `claude` | `-p` | `--tools Read,Grep,Glob` (the only tools it has at all; `claude_tools.claude_tool_names`, the runner's from `claude-tools`) and `--allowedTools "Read Grep Glob"` **plus** `--disallowedTools "Edit Write MultiEdit NotebookEdit Bash WebFetch WebSearch ReportFindings"` and `Read(...)` of each credential location (`claude_tools.SECRET_READS`; the runner gets the list from `claude-deny`), `--strict-mcp-config` (no MCP servers), `--setting-sources user` (no project hooks) and `--permission-mode dontAsk` -- `--allowedTools` alone only skips the permission prompt, it does *not* confine the agent | stdin (`< prompt.txt`) | `--output-format json` wraps in `{"result":"..."}` |
+| `codex` | `codex exec` **plus `-s read-only` and `-c approvals_reviewer="user"`** (in both the convergence loop and this runner) -- both are pinned by the tool and neither is optional: no sandbox flag was passed at all before, and `-s read-only` on its own is silently overridden by a global `approvals_reviewer = "auto_review"` (see docs/codex-sandbox.md). Codex is also canary-tested at launch and its slot is DROPPED if the sandbox does not actually refuse a write (optional `-m <model> -c model_reasoning_effort=<level>` -- override via `CODEX_MODEL`, `CODEX_REASONING_EFFORT`; `=high` is the "GPT-5.5 Pro" equivalent) | verified read-only for writes, not assumed; its reads are not confined -- it can read your home directory, credentials included, and what it reads goes to OpenAI | stdin (file) | `-o <file>` writes last message |
 | `gemini` | `-p` | `--model <m> --approval-mode plan --skip-trust` (default `<m>` is `gemini-2.5-flash` for free-tier compatibility; override via `GEMINI_MODEL`) | stdin (file) | stdout (text, may have fences) |
 | `agy` | `--input-format stream-json --output-format stream-json` (no `-p`: the prompt is one JSON line on stdin, because a single argument is capped at 128 KB) **plus `--sandbox --disable-slash-commands`**, pinned. On by default where installed; `REVIEW_USE_AGY=0` switches it off. Model: `AGY_MODEL` if set, else the best Gemini model `agy models` lists, picked each run. agy has no deny list and was measured writing outside its workspace, so it runs under **bubblewrap** (see docs/agy-sandbox.md), verified at startup without a model call and again before each launch; the slot goes to its next backend if that fails. The prompt opens with a no-tools preamble: a refused tool call ends agy's turn with no answer | bubblewrap read-only filesystem, verified; `--sandbox --disable-slash-commands` (no `--mode=plan`: it is a slash command, so a no-op once expansion is off) | stdin (one stream-json line) | stream-json; the last `result` event carries `structured_output` (enforced by `--json-schema`) |
 | `hermes` | `-z --yolo` | none: `-t file` limits it to the file toolset, which writes under `--yolo`; only the convergence loop's tamper check reports writes | `-z` flag (has ARG_MAX risk for large prompts) | stdout (the answer text; the prompt asks for the JSON in the reply, not in a file) |
@@ -213,7 +213,8 @@ claude, codex, gemini and agy get the prompt on stdin from a file, never a pipe:
 Collect ALL of these, not just the merge-base diff. Use a private temp directory:
 
 ```bash
-REVIEW_TMP=$(mktemp -d /tmp/ensemble-review-XXXXXXXX)
+# Named mmcra-review-*: a claude reviewer may not read it (claude_tools.SECRET_READS).
+REVIEW_TMP=$(mktemp -d /tmp/mmcra-review-XXXXXXXX)
 
 git diff --merge-base origin/main -- . \
   | python scripts/scrub_diff.py \
@@ -250,13 +251,14 @@ Write `$REVIEW_TMP/context.raw.md` with:
 Then scrub it as the diff is -- it quotes project files, and goes into every prompt, to Google too when agy runs -- and use only the scrubbed copy:
 
 ```bash
-python scripts/scrub_diff.py --text < "$REVIEW_TMP/context.raw.md" > "$REVIEW_TMP/context.md"
-echo "scrub exit $?"
-# Not left beside the prompts for the round, where a claude reviewer or the gemini CLI could read it.
-rm -f "$REVIEW_TMP/context.raw.md"
+python3 scripts/scrub_diff.py --text < "$REVIEW_TMP/context.raw.md" > "$REVIEW_TMP/context.md"
+status=$?
+echo "scrub exit $status"
+# Not left beside the prompts for the round, where the gemini CLI could read it -- once scrubbed.
+case $status in 0|1) rm -f "$REVIEW_TMP/context.raw.md" ;; esac
 ```
 
-Exit 1 means it redacted something: `context.md` is the redacted copy and safe to send, so say how many lines it redacted (its stderr) and go on -- prose about a project mentions environment files often, and that alone is redacted. Exit 2 means it failed and `context.md` is incomplete: **STOP**.
+Exit 0: clean. Exit 1: it redacted something, and `context.md` is the redacted copy, safe to send -- say how many lines it redacted (its stderr) and go on; prose about a project mentions environment files often, and that alone is redacted. Any other status (2, or 127 with no `python3`): `context.md` is incomplete -- **STOP**.
 
 ## 4. Read the diff and audit into your context
 
@@ -493,7 +495,7 @@ unset CDPATH
 # background job is not a group leader) and forwards it the signals that should stop it.
 if [ -z "${MMCRA_OWN_SESSION:-}" ] && command -v setsid >/dev/null 2>&1; then
   export MMCRA_OWN_SESSION=1
-  setsid bash "$0" "$@" &
+  setsid "$BASH" "$0" "$@" &   # this bash, checked above, not whichever comes first on PATH
   inner=$!
   trap 'kill -TERM "$inner" 2>/dev/null' INT TERM HUP QUIT
   # Waited for at least once, to collect its status even if it has already exited; again while
@@ -777,9 +779,17 @@ prepare_agy() {
       echo "R$num: SKIPPED (agy workspace $AGY_WS is inside the repo; check TMPDIR)"; return 1 ;;
   esac
   mapfile -d '' -t wrap < <(review_helper agy-sandbox "$AGY_WS" "$AGY_STATE" "$REVIEW_ROOT")
-  [ "${#wrap[@]}" -ge 1 ] || { echo "R$num: SKIPPED (could not build agy's sandbox)"; return 1; }
+  [ "${#wrap[@]}" -ge 1 ] && [[ "${wrap[0]}" =~ ^[0-9]+$ ]] \
+    || { echo "R$num: SKIPPED (could not build agy's sandbox)"; return 1; }
   AGY_ENVP=("${wrap[@]:1:${wrap[0]}}")
   AGY_BWRAP=("${wrap[@]:$((1 + wrap[0]))}")
+  # Fail closed: the process substitution's status is not seen, so the wrapper itself is checked
+  # -- bwrap first, "--" last -- unless the host is trusted to be the sandbox.
+  if ! review_helper flag MMCRA_SKIP_AGY_SANDBOX_CHECK; then
+    [ "${#AGY_BWRAP[@]}" -ge 2 ] && [ "${AGY_BWRAP[-1]}" = -- ] \
+      && [[ "${AGY_BWRAP[0]##*/}" == bwrap ]] \
+      || { echo "R$num: SKIPPED (agy's sandbox wrapper is incomplete)"; return 1; }
+  fi
   # The startup check described the host as it was then; what has appeared since -- a session
   # bus, a socket, an X server -- is checked again here, against the very wrapper agy will run
   # under, handed over on stdin.
@@ -1148,7 +1158,8 @@ shell and inherits nothing from the call that wrote it.
 export REVIEW_TMP HAS_CLAUDE HAS_HERMES HAS_CODEX HAS_GEMINI HAS_AGY PREFER_HERMES
 # Only those that are set, as above.
 for v in AGY_SELECTED_MODEL MMCRA_SKIP_AGY_SANDBOX_CHECK MMCRA_AGY_STRICT_SOCKETS REVIEW_USE_AGY \
-    REVIEW_USE_GEMINI REVIEW_USE_CODEX; do
+    REVIEW_USE_GEMINI REVIEW_USE_CODEX CODEX_MODEL CODEX_REASONING_EFFORT GEMINI_MODEL \
+    REVIEWER_TIMEOUT REVIEWER_TOOLS_1 REVIEWER_TOOLS_2 REVIEWER_TOOLS_3 REVIEWER_TOOLS_4; do
   eval "[ -n \"\${$v+set}\" ]" && export "$v"
 done
 rm -f "$REVIEW_TMP/runner-exit"
@@ -1197,6 +1208,11 @@ Each reviewer runs under `timeout --foreground -k 10 "$REVIEWER_TIMEOUT"` (600 s
 still says "still running", call the SAME block again - do not relaunch the runner, and do not treat
 a second wait as a sign anything is wrong.
 
+The poll trusts two files in `$REVIEW_TMP`. A claude reviewer may not read or write there, codex and
+agy cannot write it, and gemini (opt-in) is asked not to; hermes (`-t file --yolo`) can, so in a Bedrock run a
+reviewer could end the poll early. The background task's own completion is the signal to prefer
+there.
+
 When `round.log` ends with `ROUND COMPLETE`, go straight to section 7. `result-N.json` exists for
 every slot, including synthetic ones for slots that failed. Four done-markers alone are not that:
 they come before the outputs are published and the results extracted. If the runner ended without
@@ -1210,7 +1226,7 @@ Report what the status lines say rather than guessing. "Three of four are still 
 thing to tell a waiting human; silence is not.
 
 
-**Tool restriction**: Hermes uses `-t file --yolo`: the file toolset, which can write -- the data stays in your AWS account, but writes are not prevented, only reported by the convergence loop's tamper check -- full mode does not check. Claude CLI: `--allowedTools "Read Grep Glob"` plus `--disallowedTools` for every tool that writes, runs a command or reaches the network, `--strict-mcp-config` (no MCP servers), `--setting-sources user` (no project hooks) and `--permission-mode dontAsk`, and reads of well-known credential locations denied (`~/.ssh`, `~/.aws`, the CLIs' own sign-ins, environment and direnv files, processes' `environ`; `claude_tools.SECRET_READS`) -- its reads are otherwise not confined to the repository, and that list is not complete -- since `--allowedTools` alone does not confine (a slot given writing tools on purpose with `REVIEWER_TOOLS_N` has only those taken off the deny list). Codex: both paths pin `-s read-only` and `approvals_reviewer="user"` and canary-test them before use. Gemini uses `--approval-mode plan`: read-only by policy, not sandboxed -- it can read your home directory -- and run from an empty directory outside the repository. agy runs under bubblewrap, verified before use (what it closes and what it does not: docs/agy-sandbox.md), plus `--sandbox --disable-slash-commands`. Extraction errors logged to `$REVIEW_TMP/extract-result-N.err`.
+**Tool restriction**: Hermes uses `-t file --yolo`: the file toolset, which can write -- the data stays in your AWS account, but writes are not prevented, only reported by the convergence loop's tamper check -- full mode does not check. Claude CLI: `--tools Read,Grep,Glob` (no other tool exists for it) and `--allowedTools "Read Grep Glob"` plus `--disallowedTools` for every tool that writes, runs a command or reaches the network, `--strict-mcp-config` (no MCP servers), `--setting-sources user` (no project hooks) and `--permission-mode dontAsk`, and reads of well-known credential locations denied (`~/.ssh`, `~/.aws`, the CLIs' own sign-ins, environment and direnv files, processes' `environ`; `claude_tools.SECRET_READS`) -- its reads are otherwise not confined to the repository, and that list is not complete -- since `--allowedTools` alone does not confine (a slot given writing tools on purpose with `REVIEWER_TOOLS_N` has only those taken off the deny list). Codex: both paths pin `-s read-only` and `approvals_reviewer="user"` and canary-test them before use. Gemini uses `--approval-mode plan`: read-only by policy, not sandboxed -- it can read your home directory -- and run from an empty directory outside the repository. agy runs under bubblewrap, verified before use (what it closes and what it does not: docs/agy-sandbox.md), plus `--sandbox --disable-slash-commands`. Extraction errors logged to `$REVIEW_TMP/extract-result-N.err`.
 
 ## 7. Collect and validate results
 

@@ -131,27 +131,28 @@ _URL_PLACEHOLDER = (
 #: that a long line is scanned in linear time.
 _SCHEME_NAME = r"[a-zA-Z][a-zA-Z0-9+.-]{0,31}:"
 _URL_SCHEME = r"(?<![a-zA-Z0-9+.-])" + _SCHEME_NAME
-#: A web scheme's, whose host:port can be followed by a path holding an @
-#: (http://host:8080/@scope/pkg), and the rest.
-_WEB_SCHEME = r"(?<![a-zA-Z0-9+.-])(?i:https?|wss?):"
-_OTHER_SCHEME = r"(?<![a-zA-Z0-9+.-])(?!(?i:https?|wss?):)" + _SCHEME_NAME
 _URL_USER = r"//[^\s/:\"?#\[\]]{0,256}:"
-#: In any other scheme -- postgres, redis, amqp -- what comes before the ":" says which
-#: it is: a host (localhost, or a name with a dot in it: redis://localhost:6379/@x)
-#: has a port after it, a user name a password -- "8080/abc" before the @ of a
-#: postgres URL whose user is "u".
-_URL_HOST = r"//(?:localhost|[^\s/:\"?#\[\].]{0,256}\.[^\s/:\"?#\[\]]{0,256}):"
-_URL_NAME = r"//(?!localhost:)[^\s/:\"?#\[\].]{0,256}:"
-#: A character of the password: it may hold ' or / (base64 often has one), but not a
-#: quote that closes a string literal -- one followed by , ) ] } ; : + or a space --
-#: or the pattern ran from one string into the next (['http://h:8080','ops@x']).
-_URL_PASSWORD_CHAR = r"(?:[^\s@\"?#']|'(?![,\])};:+\s]))"
-#: After a user name, a password may hold ? and #, as generated ones do -- but not
-#: with a "/" before them, which is a port, a path and a query (redis://h:6379/0?a@b).
-_URL_NAME_PASSWORD = (
-    r"(?:(?:[^\s@\"'/]|'(?![,\])};:+\s])){1,256}|" + _URL_PASSWORD_CHAR + r"{1,256})"
+#: What follows that ":" is no password when it is a port -- digits, then the path,
+#: query or fragment (http://host:8080/@scope/pkg, redis://cache:6379/0?x=a@b) --
+#: whatever the scheme, as RFC 3986 reads it: a URL's userinfo ends at its first "/",
+#: so a postgres URL with "8080/abc" there has a host and a port, not a password.
+#: Nor when it is a template's field in a port's place, or a placeholder.
+_URL_NOT_A_PASSWORD = (
+    r"(?!\d{1,5}[/?#])(?!" + _URL_FIELD + r"[/?#])(?!" + _URL_PLACEHOLDER + r"@)"
 )
-
+#: A character of the password: it may hold ' (base64 and generated ones do), but
+#: not a quote that closes a string literal -- one followed by , ) ] } ; : + or a
+#: space -- or the pattern ran from one string into the next
+#: (['http://h:8080','ops@x']).
+_URL_PASSWORD_CHAR = r"(?:[^\s@\"?#']|'(?![,\])};:+\s]))"
+#: The password: with no "/" in it, any length -- the scan stops at the next "/", and
+#: every URL after it has one, so it stays linear -- and it may hold ? and #, as
+#: generated ones do; or with a "/", which ends userinfo only by the RFC and is
+#: common in base64, up to 256 characters with no ? or #, which would then be a
+#: query or fragment.
+_URL_PASSWORD = (
+    r"(?:(?:[^\s@\"'/]|'(?![,\])};:+\s]))+|" + _URL_PASSWORD_CHAR + r"{1,256})"
+)
 
 # SHAPE_PATTERNS recognise a credential by its own shape, with no help from a
 # name: `sk-ant-...`, `AKIA...`, a PEM block, a service-account blob. Nothing
@@ -183,57 +184,10 @@ SHAPE_PATTERNS = [
     re.compile(r"discord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9_-]{50,}"),
     re.compile(r"SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}"),
     # A password in a URL's userinfo (``_URL_USER``), "@" -- in a postgres, redis or
-    # proxy URL. Not a web URL's port and a path after it, nor a port and a query or
-    # fragment with an @ in it, nor a placeholder or a template's field, which
-    # documentation and connection-string code are full of: a redaction aborts the
+    # proxy URL -- unless it is no password (``_URL_NOT_A_PASSWORD``): documentation
+    # and connection-string code are full of those, and a redaction aborts the
     # review. Written in parts, so that this line is not one.
-    re.compile(
-        _WEB_SCHEME
-        + _URL_USER
-        + r"(?!\d{1,5}/)(?!"
-        + _URL_FIELD
-        + r"/)(?!"
-        + _URL_PLACEHOLDER
-        + r"@)"
-        + _URL_PASSWORD_CHAR
-        + r"{1,256}@"
-    ),
-    # Any other scheme after a host: a port, then a path, is no password there either.
-    re.compile(
-        _OTHER_SCHEME
-        + _URL_HOST
-        + r"(?!\d{1,5}/)(?!"
-        + _URL_FIELD
-        + r"/)(?!"
-        + _URL_PLACEHOLDER
-        + r"@)"
-        + _URL_PASSWORD_CHAR
-        + r"{1,256}@"
-    ),
-    # After a user name, there is no port to mistake: "8080/abc" before the "@" is a
-    # password (``_URL_NAME_PASSWORD``).
-    re.compile(
-        _OTHER_SCHEME
-        + _URL_NAME
-        + r"(?!"
-        + _URL_FIELD
-        + r"/)(?!"
-        + _URL_PLACEHOLDER
-        + r"@)"
-        + _URL_NAME_PASSWORD
-        + r"@"
-    ),
-    # The same with no "/" in the password, which may then be any length: the scan
-    # stops at the next "/", and every URL after it has one, so it stays linear.
-    re.compile(
-        _URL_SCHEME
-        + _URL_USER
-        + r"(?!"
-        + _URL_PLACEHOLDER
-        + r"@)(?:(?!/)"
-        + _URL_PASSWORD_CHAR
-        + r")+@"
-    ),
+    re.compile(_URL_SCHEME + _URL_USER + _URL_NOT_A_PASSWORD + _URL_PASSWORD + r"@"),
     # And with no user name, where nothing before the ":" is a host, so nothing after
     # it is a port.
     re.compile(

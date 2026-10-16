@@ -301,7 +301,7 @@ def _check_schema_shape(schema: object, path: Path) -> None:
     # JSON type, anywhere in it, which agy would reject only after launch.
     bad = _bad_type(schema)
     if bad is not None:
-        raise fail(f"{bad!r} is not a JSON type")
+        raise fail(f"{bad} is not a JSON type")
 
 
 #: The types a JSON Schema "type" keyword may name.
@@ -310,29 +310,40 @@ _JSON_TYPES = frozenset(
 )
 
 
-def _bad_type(node: object) -> object | None:
-    """The first "type" value under ``node`` that names no JSON type, or None. Not
-    under "properties", whose keys are names, not keywords -- a property may be
-    called "type"."""
-    if isinstance(node, list):
-        return next((b for b in map(_bad_type, node) if b is not None), None)
-    if not isinstance(node, dict):
+#: The keywords whose value is a schema, a list of schemas, or a map of names to
+#: schemas. Nothing else is walked: ``examples``, ``default``, ``const`` and ``enum``
+#: hold data, and a property or a definition may be called "type".
+_ONE_SCHEMA = frozenset({
+    "items", "additionalItems", "additionalProperties", "contains", "not", "if",
+    "then", "else", "propertyNames", "unevaluatedItems", "unevaluatedProperties",
+})  # fmt: skip
+_SCHEMA_LISTS = frozenset({"allOf", "anyOf", "oneOf", "prefixItems"})
+_SCHEMA_MAPS = frozenset(
+    {"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"}
+)
+
+
+def _bad_type(schema: object) -> str | None:
+    """The first "type" in ``schema`` that names no JSON type, as its repr -- null
+    among them -- or None."""
+    if not isinstance(schema, dict):
         return None
-    kind = node.get("type")
-    if kind is not None:
+    if "type" in schema:
+        kind = schema["type"]
         kinds = kind if isinstance(kind, list) else [kind]
-        if not kinds or any(k not in _JSON_TYPES for k in kinds):
-            return kind
-    for key, value in node.items():
-        if key == "properties" and isinstance(value, dict):
-            found = _bad_type(list(value.values()))
-        elif key != "type":
-            found = _bad_type(value)
-        else:
-            continue
-        if found is not None:
-            return found
-    return None
+        if not kinds or any(
+            not isinstance(k, str) or k not in _JSON_TYPES for k in kinds
+        ):
+            return repr(kind)
+    parts: list[object] = []
+    for key, value in schema.items():
+        if key in _ONE_SCHEMA:
+            parts += value if isinstance(value, list) else [value]
+        elif key in _SCHEMA_LISTS and isinstance(value, list):
+            parts += value
+        elif key in _SCHEMA_MAPS and isinstance(value, dict):
+            parts += value.values()
+    return next((b for b in map(_bad_type, parts) if b is not None), None)
 
 
 def agy_message(prompt: str) -> str:

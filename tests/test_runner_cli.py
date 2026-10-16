@@ -306,15 +306,21 @@ class TestRunnerCli:
 
         monkeypatch.setitem(sys.modules, "jsonschema", None)
         schema = json.loads(SCHEMA_PATH.read_text())
-        schema["properties"]["findings"]["items"] = {"type": 5}
         bad = tmp_path / "s.json"
-        bad.write_text(json.dumps(schema))
-        with pytest.raises(ValueError, match="not a JSON type"):
-            agy.agy_schema(bad)
-        # A property called "type" is a name, not the keyword.
+        # Unhashable or null, it raised TypeError, or passed, rather than refusing.
+        for kind in (5, None, {}, [], ["string", {}], "issue"):
+            schema["properties"]["findings"]["items"] = {"anyOf": [{"type": kind}]}
+            bad.write_text(json.dumps(schema))
+            with pytest.raises(ValueError, match="not a JSON type"):
+                agy.agy_schema(bad)
+        # Data and names are not keywords: a property, a definition or an example
+        # may hold "type".
         schema["properties"]["findings"]["items"] = {
             "type": "object",
             "properties": {"type": {"type": "string"}},
+            "$defs": {"type": {"type": "string"}},
+            "examples": [{"type": "issue"}],
+            "default": {"type": 5},
         }
         bad.write_text(json.dumps(schema))
         assert json.loads(agy.agy_schema(bad))["type"] == "object"

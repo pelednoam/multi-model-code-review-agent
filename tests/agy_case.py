@@ -149,7 +149,11 @@ class AgyCase:
 
     @staticmethod
     def _run_prepare_agy(
-        tmp_path: Path, root: Path = REPO_ROOT, writable: bool = True, **env: str
+        tmp_path: Path,
+        root: Path = REPO_ROOT,
+        writable: bool = True,
+        helper_case: str = "",
+        **env: str,
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, list[str]]]:
         """Run the runner's prepare_agy for real; its AGY_* results, one list each.
 
@@ -176,6 +180,7 @@ class AgyCase:
             + "    agy-reachable) return 0 ;;\n"
             # The real preamble, or a failing one.
             + ("" if writable else "    agy-input) return 1 ;;\n")
+            + helper_case
             + "  esac\n"
             + '  real_review_helper "$@"\n'
             + "}\n"

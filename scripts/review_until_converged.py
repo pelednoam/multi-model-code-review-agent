@@ -289,7 +289,8 @@ def main() -> int:
         help=(
             "Run the reviewers and write their findings, then stop. Does not "
             "run the merge agent and does not touch the working tree. Exits "
-            "10 when there are blocking findings, 0 when there are none."
+            "10 when there are blocking findings, 0 when every reviewer answered "
+            "and none is blocking, 11 when one produced nothing, 7 when none did."
         ),
     )
     parser.add_argument(
@@ -316,10 +317,14 @@ def main() -> int:
     # path so casual users aren't surprised by Bedrock charges. Decided
     # before detection: a project pinned to Bedrock does not run agy.
     # From the base as well as the tree under review: a branch that deletes the pin
-    # would otherwise send its own code to OpenAI and Google by default.
-    pinned_in_base = (
-        _run(["git", "cat-file", "-e", f"{args.base}:.use-hermes"], cwd=repo).returncode
-        == 0
+    # would otherwise send its own code to OpenAI and Google by default. Every base the
+    # diff may be taken against -- the one named, its merge-base, and HEAD~1, which the
+    # diff falls back on -- and HEAD: any of them pinned is pinned.
+    merge_base = _run(["git", "merge-base", args.base, "HEAD"], cwd=repo).stdout.strip()
+    pinned_in_base = any(
+        _run(["git", "cat-file", "-e", f"{ref}:.use-hermes"], cwd=repo).returncode == 0
+        for ref in (args.base, merge_base, "HEAD~1", "HEAD")
+        if ref
     )
     prefer_hermes = (
         args.prefer_hermes or pinned_in_base or (repo / ".use-hermes").exists()

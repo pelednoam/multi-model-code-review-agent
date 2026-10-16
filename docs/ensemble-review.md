@@ -82,6 +82,11 @@ HAS_GEMINI=false; command -v gemini &>/dev/null && HAS_GEMINI=true
 # OR when the project pinned it via .use-hermes.
 PREFER_HERMES=false
 if [ -f ".use-hermes" ]; then PREFER_HERMES=true; fi
+# From every base the diff may be taken against too, as the convergence loop does: a branch that
+# deletes the pin would otherwise send its own code to OpenAI and Google.
+for ref in origin/main "$(git merge-base origin/main HEAD 2>/dev/null)" HEAD~1 HEAD; do
+  [ -n "$ref" ] && git cat-file -e "$ref:.use-hermes" 2>/dev/null && PREFER_HERMES=true
+done
 # Also set PREFER_HERMES=true if the user's request matched
 # "hermes review" / "bedrock review" / "isolated review".
 

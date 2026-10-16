@@ -83,19 +83,30 @@ def _dirs(name: str, fallback: list[str]) -> list[str]:
         return fallback
     return kept
 
-# Map logical names to repo-relative paths of JSON artifacts whose
-# contents should be audited.
-SIGNED_MANIFESTS: dict[str, str] = {
-    # "column_manifest": "path/to/manifest.json",
-}
 
-# Directories containing JSON artifacts. Changed files under these
-# directories are parsed and key fields extracted. Uses os.sep-aware
-# prefix matching.
-ARTIFACT_DIRS: list[str] = [
-    "data/",
-    "docs/",
-]
+def _manifests(name: str) -> dict[str, str]:
+    """A name-to-path mapping setting, from the host config, or none."""
+    found = _overrides().get(name)
+    if found is None:
+        return {}
+    if not isinstance(found, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in found.items()
+    ):
+        _complain(f"has a {name!r} that is not an object of names to paths")
+        return {}
+    return dict(found)
+
+
+# Map logical names to repo-relative paths of JSON artifacts whose contents should
+# be audited: "signed_manifests" in review-config.json, e.g.
+# {"column_manifest": "path/to/manifest.json"}. Not set here, which install.sh
+# overwrites.
+SIGNED_MANIFESTS: dict[str, str] = _manifests("signed_manifests")
+
+# Directories containing JSON artifacts. Changed files under these directories are
+# parsed and key fields extracted ("artifact_dirs" in review-config.json). Uses
+# os.sep-aware prefix matching.
+ARTIFACT_DIRS: list[str] = _dirs("artifact_dirs", ["data/", "docs/"])
 
 # Directories that hold source code in this project. Drives the
 # coverage gap detector and the test/impl alignment check. Override

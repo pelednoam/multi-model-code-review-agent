@@ -108,7 +108,7 @@ Next step: open Claude Code in that project and say one of:
   "full review"           -- full ensemble (4 reviewers, ~3 min)
   "run until converged"   -- convergence loop with mandatory CI gate
 
-Put your layout (source_dirs, test_dirs) in review-config.json at the
-project root. SIGNED_MANIFESTS and ARTIFACT_DIRS are set in
-scripts/preflight/config.py; re-apply them after re-running install.sh.
+Put your layout and audit settings (source_dirs, test_dirs,
+signed_manifests, artifact_dirs) in review-config.json at the project
+root, which install.sh leaves alone.
 EOF

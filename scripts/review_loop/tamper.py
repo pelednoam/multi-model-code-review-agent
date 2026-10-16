@@ -139,7 +139,12 @@ def _fingerprint(path: Path, cheap: bool) -> str:
         if cheap:
             info = path.stat()
             return f"{info.st_size}:{info.st_mtime_ns}"
-        return hashlib.sha256(path.read_bytes()).hexdigest()
+        # Streamed: a large untracked file, a build artefact, was read whole twice a round.
+        digest = hashlib.sha256()
+        with path.open("rb") as source:
+            for chunk in iter(lambda: source.read(1 << 20), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
     except OSError as exc:
         return f"unreadable:{exc.errno}"
 

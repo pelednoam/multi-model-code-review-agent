@@ -3950,3 +3950,25 @@ class TestSafeFileHeader:
         assert not scrub_diff._is_safe_file(
             "diff --git a/scripts/scrub_diff.py b/elsewhere.py\n"
         )
+
+
+class TestHostConfigManifests:
+    def test_manifests_and_artifact_dirs_come_from_review_config(
+        self, tmp_path: Path
+    ) -> None:
+        # Set in config.py, which install.sh overwrites, a host's manifests were lost on
+        # every re-install.
+        from scripts.preflight import config as preflight_config
+
+        where = tmp_path / "review-config.json"
+        where.write_text(json.dumps({
+            "signed_manifests": {"cols": "m/cols.json"}, "artifact_dirs": ["out/"],
+        }))  # fmt: skip
+        with mock.patch.object(preflight_config, "HOST_CONFIG", where):
+            assert preflight_config._manifests("signed_manifests") == {
+                "cols": "m/cols.json"
+            }
+            assert preflight_config._dirs("artifact_dirs", ["data/"]) == ["out/"]
+        where.write_text(json.dumps({"signed_manifests": ["not", "a", "map"]}))
+        with mock.patch.object(preflight_config, "HOST_CONFIG", where):
+            assert preflight_config._manifests("signed_manifests") == {}

@@ -95,6 +95,8 @@ SECRET_READS = (
     "~/.config/heroku/**", "//**/*.tfstate", "//**/*.tfstate.backup", "//**/*.tfvars",
     # Container and orchestrator secret mounts, and the host's private TLS keys.
     "//run/secrets/**", "//var/run/secrets/**", "//etc/ssl/private/**",
+    "//tmp/krb5cc_*", "//var/tmp/krb5cc_*", "~/.config/configstore/**",
+    "~/.vault_pass*", "//**/.vault_pass*",
     "~/snap/**/.mozilla/**", "~/snap/**/.config/**", "~/.config/sops/**",
     "~/.config/age/**", "~/.age/**", "~/.yarnrc.yml", "//**/.yarnrc.yml",
     "~/.config/composer/auth.json", "~/.composer/auth.json", "//**/auth.json",

@@ -584,9 +584,10 @@ Put the layout in `review-config.json` at the project root, which
   Python files outside them.
 - `test_dirs`: directories that hold tests. Defaults to `["tests/"]`.
 
-`SIGNED_MANIFESTS` (paths to your project's signed JSON artifacts) and
-`ARTIFACT_DIRS` (directories of JSON artifacts to audit) are still set in
-`scripts/preflight/config.py`; re-apply them after re-running `install.sh`.
+- `signed_manifests`: names to paths of your project's signed JSON
+  artifacts, e.g. `{"column_manifest": "path/to/manifest.json"}`.
+- `artifact_dirs`: directories of JSON artifacts to audit. Defaults to
+  `["data/", "docs/"]`.
 
 Defaults work fine for projects using the conventional `src/` /
 `tests/` layout. The audit will report no signed-manifest results

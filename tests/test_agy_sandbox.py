@@ -363,6 +363,9 @@ class TestAgySandboxCheck(AgyCase):
                 return pending.pop(0) if pending else b""
 
         monkeypatch.setattr(agy_sandbox_check.socket, "socket", lambda *a: Netlink())
+        # Linux's constants, which the fake stands in for, are not there elsewhere.
+        for name, value in (("AF_NETLINK", 16), ("SOCK_RAW", 3)):
+            monkeypatch.setattr(agy_sandbox_check.socket, name, value, raising=False)
 
     def test_the_kernels_list_carries_owner_and_state(
         self, monkeypatch: pytest.MonkeyPatch

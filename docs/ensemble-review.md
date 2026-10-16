@@ -240,8 +240,9 @@ python3 scripts/scrub_diff.py --json < "$REVIEW_TMP/runtime-audit.raw.json" \
   > "$REVIEW_TMP/runtime-audit.json"
 status=$?
 echo "audit scrub exit $status"
-# Not left beside the prompts, once scrubbed, as for the context bundle below.
-case $status in 0|1) rm -f "$REVIEW_TMP/runtime-audit.raw.json" ;; esac
+# Not left beside the prompts whatever happened, nor an incomplete scrubbed copy to be used.
+rm -f -- "$REVIEW_TMP/runtime-audit.raw.json"
+case $status in 0|1) ;; *) rm -f -- "$REVIEW_TMP/runtime-audit.json" ;; esac
 ```
 
 Exit 0 or 1 (a quote was redacted; the review goes on with the redacted audit): use
@@ -265,8 +266,10 @@ Then scrub it as the diff is -- it quotes project files, and goes into every pro
 python3 scripts/scrub_diff.py --text < "$REVIEW_TMP/context.raw.md" > "$REVIEW_TMP/context.md"
 status=$?
 echo "scrub exit $status"
-# Not left beside the prompts for the round, where the gemini CLI could read it -- once scrubbed.
-case $status in 0|1) rm -f "$REVIEW_TMP/context.raw.md" ;; esac
+# Not left beside the prompts for the round, where the gemini CLI could read it, whatever
+# happened -- nor an incomplete scrubbed copy to be used.
+rm -f -- "$REVIEW_TMP/context.raw.md"
+case $status in 0|1) ;; *) rm -f -- "$REVIEW_TMP/context.md" ;; esac
 ```
 
 Exit 0: clean. Exit 1: it redacted something, and `context.md` is the redacted copy, safe to send -- say how many lines it redacted (its stderr) and go on; prose about a project mentions environment files often, and that alone is redacted. Any other status (2, or 127 with no `python3`): `context.md` is incomplete -- **STOP**.

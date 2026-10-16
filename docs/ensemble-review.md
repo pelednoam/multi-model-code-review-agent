@@ -66,7 +66,7 @@ If the user says "quick review", "review this", or just "ensemble review" -- use
 
 If the user says "full review" or "full ensemble review" -- use full mode.
 
-If the user says "hermes review", "bedrock review", or "isolated review", or if `.use-hermes` exists in the project root, use full mode AND prefer Hermes/Bedrock over local CLIs for Anthropic reviewers (see "Bedrock opt-in" below).
+If the user says "hermes review", "bedrock review", or "isolated review", or if `.use-hermes` exists in the project root, use full mode AND prefer Hermes/Bedrock over local CLIs in every slot where Hermes is installed, and send nothing to OpenAI or Google unless asked by name (see "Bedrock opt-in" under "CLI and provider detection" below).
 
 # CLI and provider detection
 
@@ -1502,8 +1502,9 @@ rather than folded into the findings:
 
 A read-only reviewer (`--allowedTools "Read Grep Glob"`) physically cannot run a mutation probe. Ask
 one to anyway and it may report a probe result it never ran - that has happened, complete with
-invented before-and-after output. Either give the correctness slot Bash and Edit
-(`REVIEWER_TOOLS_2="Read Grep Glob Bash Edit Write"`) and run it in an isolated git worktree pinned
+invented before-and-after output. Either give the slot Bash and Edit -- in full mode, on a claude
+backend (`REVIEWER_TOOLS_N="Read Grep Glob Bash Edit Write"`; slot 2 is codex by default, and the
+convergence loop does not read these) -- and run it in an isolated git worktree pinned
 at the commit under review, or tell it to reason and mark its findings unverified. Do not ask for
 execution you have not enabled, and when a reviewer claims to have executed something, check that
 its transcript shows tool calls at all before believing it.

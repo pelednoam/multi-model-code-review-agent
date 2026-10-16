@@ -16,6 +16,9 @@ Modes:
   bundle.
 * ``--json`` -- stdin is a JSON document, whose keys and strings are scrubbed
   and which is written back as JSON: the preflight audit.
+* ``--agent-repo`` -- stdin is a unified diff of this agent's own
+  repository, whose scrubber and tests hold credential-shaped fixtures that a
+  reviewed marker may excuse.
 
 Any other argument is exit 2.
 
@@ -152,8 +155,9 @@ _SCHEME_NAME = r"[a-zA-Z][a-zA-Z0-9+.-]{0,31}:"
 _URL_SCHEME = r"(?<![a-zA-Z0-9+.-])" + _SCHEME_NAME
 #: After a quote -- ', " or a template string's ` -- what says the string goes on: not the end of a string --
 #: followed by , . ) ] } ; : + > or a space (an HTML attribute's end), as in ['http://h:8080','ops@x'] or
-#: 'https://h'.format(...) -- or the pattern runs from one string into the next.
-_QUOTE_GOES_ON = r"(?![.,\])};:+>\s])"
+#: 'https://h'.format(...), or an operator (= & | ! ? <: "https://h:443"==="ops@x") -- or the pattern
+#: runs from one string into the next.
+_QUOTE_GOES_ON = r"(?![.,\])};:+><=&|!?\s])"
 #: The user: like the password (``_URL_PASSWORD_CHAR``), not past a quote that closes
 #: a string -- or it ran from one into the next: ['https://example.com','mailto:a@b'].
 #: Without an @ in it (``_URL_USER_NO_AT``) or with one (``_URL_USER_WITH_AT``), whose
@@ -179,7 +183,9 @@ _URL_USER_WITH_AT = (
 #: or a placeholder.
 _URL_PORT_FIELD = r"(?:" + _URL_FIELD + r"|\$\{[A-Za-z_]\w{0,64}:?[-=]\d{1,16}\})"
 _URL_NOT_A_PASSWORD = (
-    r"(?!\d{0,16}/|\d{1,16}[?#][^@\s]*=)(?!"
+    # The query's "=" looked for in this URL only: past a quote or a "/", the look ran
+    # on through every URL after it on the line, in quadratic time.
+    r"(?!\d{0,16}/|\d{1,16}[?#][^@\s/\"'`]*=)(?!"
     + _URL_PORT_FIELD
     + r"[/?#])(?!"
     + _URL_PLACEHOLDER

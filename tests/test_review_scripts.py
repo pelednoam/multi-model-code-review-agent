@@ -2956,6 +2956,32 @@ class TestCodexCanaryPath:
             assert str(odd) not in cmd[cmd.index("-c") + 1]
 
 
+class TestUrlBetweenStrings:
+    """URLs in source, between which the URL patterns must not run on."""
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            'const ok=origin==="https://example.test:443"&&email==="ops@example.test";',
+            'u="https://host:443"=="user@host"',
+            "ok = url != 'http://h:8080' or who == 'a@b'",
+        ],
+    )
+    def test_an_operator_after_a_quote_ends_the_string(self, line: str) -> None:
+        assert scrub_diff.scrub_line(f"+{line}\n", False) == f"+{line}\n"
+
+    def test_a_line_of_many_urls_is_scanned_in_linear_time(self) -> None:
+        # The query's "=" was looked for across every URL after it on the line.
+        def took(n: int) -> float:
+            line = "+x = [" + ",".join(['"http://example.test:1?foo"'] * n) + "]\n"
+            started = time.perf_counter()
+            scrub_diff.scrub_line(line, False)
+            return time.perf_counter() - started
+
+        took(100)
+        assert took(3200) < 0.5
+
+
 class TestCredentialShapes:
     """Credentials the scrubber knows by their shape alone."""
 
@@ -3883,6 +3909,49 @@ class TestTamperHardening:
         (round_dir / "audit.json").unlink()
         touched = tamper.report(repo, before, round_dir)
         assert sum(line.startswith("round ") for line in touched) == 2
+
+    def test_a_hook_made_executable_is_seen(self, tmp_path: Path) -> None:
+        # Its bytes are the same; the next commit runs it.
+        from scripts.review_loop import tamper
+
+        repo = self._repo(tmp_path / "r")
+        hook = repo / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\n")
+        hook.chmod(0o644)
+        before = tamper.snapshot(repo)
+        hook.chmod(0o755)
+        assert tamper.report(repo, before)
+
+    def test_a_fifo_is_not_read(self, tmp_path: Path) -> None:
+        # Opening one waits for a writer, and the check has no deadline.
+        from scripts.review_loop import tamper
+
+        fifo = tmp_path / "pipe"
+        os.mkfifo(fifo)
+        assert tamper._fingerprint(fifo, False).startswith("special:")
+
+    def test_a_hooks_path_holding_the_checkout_is_not_the_checkout(
+        self, tmp_path: Path
+    ) -> None:
+        # core.hooksPath=. made the whole repository a git directory: the round's own
+        # outputs were a reviewer's write, and the merge agent could edit nothing.
+        from scripts.review_loop import tamper
+        from scripts.review_loop.merge_agent import _git_dirs, _merge_denied
+
+        repo = self._repo(tmp_path / "r")
+        subprocess.run(
+            ["git", "-C", str(repo), "config", "core.hooksPath", "."], check=True
+        )
+        assert repo.resolve() not in _git_dirs(repo)
+        assert f"Edit(/{repo.resolve()}/**)" not in _merge_denied(repo)
+        assert f"Edit(/{repo.resolve()}/pre-commit)" in _merge_denied(repo)
+        round_dir = repo / "data" / "reviews" / "round-1"
+        round_dir.mkdir(parents=True)
+        before = tamper.snapshot(repo, round_dir)
+        (round_dir / "raw-1.txt").write_text("a review")
+        assert tamper.report(repo, before, round_dir) == []
+        (repo / "pre-commit").write_text("#!/bin/sh\n")
+        assert tamper.report(repo, before, round_dir)
 
     def test_no_home_at_all_is_no_crash(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import pwd

@@ -395,9 +395,9 @@ def _choose_command(
     data-at-rest in their AWS account.
 
     Returns ``(cmd, label)``, where ``label`` is the model the prompt should
-    name when it is not the lens's own: slot 2 on hermes or claude (haiku) or
-    on codex with CODEX_MODEL set, gemini and agy, which name the model they
-    run. Returns ``None`` if no backend is available. ``prompt_path`` need not
+    name when it is not the lens's own: every slot on claude (its alias), slot 2
+    on hermes (haiku) or on codex with CODEX_MODEL set, gemini and agy, which
+    name the model they run. Returns ``None`` if no backend is available. ``prompt_path`` need not
     exist yet: hermes is handed the path, and reads it when it is launched,
     after the prompt is written.
     """

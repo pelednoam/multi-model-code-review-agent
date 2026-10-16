@@ -278,9 +278,11 @@ until the very end and it looked hung for its whole run. **CPU time** is there
 for `claude -p --output-format json`, which buffers everything and writes at the
 end: its output is 0 bytes from start to finish, so size cannot tell "thinking"
 from "hung". A slot burning CPU between reports is marked `busy`. If you need to
-check from another terminal, the round directory is the truth: mtimes on
-`raw-N.txt` and `stderr-N.txt` say who is moving. The process table does not,
-because `pgrep claude` finds every other session on the machine.
+check from another terminal: while they run, the reviewers write into a private
+directory (`$TMPDIR/mmcra-out-*`), whose `raw-N.txt` and `stderr-N.txt` say by their
+mtimes who is moving; they are copied into the round directory once all have
+stopped. The process table does not, because `pgrep claude` finds every other
+session on the machine.
 
 **A reviewer that answers in prose has still reviewed something.** The commonest
 way a reviewer fails is not finding nothing -- it is finding something and

@@ -71,6 +71,8 @@ def snapshot(repo: Path, exclude: Path | None = None, before: str | None = None)
     # No bytecode written into the tree from here on, by this process: a module the
     # loop imports late would otherwise leave a __pycache__ the check calls a write.
     sys.dont_write_bytecode = True
+    _OWN_OUTPUTS.clear()
+    _OWN_OUTPUTS.update(_own_outputs())
     control = _control_lines(repo)
     # And what the round wrote for the reviewers before they started, which they may
     # not rewrite either: what they were given is what the round reports they read.
@@ -232,7 +234,8 @@ def _files(path: Path) -> list[Path]:
 
 def _fingerprint(path: Path, cheap: bool) -> str:
     """What is in ``path``: its content's hash, a link's target, or -- ``cheap``, for
-    the many files under an ignored path -- its size and mtime."""
+    the many files under an ignored path -- its size and mtime. With its mode: a hook
+    made executable runs at the next commit, and its bytes are the same."""
     try:
         if path.is_symlink():
             # And what it leads to: a write through an existing link to a startup file
@@ -244,7 +247,8 @@ def _fingerprint(path: Path, cheap: bool) -> str:
             through = _fingerprint(target, cheap) if target.is_file() else "dangling"
             return "link:" + os.readlink(path) + ":" + through
         info = path.stat()
-        if (info.st_dev, info.st_ino) in _own_outputs():
+        mode = f"{info.st_mode:o}"
+        if (info.st_dev, info.st_ino) in _OWN_OUTPUTS:
             # The loop's own output, redirected into the tree (> data/reviews/run.log):
             # it grows with every line printed, and is no reviewer's doing.
             return "the loop's output"
@@ -255,22 +259,41 @@ def _fingerprint(path: Path, cheap: bool) -> str:
                 (str(child.relative_to(path)), _fingerprint(child, True))
                 for child in _files(path)
             ]
-            return "dir:" + hashlib.sha256(json.dumps(inside).encode()).hexdigest()
+            digest = hashlib.sha256(json.dumps(inside).encode()).hexdigest()
+            return f"dir:{mode}:{digest}"
+        if not stat.S_ISREG(info.st_mode):
+            # A FIFO or a device, which is not read: opening the one waits for a writer,
+            # and reading the other may never end.
+            return f"special:{mode}:{info.st_rdev}"
         if cheap:
-            return f"{info.st_size}:{info.st_mtime_ns}"
-        # Streamed: a large untracked file, a build artefact, was read whole twice a round.
-        digest = hashlib.sha256()
-        with path.open("rb") as source:
-            for chunk in iter(lambda: source.read(1 << 20), b""):
-                digest.update(chunk)
-        return digest.hexdigest()
+            return f"{mode}:{info.st_size}:{info.st_mtime_ns}"
+        return f"{mode}:{_content_hash(path)}"
     except OSError as exc:
         return f"unreadable:{exc.errno}"
+
+
+def _content_hash(path: Path) -> str:
+    """The SHA-256 of ``path``'s content, streamed -- a large untracked file, a build
+    artefact, was read whole twice a round -- and only if what was opened is a regular
+    file: one swapped for a FIFO after it was looked at does not block the open."""
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOCTTY", 0))
+    with os.fdopen(fd, "rb") as source:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return "special"
+        digest = hashlib.sha256()
+        for chunk in iter(lambda: source.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 #: Files the loop's output is copied into by another process (``tee``), named with
 #: ``--log-file``: no reviewer's write either.
 LOG_FILES: set[Path] = set()
+
+
+#: ``_own_outputs()``, as it was when the snapshot being taken began: looked up once,
+#: not for each of the many files under an ignored path.
+_OWN_OUTPUTS: set[tuple[int, int]] = set()
 
 
 def _own_outputs() -> set[tuple[int, int]]:

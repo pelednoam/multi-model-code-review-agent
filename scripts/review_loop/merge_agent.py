@@ -79,10 +79,30 @@ def _git_dirs(repo: Path) -> list[Path]:
          "--git-path", "hooks"],
         cwd=repo,
     )  # fmt: skip
-    if found.returncode == 0:
+    named = [(repo / line).resolve() for line in found.stdout.split("\n") if line]
+    if found.returncode == 0 and named:
         # --git-common-dir and --git-path may be relative, to where git ran.
-        dirs += [(repo / line).resolve() for line in found.stdout.split("\n") if line]
+        *found_dirs, hooks = named
+        dirs += found_dirs
+        # A hooks directory that holds the checkout (core.hooksPath=.) is not denied or
+        # watched whole, which would be the whole repository: its hooks are, by name.
+        if repo.resolve().is_relative_to(hooks):
+            dirs += [hooks / name for name in GIT_HOOK_NAMES]
+        else:
+            dirs.append(hooks)
     return list(dict.fromkeys(dirs))
+
+
+#: The hooks git runs, by the names it runs them by (githooks(5)).
+GIT_HOOK_NAMES = (
+    "applypatch-msg", "pre-applypatch", "post-applypatch", "pre-commit",
+    "pre-merge-commit", "prepare-commit-msg", "commit-msg", "post-commit",
+    "pre-rebase", "post-checkout", "post-merge", "pre-push", "pre-receive", "update",
+    "proc-receive", "post-receive", "post-update", "reference-transaction",
+    "push-to-checkout", "pre-auto-gc", "post-rewrite", "sendemail-validate",
+    "fsmonitor-watchman", "p4-changelist", "p4-prepare-changelist",
+    "p4-post-changelist", "p4-pre-submit", "post-index-change",
+)  # fmt: skip
 
 
 def _homes() -> set[Path]:

@@ -148,7 +148,7 @@ _URL_PLACEHOLDER = (
 #: that a long line is scanned in linear time.
 _SCHEME_NAME = r"[a-zA-Z][a-zA-Z0-9+.-]{0,31}:"
 _URL_SCHEME = r"(?<![a-zA-Z0-9+.-])" + _SCHEME_NAME
-#: After a quote, ' or ", what says the string goes on: not the end of a string --
+#: After a quote -- ', " or a template string's ` -- what says the string goes on: not the end of a string --
 #: followed by , . ) ] } ; : + > or a space (an HTML attribute's end), as in ['http://h:8080','ops@x'] or
 #: 'https://h'.format(...) -- or the pattern runs from one string into the next.
 _QUOTE_GOES_ON = r"(?![.,\])};:+>\s])"
@@ -160,7 +160,7 @@ _QUOTE_GOES_ON = r"(?![.,\])};:+>\s])"
 _URL_USER_DOUBLE_QUOTED = r"//[^\s/:\"?#\[\]]{0,256}:"
 _URL_USER_DOUBLE_QUOTED_NO_AT = r"//[^\s/:\"?#\[\]@]{0,256}:"
 #: The user without an @ in it, and with one.
-_URL_USER_CHAR = r"(?:\\[^\s@]|[^\s/:\"?#\[\]'\\@]|['\"]" + _QUOTE_GOES_ON + ")"
+_URL_USER_CHAR = r"(?:\\[^\s@]|[^\s/:\"?#\[\]'`\\@]|['\"`]" + _QUOTE_GOES_ON + ")"
 _URL_USER_NO_AT = r"//" + _URL_USER_CHAR + r"{0,256}:"
 _URL_USER_WITH_AT = (
     r"//" + _URL_USER_CHAR + r"{0,256}@" + r"(?:" + _URL_USER_CHAR + r"|@){0,256}:"
@@ -186,14 +186,14 @@ _URL_NOT_A_PASSWORD = (
 #: space -- or the pattern ran from one string into the next
 #: (['http://h:8080','ops@x']). A backslash and what follows it are one character, so
 #: an escaped quote (\') closes nothing.
-_URL_PASSWORD_CHAR = r"(?:\\[^\s@]|\\(?=@)|[^\s@\"?#'\\]|['\"]" + _QUOTE_GOES_ON + ")"
+_URL_PASSWORD_CHAR = r"(?:\\[^\s@]|\\(?=@)|[^\s@\"?#'`\\]|['\"`]" + _QUOTE_GOES_ON + ")"
 #: The password: with no "/" in it, any length -- the scan stops at the next "/", and
 #: every URL after it has one, so it stays linear -- and it may hold ? and #, as
 #: generated ones do; or with a "/", which ends userinfo only by the RFC and is
 #: common in base64, up to 256 characters with no ? or #, which would then be a
 #: query or fragment.
 _URL_PASSWORD = (
-    r"(?:(?:\\[^\s/@]|\\(?=@)|[^\s@\"'/\\]|['\"]"
+    r"(?:(?:\\[^\s/@]|\\(?=@)|[^\s@\"'`/\\]|['\"`]"
     + _QUOTE_GOES_ON
     + ")+|"
     + _URL_PASSWORD_CHAR
@@ -243,7 +243,7 @@ SHAPE_PATTERNS = [
         _URL_SCHEME
         + _URL_USER_WITH_AT
         + _URL_NOT_A_PASSWORD
-        + r"(?:\\[^\s/@]|\\(?=@)|[^\s@\"'/\\]|['\"]"
+        + r"(?:\\[^\s/@]|\\(?=@)|[^\s@\"'`/\\]|['\"`]"
         + _QUOTE_GOES_ON
         + r")+@"
     ),

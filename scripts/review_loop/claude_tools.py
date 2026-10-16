@@ -116,7 +116,7 @@ SECRET_READS = (
     "//**/." + "env", "//**/." + "env.*", "//**/." + "envrc",
     # The credential files above, in the repository under review or any other: a
     # remote's URL in .git/config can carry a token.
-    "//**/.git/config", "//**/.git-credentials", "//**/.npmrc", "//**/.pypirc",
+    "//**/.git/config", "//**/.git/modules/**/config", "//**/.git-credentials", "//**/.npmrc", "//**/.pypirc",
     "//**/.netrc", "//**/.docker/config.json",
     # What the diff scrubber holds to be a credential whole, by name or suffix
     # (scrub_diff.SECRET_NAMES, SECRET_SUFFIXES; a test keeps the two in step -- the
@@ -187,6 +187,12 @@ def _reads_around(reads: list[str], repo: Path) -> list[str]:
         for entry in around(base.resolve(), target):
             if rule_safe(str(entry)):
                 out += [f"/{entry}", f"/{entry}/**"]
+            else:
+                print(
+                    f"  WARNING: claude's credential deny does not cover {str(entry)!r}:"
+                    " its name cannot go in a rule",
+                    file=sys.stderr,
+                )
     return out
 
 

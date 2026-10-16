@@ -73,10 +73,17 @@ class TestAgyDetection(AgyCase):
     def test_the_loop_decides_on_bedrock_before_it_detects(self) -> None:
         # Detection ran first, so the loop could not tell it the project was pinned.
         entry = (REPO_ROOT / "scripts" / "review_until_converged.py").read_text()
-        decided = entry.index("prefer_hermes = args.prefer_hermes or")
+        decided = entry.index("prefer_hermes = (")
         assert entry.index(
             "detect_backends(prefer_hermes=prefer_hermes, repo=repo)"
         ) > (decided)
+
+    def test_the_bedrock_pin_is_read_from_the_base_too(self) -> None:
+        # Read from the tree under review only, a branch that deleted .use-hermes sent
+        # its own code to OpenAI and Google by default.
+        entry = (REPO_ROOT / "scripts" / "review_until_converged.py").read_text()
+        assert '"git", "cat-file", "-e", f"{args.base}:.use-hermes"' in entry
+        assert "args.prefer_hermes or pinned_in_base or" in entry
 
     def test_a_bedrock_project_does_not_run_agy_at_all(
         self, monkeypatch: pytest.MonkeyPatch

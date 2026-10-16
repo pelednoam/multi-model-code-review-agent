@@ -300,7 +300,8 @@ def _requote_from_source(raw: Path, repo: Path) -> None:
         return
     root = repo.resolve()
     changed = False
-    read: dict[Path, str] = {}  # each file read once, however many hits it has
+    # Each file read and numbered once, however many hits it has.
+    read: dict[Path, tuple[list[str], list[str]]] = {}
     for hit in hits:
         file = hit.get("file") if isinstance(hit, dict) else None
         number = hit.get("line") if isinstance(hit, dict) else None
@@ -311,18 +312,14 @@ def _requote_from_source(raw: Path, repo: Path) -> None:
             continue
         if path not in read:
             try:
-                read[path] = path.read_bytes().decode("utf-8", errors="replace")
+                text = path.read_bytes().decode("utf-8", errors="replace")
             except OSError:
-                read[path] = ""
-        text = read[path]
-        # The line by both numberings: this checkout's ("\n" alone, as git's) and an
-        # older preflight's (str.splitlines, which also breaks at "\r", form feeds and
-        # Unicode's separators). Not knowing which wrote it, either one redacts.
-        candidates = [
-            lines[number - 1]
-            for lines in (text.split("\n"), text.splitlines())
-            if number <= len(lines)
-        ]
+                text = ""
+            # By both numberings: this checkout's ("\n" alone, as git's) and an older
+            # preflight's (str.splitlines, which also breaks at "\r", form feeds and
+            # Unicode's separators). Not knowing which wrote it, either one redacts.
+            read[path] = (text.split("\n"), text.splitlines())
+        candidates = [lines[number - 1] for lines in read[path] if number <= len(lines)]
         if any(redacts(line) for line in candidates):
             hit["text"] = REDACTED_TEXT
             changed = True

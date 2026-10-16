@@ -176,6 +176,17 @@ def _run_one_round(
     # round directory is not self-explanatory and `raw-N.txt` is a trap.
     write_artifacts_key(round_dir)
     print(describe_outputs(round_dir, answered_by))
+    if touched and not report_only:
+        # Before anything else ends the round -- converged, incomplete, stuck -- as well
+        # as before the fixes: a round in which a reviewer wrote to the tree is not a
+        # clean bill, and the merge agent, the gate and --auto-commit's `git add -A`
+        # would have built on, run and pushed what it wrote. Its findings and outputs
+        # are written all the same, above.
+        print(
+            "\nABORT: the reviewers changed the working tree; not converging, applying "
+            "fixes, running the gate or committing. Inspect the files listed above."
+        )
+        return 12, previous_fp
     if not any(results):
         print(
             "\nERROR: no reviewer results could be parsed; cannot determine convergence."
@@ -226,16 +237,6 @@ def _run_one_round(
         # "max rounds without convergence" (6), which already owned 6.
         print("\nREPORT ONLY: findings written, nothing changed.")
         return 10, current_fp
-
-    if touched:
-        # Not on top of what a reviewer wrote: the merge agent would edit beside it, the
-        # gate run it, and --auto-commit's `git add -A` commit and push it. The round's
-        # findings and outputs are written all the same, above.
-        print(
-            "\nABORT: the reviewers changed the working tree; not applying fixes, "
-            "running the gate or committing. Inspect the files listed above."
-        )
-        return 12, current_fp
 
     if not apply_fixes(blocking, round_dir, backends, repo):
         print("\nMerge agent failed -- stopping.")
@@ -314,7 +315,15 @@ def main() -> int:
     # even when .claude/ is gitignored.) Default is the free local CLI
     # path so casual users aren't surprised by Bedrock charges. Decided
     # before detection: a project pinned to Bedrock does not run agy.
-    prefer_hermes = args.prefer_hermes or (repo / ".use-hermes").exists()
+    # From the base as well as the tree under review: a branch that deletes the pin
+    # would otherwise send its own code to OpenAI and Google by default.
+    pinned_in_base = (
+        _run(["git", "cat-file", "-e", f"{args.base}:.use-hermes"], cwd=repo).returncode
+        == 0
+    )
+    prefer_hermes = (
+        args.prefer_hermes or pinned_in_base or (repo / ".use-hermes").exists()
+    )
     if prefer_hermes:
         print(
             "Bedrock opt-in: routing Anthropic reviewers via Hermes; OpenAI and"

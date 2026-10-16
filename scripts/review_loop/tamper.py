@@ -90,12 +90,32 @@ def snapshot(repo: Path, exclude: Path | None = None) -> str:
         status, path = entry[:2], entry[3:]
         skip = status[0] in "RC"
         lines.append(f"{status} {path} {_fingerprint(repo / path, status == '!!')}")
-    from .merge_agent import _git_dirs  # the same git directories it may not write
+    # The same git directories the merge agent may not write, the hooks directory git
+    # runs from among them (core.hooksPath can put it anywhere): scanned whole when it
+    # is that, and otherwise for what turns a write into a command.
+    from .merge_agent import _MERGE_WRITE_DENIED, _git_dirs, _homes
 
     for git_dir in _git_dirs(repo):
-        for name in ("config", "hooks", "info"):
-            for control in _files(git_dir / name):
+        names = ("config", "config.worktree", "hooks", "info")
+        parts = (
+            [git_dir]
+            if not (git_dir / "HEAD").exists()
+            else [git_dir / n for n in names]
+        )
+        for part in parts:
+            for control in _files(part):
                 lines.append(f"git {control} {_fingerprint(control, False)}")
+    # And the home's files that run code: hermes writes under --yolo, outside the
+    # repository too, and a write to ~/.bashrc is no less a reviewer's for that. Files
+    # named, not the directories (~/.config/**) the merge agent is kept out of whole.
+    for home in _homes():
+        for pattern in _MERGE_WRITE_DENIED:
+            if pattern.endswith("/**") or any(c in pattern for c in "*?["):
+                continue
+            startup = home / pattern[2:]
+            lines.append(f"home {startup} {_fingerprint(startup, False)}")
+        for extra in (".ssh/authorized_keys", ".claude/settings.json"):
+            lines.append(f"home {home / extra} {_fingerprint(home / extra, False)}")
     return "\n".join(sorted(set(lines))) + "\n"
 
 

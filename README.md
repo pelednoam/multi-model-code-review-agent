@@ -148,7 +148,9 @@ guarantee matters. Opt in three ways:
    project root. Every review in that project (CLI or convergence-
    loop) auto-uses Bedrock for Anthropic reviewers. The marker lives
    at repo root (not under `.claude/`) so it survives `.claude/`
-   being gitignored and can be committed to share the policy.
+   being gitignored and can be committed to share the policy. The
+   convergence loop also reads it from the base it diffs against, so a
+   branch that deletes it is still reviewed as pinned.
 3. **CLI flag**: `python scripts/review_until_converged.py
    --prefer-hermes` for the convergence loop.
 

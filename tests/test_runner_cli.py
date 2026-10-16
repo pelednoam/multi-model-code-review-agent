@@ -172,6 +172,7 @@ class TestRunnerCli:
         done = self._cli("agy-reachable", str(tmp_path), env=env)
         assert done.returncode == 0
 
+    @pytest.mark.skipif(sys.platform != "linux", reason="lists sockets by sock_diag")
     def test_reachable_checks_the_wrapper_it_is_handed(self, tmp_path: Path) -> None:
         # It built a wrapper of its own to check, which could differ from the one agy
         # was launched under. A "wrapper" that cannot start fails the check.

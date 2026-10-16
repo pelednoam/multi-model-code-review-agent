@@ -166,7 +166,15 @@ def _run_one_round(
         round_dir, diff_text, audit_text, context, backends, prefer_hermes, repo
     )
     print(f"Reviewers finished in {time.time() - t0:.0f}s")
-    tamper.report(repo, untouched, round_dir)
+    touched = tamper.report(repo, untouched, round_dir)
+    if touched and not report_only:
+        # Not on top of what a reviewer wrote: the merge agent would edit beside it, the
+        # gate run it, and --auto-commit's `git add -A` commit and push it.
+        print(
+            "\nABORT: the reviewers changed the working tree; not applying fixes, "
+            "running the gate or committing. Inspect the files above."
+        )
+        return 12, previous_fp
 
     results = extract_results(round_dir, answered_by)
     print(_describe_results(results, n_lines))

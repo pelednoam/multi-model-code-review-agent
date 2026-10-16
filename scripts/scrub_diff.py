@@ -264,6 +264,16 @@ SHAPE_PATTERNS = [
         + _URL_NOT_A_PASSWORD
         + r'[^"\s@/]{1,256}@'
     ),
+    # A URL no quote opens (YAML, an .ini, prose): a quote in it ends no string, so
+    # its password may hold one (a YAML dsn whose password has a ' and a comma). Slash-free,
+    # so a path with an @ further on is no password.
+    re.compile(
+        r"(?<![A-Za-z0-9+.\-'\"`])"
+        + _SCHEME_NAME
+        + _URL_USER_NO_AT
+        + _URL_NOT_A_PASSWORD
+        + r"[^\s@/]{1,256}@"
+    ),
     # And with no user name, where nothing before the ":" is a host, so nothing after
     # it is a port.
     re.compile(
@@ -711,10 +721,11 @@ def main() -> None:
     in_key = False
     in_hunk = False
 
-    for line in sys.stdin:
-        # Colour codes off first: a diff in colour (color.diff=always) has an escape
-        # before every "+", and read as it came, no line was content.
-        line = _ANSI.sub("", line)
+    for raw_line in sys.stdin:
+        # Colour codes off for reading: a diff in colour (color.diff=always) has an
+        # escape before every "+", and read as it came, no line was content. Written
+        # out as it came unless redacted -- a file's own escapes are its content.
+        line = _ANSI.sub("", raw_line)
         # Fail closed on every header form, not just `diff --git`. `in_safe`
         # used to latch: a `diff --cc` section from a merge commit following a
         # safe file inherited its bypass, and any line in it containing
@@ -746,7 +757,7 @@ def main() -> None:
             if clean != line and _opens_key(line):
                 in_key = True
 
-        sys.stdout.write(clean)
+        sys.stdout.write(raw_line if clean == line else clean)
         if clean != line and REDACTED in clean:
             n_redacted += 1
 

@@ -15,7 +15,6 @@ from .claude_tools import (
     claude_disallowed,
     claude_tool_names,
     rule_safe,
-    with_account_home,
 )
 from .config import MERGE_TIMEOUT, REPO_ROOT
 from .proc import run
@@ -53,6 +52,8 @@ _HOME_DOT_DENIED = ("~/.*", "~/.*/**")
 _MERGE_REPO_DENIED = (
     ".claude", ".vscode", ".idea", ".venv", "venv", ".direnv", ".husky", ".githooks",
     ".pre-commit-config.yaml", ".mcp.json", ".envrc",
+    # Other tools' project settings, each able to run a command in your next session.
+    ".codex", ".gemini", ".cursor", ".devcontainer", ".hermes", ".zed", ".continue",
     "lefthook.yml", ".lefthook.yml", "lefthook.yaml", ".lefthook", ".overcommit.yml",
     # CI definitions, and what they include: --auto-commit pushes what the agent
     # writes, and CI runs them.
@@ -93,38 +94,44 @@ def _homes() -> set[Path]:
 
 
 def _home_denies(repo: Path) -> tuple[list[str], list[Path]]:
-    """The home's write denies for the merge agent: rules for ``_MERGE_WRITE_DENIED``
-    and ``_HOME_DOT_DENIED``, and paths for those that hold ``repo``.
+    """The homes' write denies for the merge agent: rules for ``_MERGE_WRITE_DENIED``
+    and ``_HOME_DOT_DENIED`` under each home, and paths for those that hold ``repo``.
 
     A directory-wide one that holds the repository (~/.local/src/project,
     ~/.worktrees/project) would deny the files the agent is there to fix: it is
-    replaced by what is around the way down to it (``claude_tools.around``).
+    replaced by what is around the way down to it (``claude_tools.around``) -- in that
+    home only. Decided once for both, the exception in one took the other's denies.
     """
     target = repo.resolve()
+    rules: list[str] = []
     paths: list[Path] = []
-    holding = set()
     for home in _homes():
-        if not target.is_relative_to(home):
-            continue
-        top = target.relative_to(home).parts[:1]
+        inside = target.relative_to(home) if target.is_relative_to(home) else None
+        top = inside.parts[0] if inside and inside.parts else None
+        in_dot = top is not None and top.startswith(".")
         for pattern in _MERGE_WRITE_DENIED:
             base = home / pattern[2:].removesuffix("/**")
-            if pattern.endswith("/**") and target.is_relative_to(base):
-                holding.add(pattern)
+            if (
+                inside is not None
+                and pattern.endswith("/**")
+                and target.is_relative_to(base)
+            ):
                 paths += around(base, target)
-        if top and top[0].startswith("."):
+            else:
+                rules.append(f"/{home}/{pattern[2:]}")
+        if in_dot:
             # The home's other dot entries one by one, and around the way down within
             # the one that holds the repository.
-            holding.update(_HOME_DOT_DENIED)
             with contextlib.suppress(OSError):
                 paths += [
                     entry
                     for entry in home.iterdir()
-                    if entry.name.startswith(".") and entry.name != top[0]
+                    if entry.name.startswith(".") and entry.name != top
                 ]
-            paths += around(home / top[0], target)
-    rules = [p for p in (*_MERGE_WRITE_DENIED, *_HOME_DOT_DENIED) if p not in holding]
-    return with_account_home(tuple(rules)), paths
+            paths += around(home / str(top), target)
+        else:
+            rules += [f"/{home}/{pattern[2:]}" for pattern in _HOME_DOT_DENIED]
+    return [rule for rule in rules if rule_safe(rule.replace("*", ""))], paths
 
 
 def _trusted_checkout(repo: Path) -> list[Path]:

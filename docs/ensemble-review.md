@@ -1162,7 +1162,8 @@ for num in 1 2 3 4; do
   result="$REVIEW_TMP/result-$num.json"
   # No CLI writes this file itself, so one already here was planted; only extraction writes it.
   # One that cannot be removed would pass for this round's review: stop rather than leave it.
-  rm -f -- "$result" || { echo "ERROR: cannot remove $result, which would pass for a review"; exit 1; }
+  # -r: a directory planted under the name made rm -f fail, and the run ended with no results.
+  rm -rf -- "$result" || { echo "ERROR: cannot remove $result, which would pass for a review"; exit 1; }
 
   # Only the file the slot's own CLI writes, as recorded at launch: any other file there, named
   # like another CLI's output, may have been put there by a reviewer with a file tool. Checked as

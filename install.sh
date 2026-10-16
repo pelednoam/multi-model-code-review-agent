@@ -108,6 +108,7 @@ Next step: open Claude Code in that project and say one of:
   "full review"           -- full ensemble (4 reviewers, ~3 min)
   "run until converged"   -- convergence loop with mandatory CI gate
 
-If your project has project-specific signed manifests, edit
-scripts/review_preflight.py to set SIGNED_MANIFESTS before first run.
+Put your layout (source_dirs, test_dirs) in review-config.json at the
+project root. SIGNED_MANIFESTS and ARTIFACT_DIRS are set in
+scripts/preflight/config.py; re-apply them after re-running install.sh.
 EOF

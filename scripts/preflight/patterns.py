@@ -49,7 +49,9 @@ def scan_suspicious_patterns(
         if not path.exists() or path.suffix != ".py":
             continue
         try:
-            lines = path.read_text().splitlines()
+            # Numbered at "\n" alone, as git and the loop's re-quote number them, and
+            # read as UTF-8, which a non-ASCII file under LC_ALL=C raised on.
+            lines = path.read_text(encoding="utf-8", errors="replace").split("\n")
         except OSError:
             continue
 

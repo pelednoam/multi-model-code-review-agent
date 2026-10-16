@@ -1360,7 +1360,7 @@ class TestMergeAgentPrompt:
         # shells' startup files (a scope on Edit does not confine it; a deny does).
         assert f"Edit(/{tmp_path.resolve()}/.git/**)" in denied.split()
         assert f"Write(/{tmp_path.resolve()}/.git/**)" in denied.split()
-        assert "Write(~/.bashrc)" in denied.split()
+        assert f"Write(/{Path.home().resolve()}/.bashrc)" in denied.split()
 
     def test_a_worktrees_own_git_directories_are_denied_too(
         self, tmp_path: Path
@@ -1401,7 +1401,7 @@ class TestMergeAgentPrompt:
         (tmp_path / ".bashrc.d").mkdir()
         monkeypatch.setattr(merge_agent, "_homes", lambda: {tmp_path})
         denied = merge_agent._merge_denied(hidden)
-        assert "Write(~/.*/**)" not in denied
+        assert f"Write(/{tmp_path}/.*/**)" not in denied
         # The others stay denied, one by one: dropping them all left them writable.
         assert f"Write(/{tmp_path / '.bashrc.d'}/**)" in denied
         assert f"Write(/{tmp_path / '.worktrees'}/**)" not in denied
@@ -1414,19 +1414,24 @@ class TestMergeAgentPrompt:
         local.mkdir(parents=True)
         (tmp_path / ".local" / "bin").mkdir()
         denied = merge_agent._merge_denied(local)
-        assert "Write(~/.local/**)" not in denied
+        assert f"Write(/{tmp_path}/.local/**)" not in denied
         assert f"Write(/{local.resolve()}/**)" not in denied
         assert f"Write(/{tmp_path / '.local' / 'bin'}/**)" in denied
-        # Nor where HOME points elsewhere and the repository is in the account's.
-        monkeypatch.setattr(merge_agent, "_homes", lambda: {Path("/x"), tmp_path})
-        assert "Write(~/.*/**)" not in merge_agent._merge_denied(hidden)
-        monkeypatch.undo()
-        monkeypatch.setenv("HOME", str(tmp_path))
-        assert "Write(~/.bashrc)" in merge_agent._merge_denied(hidden)
+        # Where HOME points elsewhere and the repository is in the account's home, the
+        # exception is that home's: the other keeps its denies, dot entries and all.
+        other = tmp_path / "other-home"
+        other.mkdir()
+        monkeypatch.setattr(merge_agent, "_homes", lambda: {other, tmp_path})
+        denied = merge_agent._merge_denied(hidden)
+        assert f"Write(/{tmp_path}/.*/**)" not in denied
+        assert f"Write(/{other}/.*/**)" in denied
+        assert f"Write(/{other}/.bashrc)" in denied
+        assert f"Write(/{tmp_path}/.bashrc)" in denied
+        monkeypatch.setattr(merge_agent, "_homes", lambda: {tmp_path})
         plain = tmp_path / "code" / "project"
         plain.mkdir(parents=True)
         denied = merge_agent._merge_denied(plain)
-        assert "Write(~/.*/**)" in denied
+        assert f"Write(/{tmp_path}/.*/**)" in denied
         # Every repository's git directory, and this agent's own checkout.
         assert "Write(//**/.git/**)" in denied
         assert f"Write(/{REPO_ROOT.resolve()}/**)" in denied
@@ -2527,6 +2532,7 @@ class TestRunnerScript:
         assert (tmp / "stdout-1.txt").read_text() == "real"
         assert not (tmp / "codex-out-2.txt").exists()
 
+    @pytest.mark.skipif(shutil.which("setsid") is None, reason="needs setsid")
     def test_the_runner_has_a_session_of_its_own(self, tmp_path: Path) -> None:
         # In the caller's session, a group number reused by another of its processes
         # passed live_group, and was signalled.
@@ -2600,11 +2606,12 @@ class TestRunnerScript:
         # a reviewer with a file tool could stand in for another slot.
         runner = runner_script()
         post = runner[runner.index("# Post-process") :]
-        assert 'rm -f -- "$result"' in post
+        assert 'rm -rf -- "$result"' in post
         assert 'src="${JOB_OUT[$num]:-}"' in post
         assert "for src in" not in post
         assert runner.count("JOB_OUT[$num]=") == 5
 
+    @pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="needs /proc")
     def test_without_pgrep_groups_are_asked_of_proc(self, tmp_path: Path) -> None:
         # The check is decided once, before anything is launched.
         runner = runner_script()
@@ -2982,6 +2989,12 @@ class TestCredentialShapes:
         started = clock.monotonic()
         scrub_diff.scrub_line(line, False)
         assert clock.monotonic() - started < 2
+
+    def test_an_unquoted_url_whose_password_holds_a_quote_is_redacted(self) -> None:
+        # No quote opens it (YAML), so its ' followed by "," ends nothing; read with the
+        # source rules, the password went out.
+        line = "+dsn: postgresql://alice:" + "p4ss',word" + "@db/prod\n"
+        assert scrub_diff.scrub_line(line, False) != line
 
     def test_a_password_ending_in_a_backslash_is_redacted(self) -> None:
         # Its backslash and the "@" were read as one escaped character, and there was
@@ -3782,6 +3795,15 @@ class TestPlainDiff:
             text=True, timeout=30,
         )  # fmt: skip
         assert done.returncode == 1 and key not in done.stdout
+
+    def test_a_files_own_escapes_are_kept(self) -> None:
+        # Stripped for every line, a file's own escape codes were taken out of the diff.
+        diff = "diff --git a/a b/a\n@@ -0,0 +1 @@\n+print('\x1b[1mbold')\n"
+        done = subprocess.run(
+            [sys.executable, str(SCRUB_SCRIPT)], input=diff, capture_output=True,
+            text=True, timeout=30,
+        )  # fmt: skip
+        assert done.returncode == 0 and done.stdout == diff
 
     def test_the_loop_asks_git_for_a_plain_diff(self) -> None:
         from scripts.review_loop import diff

@@ -300,6 +300,7 @@ def _requote_from_source(raw: Path, repo: Path) -> None:
         return
     root = repo.resolve()
     changed = False
+    read: dict[Path, list[str]] = {}  # each file read once, however many hits it has
     for hit in hits:
         file = hit.get("file") if isinstance(hit, dict) else None
         number = hit.get("line") if isinstance(hit, dict) else None
@@ -308,10 +309,13 @@ def _requote_from_source(raw: Path, repo: Path) -> None:
         path = (root / file).resolve()
         if not path.is_relative_to(root):
             continue
-        try:
-            lines = path.read_text(encoding="utf-8", errors="replace").split("\n")
-        except OSError:
-            continue
+        if path not in read:
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                text = ""
+            read[path] = text.split("\n")
+        lines = read[path]
         if number <= len(lines) and redacts(lines[number - 1]):
             hit["text"] = REDACTED_TEXT
             changed = True

@@ -773,12 +773,14 @@ have detected it via fingerprint matching and exited with code 2
 |---|---|---|---|
 | Hermes+Bedrock | Your AWS account | Data: best (stays in your AWS account). Tools: the file toolset with `--yolo`, which can write; only the convergence loop's tamper check reports writes (full mode does not check) | Bedrock pricing |
 | Claude CLI | Anthropic infrastructure | Good (`--allowedTools` + `--disallowedTools`) | Claude subscription |
-| Codex CLI | OpenAI infrastructure | Good (sandbox) | ChatGPT subscription |
+| Codex CLI | OpenAI infrastructure | Writes: good (`-s read-only`, canary-verified). Reads: not confined -- it can read your home directory, credentials included | ChatGPT subscription |
 | Gemini CLI | Google infrastructure | Weak: read-only by policy (`--approval-mode plan`), not sandboxed; it can read your home directory | AI Studio free tier |
 | Antigravity CLI | Google infrastructure | Good (`bwrap` read-only filesystem; home, `/tmp`, `/run` and env hidden; verified) | Google AI plan |
 
 For sensitive/FDA-path code where data-at-rest guarantees matter, use
-Hermes+Bedrock for all reviewers.
+Hermes+Bedrock for all reviewers. Its writes are not prevented, so prefer
+the convergence loop, whose tamper check reports them (full mode does not
+check).
 
 ## Customization
 

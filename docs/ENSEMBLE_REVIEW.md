@@ -1,8 +1,9 @@
 # Multi-Model Ensemble Code Review
 
-A review-only pipeline that runs four frontier LLMs in parallel through
-Hermes Agent, each with a different review lens, preceded by a
-deterministic preflight audit. Synthesizes findings with per-reviewer
+A review-only pipeline that runs four frontier LLMs in parallel -- local
+CLIs (claude, codex, agy) by default, Hermes Agent on Bedrock when opted
+in -- each with a different review lens, preceded by a deterministic
+preflight audit. Synthesizes findings with per-reviewer
 attribution and evidence-based convergence scoring.
 
 ## Why
@@ -130,20 +131,29 @@ Review evidence is persisted to `data/reviews/<timestamp>_<branch>/`:
 - `context.md` -- repo-aware context bundle
 - `runtime-audit.json` -- preflight audit output
 - `prompt-{1,2,3,4}.txt` -- reviewer prompts
-- `result-{1,2,3,4}.json` -- raw reviewer output
+- `result-{1,2,3,4}.json` -- each reviewer's review, extracted from its
+  output and checked (a placeholder with `"reviewer": "unknown"` for a slot
+  that produced none)
 - `report.md` -- synthesized convergence report
 
 ## Cost
 
-Four frontier model API calls per review (2x Opus, 1x GPT-5.5, 1x
-Sonnet). For a typical feature branch (200-1000 lines), expect ~$5-12
-total. For a large branch (5000+ lines), expect ~$15-40.
+With the local CLIs (the default), a review costs nothing beyond the
+subscriptions they sign in with. On Hermes/Bedrock (opt-in), it is four
+API calls (2x Opus, 1x Haiku, 1x Sonnet): for a typical feature branch
+(200-1000 lines) expect ~$5-12, for a large one (5000+ lines) ~$15-40.
 
 ## Privacy
 
-- Bedrock calls stay within your AWS account boundary
-- Codex OAuth calls go through ChatGPT's backend API
-- For sensitive code, drop GPT-5.5 and run 3 Bedrock-only models
+- The diff and audit are scrubbed of credential-shaped lines first, and a
+  redaction stops the review
+- agy, on by default wherever it is installed, sends them to Google;
+  `REVIEW_USE_AGY=0` switches it off
+- Codex calls go through ChatGPT's backend API, and codex can read your
+  home directory
+- Bedrock calls stay within your AWS account boundary; a project pinned
+  to Bedrock (`.use-hermes`) sends nothing to OpenAI or Google unless
+  asked by name
 
 ## Files
 
@@ -154,7 +164,9 @@ total. For a large branch (5000+ lines), expect ~$15-40.
 | `scripts/scrub_diff.py` | Stdin credential scrubber |
 | `scripts/validate_review_results.py` | JSON schema validator |
 | `docs/ensemble_review_result_schema.json` | Strict reviewer output schema |
-| `tests/test_review_scripts.py` | Test suite |
+| `scripts/review_until_converged.py` | Convergence loop |
+| `scripts/review_loop/` | The loop's package; also the full-mode runner's checks, extraction and agy's sandbox |
+| `tests/` | Test suite |
 | `data/reviews/` | Persisted review packets (gitignored) |
 
 ### Agent definition setup

@@ -21,15 +21,20 @@ _MERGE_TOOLS = "Read Edit Write Grep Glob"
 #: Where the merge agent may not write, whatever it is told: what runs code on its own
 #: -- the repository's git hooks and config, and the shells' startup files. A scope on
 #: Edit does not confine it (measured: granted Edit(<repo>/**), it edited a file
-#: outside); a deny does. Not everywhere outside the repository: no rule says that.
+#: outside); a deny does, through a symlink too (measured: a Write to link/planted,
+#: link -> .git, was refused). Not everywhere outside the repository: no rule says that.
 #: Nor does this make fix mode safe to run on code you would not run -- the gate runs
 #: the tests the agent may have just edited, and the commit the project's own hooks,
 #: which are left on: they are the project's checks (README, "The convergence loop").
 _MERGE_WRITE_DENIED = (
     "~/.bashrc", "~/.bash_profile", "~/.bash_login", "~/.bash_logout", "~/.profile",
     "~/.zshrc", "~/.zshenv", "~/.zprofile", "~/.zlogin", "~/.zlogout",
+    "~/.bash_aliases", "~/.bashrc.d/**", "~/.oh-my-zsh/**", "~/.vimrc",
     "~/.gitconfig", "~/.npmrc", "~/.pythonrc*", "~/bin/**", "~/.cargo/**",
     "~/.pip/**", "~/.config/**", "~/.local/**", "~/.ssh/**", "~/.claude/**",
+    # The CLIs' and tools' own configs, each of which can name a command to run.
+    "~/.codex/**", "~/.gemini/**", "~/.hermes/**", "~/.aws/**", "~/.docker/**",
+    "~/.kube/**", "~/.gnupg/**",
 )  # fmt: skip
 
 

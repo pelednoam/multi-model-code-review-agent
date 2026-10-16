@@ -77,8 +77,9 @@ def _granted(tools: str) -> tuple[list[str], list[str]]:
 #: Where credentials live, which a claude reviewer is never allowed to read, whatever
 #: it is granted: its reads are not confined to the repository (measured, it read
 #: ~/.bashrc with only Read granted), and a diff that talks it into quoting one puts
-#: it in a finding. A deny on Read covers Grep and Glob too (measured). A list, so not
-#: complete: docs/ensemble-review.md says so.
+#: it in a finding. A deny on Read covers Grep and Glob too (measured), and a symlink
+#: to a denied file is refused as the file is (measured). A list, so not complete:
+#: docs/ensemble-review.md says so.
 SECRET_READS = (
     "~/.ssh/**", "~/.aws/**", "~/.azure/**", "~/.gnupg/**", "~/.kube/**",
     "~/.docker/**", "~/.config/gcloud/**", "~/.config/gh/**", "~/.netrc",

@@ -197,9 +197,18 @@ class TestAgySandboxCheck(AgyCase):
             Sock(b"\0/org/kernel/linux/storage/multipathd", 0),
             Sock(b"\0/tmp/dbus-theirs", 2000),
             Sock(b"\0c99a1981b9af149d/bus/systemd/bus-system", 1000, accepts=False),
-            Sock(b"theirs-relative.sock", 2000),
         ]
         assert agy_sandbox_check._check_reachable(None, socks) is None  # type: ignore[arg-type]
+
+    def test_another_users_relative_socket_is_not_a_pass(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Taken to be in that user's own directory; bound from /var/tmp, it is not, and
+        # nothing says where it is.
+        monkeypatch.setattr(agy_sandbox_check.os, "getuid", lambda: 1000)
+        socks = [agy_sandbox_check.Sock(b"theirs-relative.sock", 2000)]
+        reason = agy_sandbox_check._check_relative_sockets(socks)
+        assert reason and "relative" in reason
 
     @pytest.mark.parametrize(
         ("listener", "refused"), [(1000, True), (0, False), (None, False)]

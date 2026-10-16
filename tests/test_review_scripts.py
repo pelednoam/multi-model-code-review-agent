@@ -13,16 +13,15 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
-from unittest import mock
 from typing import Any
+from unittest import mock
 
 import pytest
-
 from helpers import AGENT_DOC, REPO_ROOT, runner_script, shell_function
-from scripts.review_loop import backends
+
+from scripts.review_loop import backends, claude_tools
 from scripts.review_loop import reviewers as reviewers_mod
 from scripts.review_loop.artifacts import describe_outputs, write_artifacts_key
-from scripts.review_loop import claude_tools
 from scripts.review_loop.claude_tools import SECRET_READS, claude_denied
 
 SCRUB_SCRIPT = REPO_ROOT / "scripts" / "scrub_diff.py"
@@ -2829,6 +2828,7 @@ class TestCredentialShapes:
             "HTTPS://u" + ":p4ssw0rd9" + "@proxy:3128",
             "postgres://u" + ":a#b?c9" + "@db",
             "postgres://app.user" + ":hunter2" + "@db",
+            '"postgresql://alice' + ":K7a');s9" + '@db/prod"',
             "ya" + "29." + "a" * 30,
             "1/" + "/0" + "a" * 40,
             "GOC" + "SPX-" + "a" * 28,
@@ -2850,6 +2850,7 @@ class TestCredentialShapes:
              "url-long-password", "url-no-user-slash-password",
              "url-placeholder-word-prefix",
              "url-upper-case-scheme", "url-query-chars-password", "url-dotted-user",
+             "url-double-quoted-apostrophe",
              "google-oauth-access", "google-oauth-refresh",
              "google-client-secret", "huggingface", "npm", "pypi", "google-api-key", "github-fine-grained", "github-app",
              "stripe-live", "slack", "slack-app", "slack-webhook", "discord-webhook",
@@ -2868,6 +2869,15 @@ class TestCredentialShapes:
         started = clock.monotonic()
         scrub_diff.scrub_line(line, False)
         assert clock.monotonic() - started < 2
+
+    def test_an_apostrophe_password_in_double_quotes_is_redacted(self) -> None:
+        # Its ' was taken for the end of a string, and the password got through.
+        url = "postgresql://alice:" + "K7a');s9" + "@db/prod"
+        line = '+DSN = "' + url + '"\n'
+        assert scrub_diff.scrub_line(line, False) != line
+        # And in double quotes, a port and a path with an @ are still no password.
+        kept = '+URL = "http://host:8080/@scope/pkg"\n'
+        assert scrub_diff.scrub_line(kept, False) == kept
 
     @pytest.mark.parametrize("piece", [":{", ":${A", ":<", ":%(", ":*", ":c", "@:"])
     def test_a_line_of_unfinished_placeholders_is_scanned_quickly(

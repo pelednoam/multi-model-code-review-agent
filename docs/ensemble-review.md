@@ -493,6 +493,10 @@ unset CDPATH
 # this run's: in the caller's session, a group number reused by any other of its processes passed.
 # The first runner starts the real one in a new session (setsid, which does not fork here: a
 # background job is not a group leader) and forwards it the signals that should stop it.
+# Job control off first: with it on, the job below would lead a process group of its own, setsid
+# would then fork, and $! be a parent that exits at once, leaving the run unwatched. (Not reproduced
+# with util-linux's setsid under bash -m; off costs nothing, and set -m comes later, for the jobs.)
+set +m
 if [ -z "${MMCRA_OWN_SESSION:-}" ] && command -v setsid >/dev/null 2>&1; then
   export MMCRA_OWN_SESSION=1
   setsid "$BASH" "$0" "$@" &   # this bash, checked above, not whichever comes first on PATH
@@ -1436,7 +1440,7 @@ concluding anything from a probe, and never suppress its output.
 |---|---|---|---|
 | Hermes+Bedrock | Your AWS account | Data: best (stays in your AWS account). Tools: `-t file --yolo`, which can write; only the convergence loop's tamper check reports writes (full mode does not check) | Bedrock API pricing |
 | Claude CLI | Anthropic infrastructure | Good (`--allowedTools` + `--disallowedTools`) | Claude subscription |
-| Codex CLI | OpenAI infrastructure | Good (sandbox) | ChatGPT subscription |
+| Codex CLI | OpenAI infrastructure | Writes: good (`-s read-only`, canary-verified). Reads: not confined -- it can read your home directory, credentials included | ChatGPT subscription |
 | Gemini CLI | Google infrastructure | Weak: read-only by policy (`--approval-mode plan`), not sandboxed; it can read your home directory | Google AI Studio (free tier) |
 | Antigravity CLI (agy) | Google infrastructure | Good (bwrap: filesystem read-only; home, /tmp, /run and the environment hidden; verified at launch) | Google AI plan |
 

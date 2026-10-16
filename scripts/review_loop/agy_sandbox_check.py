@@ -249,10 +249,11 @@ def _check_sockets(box: _Box, socks: list[Sock]) -> str | None:
 
 
 def _check_relative_sockets(socks: list[Sock]) -> str | None:
-    """A socket bound by a relative name cannot be checked: this user's or root's
-    fails. Another user's lives in that user's own directory."""
+    """A socket bound by a relative name cannot be checked, whoever's it is: where it
+    is, and so whether the sandbox can reach it, is unknown. Another user's is not
+    necessarily in their own directory -- bound from /var/tmp, it is reachable."""
     for sock in socks:
-        if sock.name[:1] not in (b"/", b"\0") and sock.uid in (os.getuid(), 0, None):
+        if sock.name[:1] not in (b"/", b"\0"):
             return f"a socket bound by a relative name ({_shown(sock.name)}) cannot be checked"
     return None
 

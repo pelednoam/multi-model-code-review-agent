@@ -188,6 +188,11 @@ SHAPE_PATTERNS = [
     # and connection-string code are full of those, and a redaction aborts the
     # review. Written in parts, so that this line is not one.
     re.compile(_URL_SCHEME + _URL_USER + _URL_NOT_A_PASSWORD + _URL_PASSWORD + r"@"),
+    # Inside double quotes, where a ' is no string's end and ends nothing: the password
+    # runs to the "@" (K7a');s9 is one).
+    re.compile(
+        r'"' + _URL_SCHEME + _URL_USER + _URL_NOT_A_PASSWORD + r'[^"\s@]{1,256}@'
+    ),
     # And with no user name, where nothing before the ":" is a host, so nothing after
     # it is a port.
     re.compile(

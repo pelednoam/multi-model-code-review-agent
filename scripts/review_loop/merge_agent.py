@@ -45,6 +45,7 @@ _MERGE_WRITE_DENIED = (
 #: hook managers' directories.
 _MERGE_REPO_DENIED = (
     ".claude", ".vscode", ".idea", ".venv", "venv", ".direnv", ".husky", ".githooks",
+    ".pre-commit-config.yaml",
 )  # fmt: skip
 
 
@@ -53,11 +54,14 @@ def _git_dirs(repo: Path) -> list[Path]:
     a linked worktree .git is a file naming one elsewhere, with the shared hooks and
     config in another."""
     dirs = [repo / ".git", repo.resolve() / ".git"]
+    # And the hooks directory git runs from, which core.hooksPath can put anywhere.
     found = run(
-        ["git", "rev-parse", "--absolute-git-dir", "--git-common-dir"], cwd=repo
-    )
+        ["git", "rev-parse", "--absolute-git-dir", "--git-common-dir",
+         "--git-path", "hooks"],
+        cwd=repo,
+    )  # fmt: skip
     if found.returncode == 0:
-        # --git-common-dir may be relative, to the directory git ran in.
+        # --git-common-dir and --git-path may be relative, to where git ran.
         dirs += [(repo / line).resolve() for line in found.stdout.split("\n") if line]
     return list(dict.fromkeys(dirs))
 

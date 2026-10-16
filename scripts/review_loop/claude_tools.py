@@ -85,6 +85,7 @@ SECRET_READS = (
     "~/.docker/**", "~/.config/gcloud/**", "~/.config/gh/**", "~/.netrc",
     "~/.git-credentials", "~/.npmrc", "~/.pypirc", "~/.password-store/**",
     "~/.local/share/keyrings/**", "~/.claude/**", "~/.codex/**", "~/.gemini/**",
+    "~/.hermes/**",
     "~/.config/**/credentials*", "~/.pgpass", "~/.my.cnf", "~/.vault-token",
     "~/.cargo/credentials*", "~/.terraform.d/**", "~/.s3cfg", "~/.boto", "~/.oci/**",
     "~/.config/hub", "~/.cache/huggingface/**", "~/.huggingface/**", "~/.kaggle/**",

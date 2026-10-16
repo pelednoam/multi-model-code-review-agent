@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -23,6 +24,18 @@ from scripts.review_loop import backends, claude_tools
 from scripts.review_loop import reviewers as reviewers_mod
 from scripts.review_loop.artifacts import describe_outputs, write_artifacts_key
 from scripts.review_loop.claude_tools import SECRET_READS, claude_denied
+
+#: The runner's two ways of telling its reviewers' groups from others: pgrep, and
+#: reading /proc where pgrep cannot (Linux only).
+GROUP_CHECKS = [
+    "pgrep",
+    pytest.param(
+        "proc",
+        marks=pytest.mark.skipif(
+            not Path("/proc/self/stat").exists(), reason="needs /proc"
+        ),
+    ),
+]
 
 SCRUB_SCRIPT = REPO_ROOT / "scripts" / "scrub_diff.py"
 PREFLIGHT_SCRIPT = REPO_ROOT / "scripts" / "review_preflight.py"
@@ -1375,6 +1388,20 @@ class TestMergeAgentPrompt:
         assert f"Edit(/{own.resolve()}/**)" in denied
         assert f"Edit(/{tree.resolve()}/.git)" in denied
 
+    def test_a_hooks_path_set_elsewhere_is_denied(self, tmp_path: Path) -> None:
+        # core.hooksPath puts the hooks git runs anywhere: in the repository, a
+        # directory no fixed name covered.
+        from scripts.review_loop import merge_agent
+
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "config", "core.hooksPath", "tools/hooks"],
+            check=True,
+        )
+        denied = merge_agent._merge_denied(tmp_path)
+        assert f"Write(/{(tmp_path / 'tools' / 'hooks').resolve()}/**)" in denied
+        assert f"Write(/{tmp_path.resolve()}/.pre-commit-config.yaml)" in denied
+
 
 class TestAuditIsData:
     """The audit quotes the files under review, so it is fenced like the diff."""
@@ -2044,7 +2071,7 @@ class TestCodexEnvOverrides:
     # is not enough: a global `approvals_reviewer = "auto_review"` overrides it.
     SAFETY = [
         "-s", "read-only", "-c", 'approvals_reviewer="user"',
-        "-c", "project_doc_max_bytes=0",
+        "-c", "project_doc_max_bytes=0", "-c", "notify=[]", "-c", "mcp_servers={}",
     ]  # fmt: skip
 
     def test_no_env_still_pins_the_safety_flags(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2252,7 +2279,7 @@ class TestRunnerScript:
         assert "if pgrep -s 0 -g 0 >/dev/null 2>&1 || [ $? -eq 1 ]; then" in runner
 
     @pytest.mark.parametrize("exits", [False, True], ids=["running", "exited"])
-    @pytest.mark.parametrize("check", ["pgrep", "proc"])
+    @pytest.mark.parametrize("check", GROUP_CHECKS)
     def test_kill_jobs_reaches_everything_a_reviewer_started(
         self, tmp_path: Path, exits: bool, check: str
     ) -> None:
@@ -2321,7 +2348,7 @@ class TestRunnerScript:
         assert done.stdout.count("WARNING: could not remove") == 1, done.stdout
         assert "  remove_scratch\n" in shell_function(runner, "finish_round")
 
-    @pytest.mark.parametrize("check", ["pgrep", "proc"])
+    @pytest.mark.parametrize("check", GROUP_CHECKS)
     def test_the_cleanup_kills_from_inside_its_trap(
         self, tmp_path: Path, check: str
     ) -> None:
@@ -2529,7 +2556,8 @@ class TestRunnerScript:
         )
         assert done.stdout.strip() == "proc", done.stderr
 
-    @pytest.mark.parametrize("check", ["pgrep", "proc"])
+    @pytest.mark.skipif(shutil.which("setsid") is None, reason="needs setsid")
+    @pytest.mark.parametrize("check", GROUP_CHECKS)
     def test_a_group_that_is_no_longer_this_runs_is_left_alone(
         self, tmp_path: Path, check: str
     ) -> None:
@@ -2889,6 +2917,17 @@ class TestCredentialShapes:
         started = clock.monotonic()
         scrub_diff.scrub_line(line, False)
         assert clock.monotonic() - started < 2
+
+    def test_an_escaped_apostrophe_closes_no_string(self) -> None:
+        # Its \' was taken for the end of a single-quoted string, and the password
+        # after it went out.
+        url = "postgresql://alice:" + "K7a\\');s9" + "@db/prod"
+        line = "+DSN = '" + url + "'\n"
+        assert scrub_diff.scrub_line(line, False) != line
+        # Two backslashes are one escaped backslash: the quote after them does close
+        # the string, and the next one is another string.
+        kept = "+x = ['http://h:8080\\\\','ops@x']\n"
+        assert scrub_diff.scrub_line(kept, False) == kept
 
     def test_an_apostrophe_password_in_double_quotes_is_redacted(self) -> None:
         # Its ' was taken for the end of a string, and the password got through.
@@ -3296,3 +3335,50 @@ class TestTamper:
         (tmp_path / ".claude" / "settings.local.json").write_text("{}")
         touched = tamper.report(tmp_path, before)
         assert any(".claude" in line for line in touched)
+
+    def test_a_new_file_in_an_existing_ignored_directory_is_reported(
+        self, tmp_path: Path
+    ) -> None:
+        # Naming only the ignored directory, the status did not change when a file
+        # was added to one that already existed.
+        from scripts.review_loop import tamper
+
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        (tmp_path / ".gitignore").write_text(".venv/\ndata/\n")
+        (tmp_path / ".venv").mkdir()
+        (tmp_path / ".venv" / "old.py").write_text("")
+        round_dir = tmp_path / "data" / "reviews" / "round-1"
+        round_dir.mkdir(parents=True)
+        before = tamper.snapshot(tmp_path, round_dir)
+        (tmp_path / ".venv" / "sitecustomize.py").write_text("")
+        # The round's own outputs are not a reviewer's.
+        (round_dir / "raw-1.txt").write_text("")
+        touched = tamper.report(tmp_path, before, round_dir)
+        assert touched == ["!! .venv/sitecustomize.py"]
+
+
+class TestAuditScrub:
+    """The audit is scrubbed by this checkout, whichever preflight wrote it."""
+
+    def test_a_credential_quoted_in_the_audit_is_redacted(self, tmp_path: Path) -> None:
+        # The project's own installed preflight may be too old to scrub its quotes,
+        # and the audit goes into every prompt.
+        from scripts.review_loop import diff
+
+        key = "gh" + "p_" + "a" * 36
+        audit = tmp_path / "audit.json"
+        audit.write_text(
+            json.dumps({"patterns": [{"line": f"t = '{key}'"}, {"line": "ok"}]})
+        )
+        diff._scrub_audit(audit)
+        scrubbed = json.loads(audit.read_text())
+        assert key not in audit.read_text()
+        assert scrubbed["patterns"][1]["line"] == "ok"
+
+    def test_an_audit_that_cannot_be_scrubbed_is_not_used(self, tmp_path: Path) -> None:
+        from scripts.review_loop import diff
+
+        audit = tmp_path / "audit.json"
+        audit.write_text("not json")
+        with pytest.raises(RuntimeError, match="could not scrub the audit"):
+            diff._scrub_audit(audit)

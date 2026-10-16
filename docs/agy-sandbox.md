@@ -46,7 +46,8 @@ convergence loop and the full-mode runner call it.
   root's, and a remount would undo every read-only mount. It does not run as root
   at all -- the check refuses -- since root inside still owns root's files
   (`/etc/shadow`, host keys) and can read them; in a CI container that runs as root,
-  run the review as an unprivileged user.
+  run the review as an unprivileged user. (`MMCRA_SKIP_AGY_SANDBOX_CHECK=1` skips this
+  refusal along with the wrapper; use it only on a disposable host.)
 - **Anything that runs code outside**:
   - every writable socket left reachable, refused by the check rather than looked
     up in a list (docker's, LXD's and Incus's are masked so that they do not cost

@@ -23,6 +23,7 @@ Exit codes:
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from pathlib import PurePath
@@ -134,7 +135,7 @@ _URL_SCHEME = r"(?<![a-zA-Z0-9+.-])" + _SCHEME_NAME
 #: The user: like the password (``_URL_PASSWORD_CHAR``), not past a quote that closes
 #: a string -- or it ran from one into the next: ['https://example.com','mailto:a@b'].
 #: Inside double quotes, where a ' ends nothing, any ' (``_URL_USER_DOUBLE_QUOTED``).
-_URL_USER = r"//(?:[^\s/:\"?#\[\]']|'(?![,\])};:+\s])){0,256}:"
+_URL_USER = r"//(?:\\[^\s]|[^\s/:\"?#\[\]'\\]|'(?![,\])};:+\s])){0,256}:"
 _URL_USER_DOUBLE_QUOTED = r"//[^\s/:\"?#\[\]]{0,256}:"
 #: What follows that ":" is no password when it is a port -- digits, then the path,
 #: query or fragment (http://host:8080/@scope/pkg, redis://cache:6379/0?x=a@b) --
@@ -150,15 +151,18 @@ _URL_NOT_A_PASSWORD = (
 #: A character of the password: it may hold ' (base64 and generated ones do), but
 #: not a quote that closes a string literal -- one followed by , ) ] } ; : + or a
 #: space -- or the pattern ran from one string into the next
-#: (['http://h:8080','ops@x']).
-_URL_PASSWORD_CHAR = r"(?:[^\s@\"?#']|'(?![,\])};:+\s]))"
+#: (['http://h:8080','ops@x']). A backslash and what follows it are one character, so
+#: an escaped quote (\') closes nothing.
+_URL_PASSWORD_CHAR = r"(?:\\[^\s]|[^\s@\"?#'\\]|'(?![,\])};:+\s]))"
 #: The password: with no "/" in it, any length -- the scan stops at the next "/", and
 #: every URL after it has one, so it stays linear -- and it may hold ? and #, as
 #: generated ones do; or with a "/", which ends userinfo only by the RFC and is
 #: common in base64, up to 256 characters with no ? or #, which would then be a
 #: query or fragment.
 _URL_PASSWORD = (
-    r"(?:(?:[^\s@\"'/]|'(?![,\])};:+\s]))+|" + _URL_PASSWORD_CHAR + r"{1,256})"
+    r"(?:(?:\\[^\s/]|[^\s@\"'/\\]|'(?![,\])};:+\s]))+|"
+    + _URL_PASSWORD_CHAR
+    + r"{1,256})"
 )
 
 # SHAPE_PATTERNS recognise a credential by its own shape, with no help from a
@@ -492,15 +496,46 @@ def scrub_text() -> int:
     return n_redacted
 
 
+def scrub_json() -> int:
+    """``--json``: scrub a JSON document's strings -- every line of each is content, as
+    an added line is -- and write it back out, still JSON. Returns the number of
+    strings redacted. For the preflight audit, which quotes the files under review: a
+    project's own installed copy of the preflight may be too old to scrub its quotes."""
+    redacted = 0
+    marker = REDACTED.removeprefix("# ")
+
+    def walk(node: object) -> object:
+        nonlocal redacted
+        if isinstance(node, str):
+            for part in node.splitlines() or [node]:
+                added = "+" + part + "\n"
+                if scrub_line(added, False) != added:
+                    redacted += 1
+                    return marker
+            return node
+        if isinstance(node, list):
+            return [walk(item) for item in node]
+        if isinstance(node, dict):
+            return {key: walk(value) for key, value in node.items()}
+        return node
+
+    document = walk(json.load(sys.stdin))
+    json.dump(document, sys.stdout, indent=2)
+    sys.stdout.write("\n")
+    return redacted
+
+
 def main() -> None:
     """Read stdin, scrub, write to stdout. Exit 1 if any redactions."""
     _force_utf8(sys.stdin)
     _force_utf8(sys.stdout)
 
-    if sys.argv[1:] == ["--text"]:
-        n_text = scrub_text()
+    if sys.argv[1:] in (["--text"], ["--json"]):
+        text = sys.argv[1] == "--text"
+        n_text = scrub_text() if text else scrub_json()
         if n_text:
-            print(f"# scrub_diff.py: {n_text} line(s) redacted", file=sys.stderr)
+            what = "line(s)" if text else "string(s)"
+            print(f"# scrub_diff.py: {n_text} {what} redacted", file=sys.stderr)
             sys.exit(1)
         return
 

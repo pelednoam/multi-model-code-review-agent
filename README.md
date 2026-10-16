@@ -105,9 +105,10 @@ ensemble-review agent (docs/ensemble-review.md)
   |  QUICK MODE:                         FULL MODE:                    |
   |  Agent(opus, spec-contract)          R1: claude -p    OR  hermes    |
   |  Agent(sonnet, correctness)          R2: codex exec   (GPT-5.5)    |
-  |  (2 subagents, free)                 R3: agy / gemini OR  claude -p |
+  |  (2 subagents, free)                 R3: agy/gemini* OR claude -p  |
   |                                      R4: claude -p    OR  hermes    |
   |                                      (4 sessions, free or paid)    |
+  |                                      (* gemini only by opt-in)     |
   |                                                                    |
   |  4. synthesize convergence report                                  |
   |  5. [loop only] merge agent applies suggested_fix's (clean ctx)    |

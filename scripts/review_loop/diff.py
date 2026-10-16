@@ -249,7 +249,32 @@ def run_preflight(round_dir: Path, repo: Path) -> Path:
         raise RuntimeError(
             f"preflight failed (no audit JSON, exit {result.returncode}): {result.stderr}"
         )
+    _scrub_audit(audit_path)
     return audit_path
+
+
+def _scrub_audit(audit_path: Path) -> None:
+    """Scrub the audit's strings with this checkout's scrubber, in place.
+
+    The audit quotes the files under review, and goes into every prompt. The
+    preflight that wrote it may be the project's own installed copy
+    (``_preflight_script``), too old to scrub its quotes, so they are scrubbed here
+    whichever wrote them. A redaction is not an abort, as it is for the diff: the
+    quote is replaced, and the review goes on. One that cannot be done is.
+    """
+    with audit_path.open(encoding="utf-8", errors="replace") as source:
+        done = subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "scrub_diff.py"), "--json"],
+            stdin=source,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+    if done.returncode not in (0, 1):
+        raise RuntimeError(f"could not scrub the audit: {done.stderr.strip()[-500:]}")
+    audit_path.write_text(done.stdout, encoding="utf-8")
 
 
 #: A single file bigger than this share of the diff is worth mentioning...

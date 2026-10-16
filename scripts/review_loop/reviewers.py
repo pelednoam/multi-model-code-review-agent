@@ -351,12 +351,16 @@ def _codex_extra_args() -> list[str]:
     #                           under review chose it -- as instructions, outside the
     #                           diff's fence. Measured: told there to end every answer
     #                           with a word, codex did; with this, it did not.
+    #   notify=[], mcp_servers={}  no command run on its events, and no MCP server -- the
+    #                           two settings a project-level .codex/config.toml in the
+    #                           repository, which is codex's working directory, could set
+    #                           to run something outside its sandbox.
     #
     # This is belt AND braces: backends.codex_is_confined() still canary-tests the result,
     # because a flag that is silently overridden is exactly the failure being defended against.
     args: list[str] = [
         "-s", "read-only", "-c", 'approvals_reviewer="user"',
-        "-c", "project_doc_max_bytes=0",
+        "-c", "project_doc_max_bytes=0", "-c", "notify=[]", "-c", "mcp_servers={}",
     ]  # fmt: skip
     model = os.environ.get("CODEX_MODEL")
     if model:
@@ -863,8 +867,14 @@ def _publish_outputs(out_dir: Path, round_dir: Path) -> None:
             name = pattern.format(slot)
             # Whatever is there already was not written by this round's reviewer --
             # say, a codex answer planted for a codex that wrote none -- so it goes
-            # whether or not there is a copy to replace it.
-            (round_dir / name).unlink(missing_ok=True)
+            # whether or not there is a copy to replace it. A directory too: planted
+            # under the name, it made the unlink fail, and no output was read.
+            target = round_dir / name
+            if target.is_dir() and not target.is_symlink():
+                if not _remove_tree(target):
+                    raise OSError(f"cannot remove the directory planted at {target}")
+            else:
+                target.unlink(missing_ok=True)
             # A regular file only: a symlink planted under the name would publish
             # whatever it points to.
             source = out_dir / name

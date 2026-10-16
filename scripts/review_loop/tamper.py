@@ -32,6 +32,7 @@ backend added tomorrow is covered on the day it is added.
 
 from __future__ import annotations
 
+import contextlib
 import subprocess
 from typing import TYPE_CHECKING
 
@@ -39,28 +40,27 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def snapshot(repo: Path) -> str:
+def snapshot(repo: Path, exclude: Path | None = None) -> str:
     """Everything git can see about the working tree, as one string.
 
     ``--porcelain`` covers tracked modifications, staged changes and untracked
-    files, and ``--ignored=matching`` new files under ignored paths -- a
-    reviewer's write to .venv or .claude was invisible without it. Not covered: a
-    change to a file that was already there and is ignored, which git does not
-    look at, and a file whose content changed and changed back.
+    files, and ``--ignored=traditional`` every file under ignored paths, one per
+    line -- a reviewer's write into an existing .venv or .claude was invisible
+    without it, and with ``matching`` too, which names only the directory. Not
+    covered: a change to an ignored file already there, which git does not look
+    at, and a file whose content changed and changed back.
+
+    ``exclude`` is the round's own directory, when it is inside the repository:
+    the round writes its outputs there, and they are no reviewer's doing.
     """
-    done = subprocess.run(
-        [
-            "git",
-            "status",
-            "--porcelain=v1",
-            "--untracked-files=all",
-            "--ignored=matching",
-        ],  # fmt: skip
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    cmd = [
+        "git", "status", "--porcelain=v1", "--untracked-files=all",
+        "--ignored=traditional", "--", ".",
+    ]  # fmt: skip
+    if exclude is not None:
+        with contextlib.suppress(ValueError):
+            cmd.append(f":(exclude){exclude.resolve().relative_to(repo.resolve())}")
+    done = subprocess.run(cmd, cwd=repo, capture_output=True, text=True, check=False)
     return done.stdout
 
 
@@ -70,14 +70,14 @@ def changed(before: str, after: str) -> list[str]:
     return sorted(line for line in after.splitlines() if line not in was)
 
 
-def report(repo: Path, before: str) -> list[str]:
+def report(repo: Path, before: str, exclude: Path | None = None) -> list[str]:
     """Say what the reviewers wrote, loudly, and hand back the list.
 
     Loudly on purpose. A reviewer writing into the repository it is reviewing
     is not a small thing: it puts text nobody wrote next to text somebody did,
     in a tree whose next command is very often ``git add -A``.
     """
-    touched = changed(before, snapshot(repo))
+    touched = changed(before, snapshot(repo, exclude))
     if not touched:
         return []
     print("\nWARNING: the reviewers changed the working tree. They must not.")

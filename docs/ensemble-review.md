@@ -154,10 +154,10 @@ Bedrock opt-in precedence (PREFER_HERMES=true), used for regulated codebases tha
 | CLI | Non-interactive | Read-only | Input | Output |
 |---|---|---|---|---|
 | `claude` | `-p` | `--tools Read,Grep,Glob` (the only tools it has at all; `claude_tools.claude_tool_names`, the runner's from `claude-tools`) and `--allowedTools "Read Grep Glob"` **plus** `--disallowedTools "Edit Write MultiEdit NotebookEdit Bash WebFetch WebSearch ReportFindings"` and `Read(...)` of each credential location (`claude_tools.SECRET_READS`; the runner gets the list from `claude-deny`), `--strict-mcp-config` (no MCP servers), `--setting-sources user` (no project hooks) and `--permission-mode dontAsk` -- `--allowedTools` alone only skips the permission prompt, it does *not* confine the agent | stdin (`< prompt.txt`) | `--output-format json` wraps in `{"result":"..."}` |
-| `codex` | `codex exec` **plus `-s read-only`, `-c approvals_reviewer="user"` and `-c project_doc_max_bytes=0`** (no AGENTS.md from the branch) (in both the convergence loop and this runner) -- both are pinned by the tool and neither is optional: no sandbox flag was passed at all before, and `-s read-only` on its own is silently overridden by a global `approvals_reviewer = "auto_review"` (see docs/codex-sandbox.md). Codex is also canary-tested at launch and its slot is DROPPED if the sandbox does not actually refuse a write (optional `-m <model> -c model_reasoning_effort=<level>` -- override via `CODEX_MODEL`, `CODEX_REASONING_EFFORT`; `=high` is the "GPT-5.5 Pro" equivalent) | verified read-only for writes, not assumed; its reads are not confined -- it can read your home directory, credentials included, and what it reads goes to OpenAI | stdin (file) | `-o <file>` writes last message |
+| `codex` | `codex exec` **plus `-s read-only`, `-c approvals_reviewer="user"` and `-c project_doc_max_bytes=0`** (no AGENTS.md from the branch) (in both the convergence loop and this runner) -- all are pinned by the tool and none is optional (with `-c notify=[] -c mcp_servers={}`, so a project-level `.codex/config.toml` runs nothing): no sandbox flag was passed at all before, and `-s read-only` on its own is silently overridden by a global `approvals_reviewer = "auto_review"` (see docs/codex-sandbox.md). Codex is also canary-tested at launch and its slot is DROPPED if the sandbox does not actually refuse a write (optional `-m <model> -c model_reasoning_effort=<level>` -- override via `CODEX_MODEL`, `CODEX_REASONING_EFFORT`; `=high` is the "GPT-5.5 Pro" equivalent) | verified read-only for writes, not assumed; its reads are not confined -- it can read your home directory, credentials included, and what it reads goes to OpenAI | stdin (file) | `-o <file>` writes last message |
 | `gemini` | `-p` | `--model <m> --approval-mode plan --skip-trust` (default `<m>` is `gemini-2.5-flash` for free-tier compatibility; override via `GEMINI_MODEL`) | stdin (file) | stdout (text, may have fences) |
 | `agy` | `--input-format stream-json --output-format stream-json` (no `-p`: the prompt is one JSON line on stdin, because a single argument is capped at 128 KB) **plus `--sandbox --disable-slash-commands`**, pinned. On by default where installed; `REVIEW_USE_AGY=0` switches it off. Model: `AGY_MODEL` if set, else the best Gemini model `agy models` lists, picked each run. agy has no deny list and was measured writing outside its workspace, so it runs under **bubblewrap** (see docs/agy-sandbox.md), verified at startup without a model call and again before each launch; the slot goes to its next backend if that fails. The prompt opens with a no-tools preamble: a refused tool call ends agy's turn with no answer | bubblewrap read-only filesystem, verified; `--sandbox --disable-slash-commands` (no `--mode=plan`: it is a slash command, so a no-op once expansion is off) | stdin (one stream-json line) | stream-json; the last `result` event carries `structured_output` (enforced by `--json-schema`) |
-| `hermes` | `-z --yolo` | none: `-t file` limits it to the file toolset, which writes under `--yolo`; only the convergence loop's tamper check reports writes | `-z` flag (has ARG_MAX risk for large prompts) | stdout (the answer text; the prompt asks for the JSON in the reply, not in a file) |
+| `hermes` | `-z --yolo --ignore-rules` (not the branch's AGENTS.md, SOUL.md or .cursorrules, nor memory) | none: `-t file` limits it to the file toolset, which writes under `--yolo`; only the convergence loop's tamper check reports writes | `-z` flag (has ARG_MAX risk for large prompts) | stdout (the answer text; the prompt asks for the JSON in the reply, not in a file) |
 
 ### Retrieving the reviewers' output
 
@@ -217,7 +217,7 @@ Collect ALL of these, not just the merge-base diff. Use a private temp directory
 REVIEW_TMP=$(mktemp -d /tmp/mmcra-review-XXXXXXXX)
 
 git diff --merge-base origin/main -- . \
-  | python scripts/scrub_diff.py \
+  | python3 scripts/scrub_diff.py \
   > "$REVIEW_TMP/diff.patch"
 
 git status --short > "$REVIEW_TMP/git-status.txt"
@@ -227,14 +227,22 @@ git ls-files --others --exclude-standard > "$REVIEW_TMP/untracked.txt"
 
 If the scrubber exits non-zero, **STOP**. Secrets must be removed from the branch and rotated before re-running.
 
-If the diff is empty, fall back to `git diff HEAD~1 | python scripts/scrub_diff.py`. If still empty, ask what to review.
+If the diff is empty, fall back to `git diff HEAD~1 | python3 scripts/scrub_diff.py`. If still empty, ask what to review.
 
 ## 2. Run the deterministic preflight audit
 
 ```bash
 source .venv/bin/activate
-python scripts/review_preflight.py --output "$REVIEW_TMP/runtime-audit.json"
+python3 scripts/review_preflight.py --output "$REVIEW_TMP/runtime-audit.raw.json"
+# Its strings scrubbed, as the diff is: it quotes the files under review, and a project's own
+# installed preflight may be too old to scrub them itself.
+python3 scripts/scrub_diff.py --json < "$REVIEW_TMP/runtime-audit.raw.json" \
+  > "$REVIEW_TMP/runtime-audit.json"
+echo "audit scrub exit $?"
 ```
+
+Exit 0 or 1 (a quote was redacted; the review goes on with the redacted audit): use
+`runtime-audit.json`. Any other status: it is incomplete -- **STOP**.
 
 Read the audit JSON and report a one-line summary to the user.
 
@@ -420,7 +428,7 @@ Lens: injection vectors, auth gaps, unsafe deserialization, secrets, race condit
 
 Output: `$REVIEW_TMP/result-2.json`
 
-If Codex CLI is installed and its sandbox check passes (`review_helper codex-check`), this reviewer runs via `codex exec -s read-only -c 'approvals_reviewer="user"' -o $OUT_DIR/codex-out-2.txt - < prompt-2.txt` (a private directory, copied into `$REVIEW_TMP` once every reviewer has stopped): both safety flags pinned, the prompt on stdin. The `-o` flag captures the last agent message, which is checked like every other reviewer's output before it becomes `result-2.json`. The prompt must end with: "Output ONLY the JSON result object, no other text." Otherwise it falls back to Claude CLI Haiku (free), then Hermes Haiku on Bedrock (whose answer is read from `stdout-2.txt`). A project pinned to Bedrock (`.use-hermes`) runs Hermes Haiku first.
+If Codex CLI is installed and its sandbox check passes (`review_helper codex-check`), this reviewer runs via `codex exec -s read-only -c 'approvals_reviewer="user"' -c project_doc_max_bytes=0 -c 'notify=[]' -c 'mcp_servers={}' -o $OUT_DIR/codex-out-2.txt - < prompt-2.txt` (a private directory, copied into `$REVIEW_TMP` once every reviewer has stopped): every safety flag pinned, the prompt on stdin. The `-o` flag captures the last agent message, which is checked like every other reviewer's output before it becomes `result-2.json`. The prompt must end with: "Output ONLY the JSON result object, no other text." Otherwise it falls back to Claude CLI Haiku (free), then Hermes Haiku on Bedrock (whose answer is read from `stdout-2.txt`). A project pinned to Bedrock (`.use-hermes`) runs Hermes Haiku first.
 
 Lens: off-by-one, null paths, shape/dtype mismatches, contract violations, logic errors, missing test coverage. For numpy/torch: shape broadcasting, device placement, gradient flow.
 
@@ -573,7 +581,8 @@ publish_outputs() {
   PUBLISH_TRIED=true
   for num in 1 2 3 4; do
     for name in "stdout-$num.txt" "stderr-$num.txt" "claude-raw-$num.json" "codex-out-$num.txt"; do
-      rm -f -- "$REVIEW_TMP/$name" || return 1
+      # -r: a directory planted under the name made rm -f fail, and nothing was published.
+      rm -rf -- "${REVIEW_TMP:?}/$name" || return 1
       # A regular file only: a symlink planted under the name would publish what it points to.
       if [ -f "$OUT_DIR/$name" ] && [ ! -L "$OUT_DIR/$name" ]; then
         cp -- "$OUT_DIR/$name" "$REVIEW_TMP/$name" || return 1
@@ -603,8 +612,9 @@ JOB_PID=()
 JOB_BACKEND=()   # which CLI ran each slot, which decides how its output is read (unwrap_envelope)
 JOB_OUT=()       # the one file each slot's CLI writes its answer to, the only one read for it
 JOB_PROVIDER=()  # whose model answers each slot, for the diversity count
-JOB_MODEL=()     # the model launched for each slot, written into its result; the loop keeps
-                 # the model the reviewer itself reported, so the two can differ
+JOB_MODEL=()     # the model launched for each slot where the runner knows it exactly -- a
+                 # Bedrock slug, CODEX_MODEL, agy's or gemini's -- written into its result;
+                 # empty, the review keeps the model the reviewer reported, as the loop's does
 SCRATCH=()
 kill_jobs() {
   local sig
@@ -866,13 +876,9 @@ launch_cli() {
       JOB_BACKEND[$num]=claude
       echo claude > "$REVIEW_TMP/backend-$num.txt"   # for watching
       JOB_PROVIDER[$num]=anthropic
-      # Named as the convergence loop labels them in the prompt; the loop keeps whatever model
-      # the reviewer itself reports, so its result can name another.
-      case "$model" in
-        opus)   JOB_MODEL[$num]=claude-opus-4.6 ;;
-        sonnet) JOB_MODEL[$num]=claude-sonnet-4.6 ;;
-        haiku)  JOB_MODEL[$num]=claude-haiku-4.5 ;;
-      esac
+      # Not named here: opus, sonnet and haiku are aliases, and the version one runs is claude's to
+      # say. The review keeps the model the reviewer reports, as the convergence loop's does.
+      JOB_MODEL[$num]=""
       echo $! > "$REVIEW_TMP/pid-$num"
       echo "R$num: Claude CLI ($model, tools: $tools) [Claude subscription]"
       ;;
@@ -885,7 +891,10 @@ launch_cli() {
       # The safety flags are pinned, as in the convergence loop (_codex_extra_args): -s read-only;
       # approvals_reviewer="user", because a global "auto_review" escalates past read-only; and
       # project_doc_max_bytes=0, so that the branch's own AGENTS.md is not read as instructions.
-      local codex_extra=(-s read-only -c 'approvals_reviewer="user"' -c project_doc_max_bytes=0)
+      # And notify=[], mcp_servers={}: no command on its events and no MCP server, whatever a
+      # project-level .codex/config.toml says.
+      local codex_extra=(-s read-only -c 'approvals_reviewer="user"' -c project_doc_max_bytes=0
+        -c 'notify=[]' -c 'mcp_servers={}')
       [ -n "${CODEX_MODEL:-}" ] && codex_extra+=(-m "$CODEX_MODEL")
       [ -n "${CODEX_REASONING_EFFORT:-}" ] && \
         codex_extra+=(-c "model_reasoning_effort=$CODEX_REASONING_EFFORT")

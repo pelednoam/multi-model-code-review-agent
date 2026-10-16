@@ -161,12 +161,12 @@ def _run_one_round(
     # Reviewers read and report. Some backends are only *asked* to -- hermes
     # runs --yolo with the file toolset -- so the outcome is checked rather
     # than the permissions, which covers a backend added tomorrow too.
-    untouched = tamper.snapshot(repo)
+    untouched = tamper.snapshot(repo, round_dir)
     answered_by = launch_reviewers(
         round_dir, diff_text, audit_text, context, backends, prefer_hermes, repo
     )
     print(f"Reviewers finished in {time.time() - t0:.0f}s")
-    tamper.report(repo, untouched)
+    tamper.report(repo, untouched, round_dir)
 
     results = extract_results(round_dir, answered_by)
     print(_describe_results(results, n_lines))

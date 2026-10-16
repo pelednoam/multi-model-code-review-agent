@@ -152,10 +152,10 @@ def _extract(raw: str, out: str, slot: str, backend: str = "", model: str = "") 
     counts. Then the loop's own ``validate_result``: the required keys, a list of
     findings that are objects, and the reviewer named by the slot, not by the model.
 
-    One difference from the loop: ``model``, the model the runner launched, replaces
-    the one the review names. The loop keeps what the reviewer reported -- the model
-    its prompt told it it was, which is the one launched unless the reviewer says
-    otherwise.
+    One difference from the loop: ``model``, where the runner knows exactly which
+    model it launched (a Bedrock slug, CODEX_MODEL, agy's or gemini's), replaces the
+    one the review names. Empty -- claude's aliases -- the review keeps what the
+    reviewer reported, as the loop's always does.
     """
     text = Path(raw).read_text(encoding="utf-8", errors="replace")
     if backend == "agy":

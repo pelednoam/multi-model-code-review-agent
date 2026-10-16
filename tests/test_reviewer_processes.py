@@ -295,6 +295,20 @@ class TestReviewerProcesses(AgyCase):
         reviewers._publish_outputs(out, round_dir)
         assert not (round_dir / "raw-1.txt").exists()
 
+    def test_a_planted_directory_does_not_stop_the_publishing(
+        self, tmp_path: Path
+    ) -> None:
+        # rm/unlink of a directory under an output's name failed, and the round read
+        # no reviewer's output at all.
+        out, round_dir = tmp_path / "out", tmp_path / "round"
+        out.mkdir()
+        (round_dir / "raw-1.txt").mkdir(parents=True)
+        (round_dir / "raw-1.txt" / "x").write_text("planted")
+        (out / "raw-1.txt").write_text("review")
+        reviewers._publish_outputs(out, round_dir)
+        assert (round_dir / "raw-1.txt").read_text() == "review"
+
+    @pytest.mark.skipif(sys.platform != "linux", reason="reads /proc/<pid>/status")
     def test_a_signal_while_a_reviewer_starts_still_stops_it(
         self, tmp_path: Path
     ) -> None:

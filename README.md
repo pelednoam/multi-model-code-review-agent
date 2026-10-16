@@ -820,7 +820,8 @@ the convergence loop, whose tamper check reports them -- in tracked and
 untracked files (by content), ignored files (by size and modification
 time), the repository's git hooks and config, and the home's startup
 files; it does not see other writes outside the repository, and full mode
-does not check.
+does not check. The loop's own output redirected into the repository is no
+reviewer's write; one copied there through `tee` needs `--log-file PATH`.
 
 ## Customization
 

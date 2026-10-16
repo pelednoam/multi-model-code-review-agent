@@ -3698,6 +3698,12 @@ class TestTamper:
         assert tamper.changed(before, tamper.snapshot(tmp_path)) == []
 
 
+def test_an_unresolvable_configured_directory_is_not_inside(tmp_path: Path) -> None:
+    from scripts.preflight import coverage
+
+    assert not coverage._inside("bad\x00dir")
+
+
 class TestTamperHardening:
     """What a reviewer's write could hide from the tamper check, or run through it."""
 
@@ -3767,6 +3773,41 @@ class TestTamperHardening:
         touched = tamper.report(repo, before)
         assert not marker.exists()
         assert any("git status not run" in line for line in touched)
+
+    def test_a_deleted_control_file_also_skips_git_status(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Deleting info/attributes changes what git runs as much as adding one does.
+        from scripts.review_loop import tamper
+
+        repo = self._repo(tmp_path / "r")
+        (repo / ".git" / "info").mkdir(exist_ok=True)
+        (repo / ".git" / "info" / "attributes").write_text("")
+        before = tamper.snapshot(repo)
+        (repo / ".git" / "info" / "attributes").unlink()
+
+        def no_git(*_: object) -> list[str]:
+            raise AssertionError("git status ran")
+
+        monkeypatch.setattr(tamper, "_status_lines", no_git)
+        touched = tamper.changed(before, tamper.snapshot(repo, None, before))
+        assert any("git status not run" in line for line in touched)
+
+    def test_a_named_log_file_is_no_reviewers_write(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # | tee data/reviews/run.log: another process writes it, so it is named.
+        from scripts.review_loop import tamper
+
+        repo = self._repo(tmp_path / "r")
+        (repo / ".gitignore").write_text("data/\n")
+        (repo / "data").mkdir()
+        log = repo / "data" / "run.log"
+        log.write_text("")
+        monkeypatch.setattr(tamper, "LOG_FILES", {log})
+        before = tamper.snapshot(repo)
+        log.write_text("round 1 ...\n")
+        assert tamper.changed(before, tamper.snapshot(repo)) == []
 
     def test_a_reviewers_file_name_cannot_rewrite_the_warning(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -3898,6 +3939,19 @@ class TestScrubJson:
             input=json.dumps(doc), capture_output=True, text=True, timeout=30,
         )  # fmt: skip
         return done.returncode, json.loads(done.stdout)
+
+    def test_a_quoted_key_in_a_quoted_line_is_redacted(self) -> None:
+        # The audit quotes a JSON file's line: the quote after the key's name let the
+        # assignment through, in --json and in --text.
+        line = '{"' + "pass" + 'word": "Zq7xK9mP2w4t"}'
+        code, out = self._scrub({"suspicious_patterns": [{"text": line}]})
+        assert code == 1
+        assert out == {"suspicious_patterns": [{"text": scrub_diff.REDACTED_TEXT}]}
+        done = subprocess.run(
+            [sys.executable, str(SCRUB_SCRIPT), "--text"],
+            input=line + "\n", capture_output=True, text=True, timeout=30,
+        )  # fmt: skip
+        assert done.returncode == 1 and "Zq7x" not in done.stdout
 
     def test_a_value_is_read_with_its_key(self) -> None:
         # Values alone were scrubbed: "hunter2" says nothing; "password" beside it does.

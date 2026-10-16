@@ -12,7 +12,7 @@ import sys
 from typing import TYPE_CHECKING
 
 from .config import SCRIPTS_DIR, VENDORED_PATHS, diff_pathspec, is_agent_repo
-from .proc import run, signals_unwind
+from .proc import run, signals_held, signals_unwind
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -274,35 +274,43 @@ def _run_tree(
     """Run ``cmd`` in a session of its own, and at ``timeout`` kill all of it: the
     preflight runs the project's test suite, and killing the preflight alone left
     the tests it started running on."""
-    proc = subprocess.Popen(
-        cmd,
-        cwd=cwd,
-        # The repository to audit, whichever copy of the preflight runs.
-        env={**os.environ, "MMCRA_PREFLIGHT_REPO": str(cwd.resolve())},
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        start_new_session=True,
-    )
+    proc: subprocess.Popen[str] | None = None
     try:
-        # A SIGTERM or SIGHUP raises here rather than ending Python with the session it
-        # started still running: the handler below then kills it.
+        # A SIGTERM or SIGHUP raises in here rather than ending Python with the session
+        # it started still running, and the handlers below kill it. Held while it
+        # starts, so that one arriving then is raised once there is a process to kill.
         with signals_unwind():
+            with signals_held():
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=cwd,
+                    # The repository to audit, whichever copy of the preflight runs.
+                    env={**os.environ, "MMCRA_PREFLIGHT_REPO": str(cwd.resolve())},
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    start_new_session=True,
+                )
             out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as exc:
-        with contextlib.suppress(OSError):
-            os.killpg(proc.pid, signal.SIGKILL)
-        proc.communicate()
+        _kill_tree(proc)
         raise RuntimeError(f"preflight did not finish in {timeout:.0f}s") from exc
     except BaseException:
-        with contextlib.suppress(OSError):
-            os.killpg(proc.pid, signal.SIGKILL)
-        proc.communicate()
+        _kill_tree(proc)
         raise
     return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
+def _kill_tree(proc: subprocess.Popen[str] | None) -> None:
+    """Kill ``proc``'s session, if it started, and reap it."""
+    if proc is None:
+        return
+    with contextlib.suppress(OSError):
+        os.killpg(proc.pid, signal.SIGKILL)
+    proc.communicate()
 
 
 def run_preflight(round_dir: Path, repo: Path) -> Path:

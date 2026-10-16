@@ -72,7 +72,10 @@ def snapshot(repo: Path, exclude: Path | None = None, before: str | None = None)
     # loop imports late would otherwise leave a __pycache__ the check calls a write.
     sys.dont_write_bytecode = True
     control = _control_lines(repo)
-    if before is not None and not set(control) <= set(before.splitlines()):
+    # Compared whole: one deleted (an attributes file, a hook) changes what git runs too.
+    if before is not None and set(control) != {
+        line for line in before.splitlines() if line.startswith(("git ", "home "))
+    }:
         return "\n".join([*control, "?? git status not run: its control files changed"])
     return "\n".join(sorted({*_status_lines(repo, exclude), *control})) + "\n"
 
@@ -211,9 +214,19 @@ def _fingerprint(path: Path, cheap: bool) -> str:
         return f"unreadable:{exc.errno}"
 
 
+#: Files the loop's output is copied into by another process (``tee``), named with
+#: ``--log-file``: no reviewer's write either.
+LOG_FILES: set[Path] = set()
+
+
 def _own_outputs() -> set[tuple[int, int]]:
-    """The files this process's stdout and stderr go to, when they are files."""
+    """The files this process's stdout and stderr go to, when they are files, and
+    ``LOG_FILES``."""
     found = set()
+    for log in LOG_FILES:
+        with contextlib.suppress(OSError):
+            info = log.stat()
+            found.add((info.st_dev, info.st_ino))
     for fd in (1, 2):
         with contextlib.suppress(OSError):
             info = os.fstat(fd)

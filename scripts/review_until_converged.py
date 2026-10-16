@@ -299,8 +299,21 @@ def main() -> int:
             "run the merge agent and does not touch the working tree. Exits "
             "10 when there are blocking findings (whether or not every reviewer "
             "answered), 0 when every reviewer answered and none is blocking, 11 "
-            "when nothing is blocking but one produced nothing, 7 when none did; 8 "
+            "when nothing is blocking but one produced nothing, 12 when nothing is "
+            "but a reviewer changed the working tree, 7 when none did; 8 "
             "or 9 when the diff could not be scrubbed safely, as without the flag."
+        ),
+    )
+    parser.add_argument(
+        "--log-file",
+        type=Path,
+        action="append",
+        default=[],
+        metavar="PATH",
+        help=(
+            "A file this run's output is copied into inside the repository "
+            "(`| tee data/reviews/run.log`): not a reviewer's write. Output "
+            "redirected into one with > is told apart without it."
         ),
     )
     parser.add_argument(
@@ -317,6 +330,7 @@ def main() -> int:
     args = parser.parse_args()
 
     repo = args.repo.resolve()
+    tamper.LOG_FILES.update(path.resolve() for path in args.log_file)
     review_dir = (
         args.review_dir if args.review_dir is not None else repo / "data" / "reviews"
     )

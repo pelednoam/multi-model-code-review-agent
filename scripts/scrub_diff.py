@@ -110,14 +110,16 @@ _PEM_END = re.compile(r"(?i)END\s+[A-Z0-9 ]*PRIVATE\s+KEY")
 # KEYWORD_PATTERNS recognise a credential by the *name* next to it: `token =`,
 # `password:`, `api_key=`. They are the ones that fire on ordinary code in any
 # project where a token is a domain object, so they are the ones a reviewed
-# fixture suppression may excuse.
+# fixture suppression may excuse. The name may be quoted, as a JSON or a dict's key
+# is ("password": "..."): the quote between it and the ":" let one through.
+_KEY_END = r"""["'`]?\s*[:=]\s*"""
 KEYWORD_PATTERNS = [
     re.compile(
-        r"(?i)(api[_-]?key|secret[_-]?key|access[_-]?key)\s*[:=]\s*" + _SECRET_VALUE
+        r"(?i)(api[_-]?key|secret[_-]?key|access[_-]?key)" + _KEY_END + _SECRET_VALUE
     ),
-    re.compile(r"(?i)(password|passwd|pwd)\s*[:=]\s*" + _SECRET_VALUE),
-    re.compile(r"(?i)\b(token|bearer)\s*[:=]\s*" + _SECRET_VALUE),
-    re.compile(r"(?i)client[_-]?secret\s*[:=]\s*" + _SECRET_VALUE),
+    re.compile(r"(?i)(password|passwd|pwd)" + _KEY_END + _SECRET_VALUE),
+    re.compile(r"(?i)\b(token|bearer)" + _KEY_END + _SECRET_VALUE),
+    re.compile(r"(?i)client[_-]?secret" + _KEY_END + _SECRET_VALUE),
 ]
 
 #: A URL password that is no password: a template's field, named as a template names

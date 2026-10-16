@@ -13,7 +13,7 @@ REPO_ROOT = SCRIPTS_DIR.parent
 #: git, by the path it has when the loop starts: a reviewer that can write files can
 #: plant one under its name early on PATH (~/.local/bin/git), for the loop's own checks
 #: of what the reviewers wrote to run.
-GIT = shutil.which("git") or "git"
+GIT = os.path.abspath(_found) if (_found := shutil.which("git")) else "git"
 
 #: Seconds a reviewer gets on a *small* diff. Scaled by size below, because a
 #: flat budget kills exactly the reviewer worth waiting for: the slowest one is

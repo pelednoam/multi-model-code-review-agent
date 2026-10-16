@@ -39,6 +39,10 @@ _MERGE_WRITE_DENIED = (
     # The CLIs' and tools' own configs, each of which can name a command to run.
     "~/.codex/**", "~/.gemini/**", "~/.hermes/**", "~/.aws/**", "~/.docker/**",
     "~/.kube/**", "~/.gnupg/**", "~/Library/LaunchAgents/**",
+    # Session autostart and login files: denied by name too, so that they stay denied
+    # where a directory around them is opened up for a repository inside it.
+    "~/.xprofile", "~/.xsessionrc", "~/.pam_environment", "~/.config/autostart/**",
+    "~/.config/systemd/**", "~/.config/environment.d/**",
 )  # fmt: skip
 
 #: And every other dotfile and dot-directory in the home -- the list above cannot keep

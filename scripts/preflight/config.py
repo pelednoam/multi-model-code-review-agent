@@ -101,7 +101,11 @@ def _manifests(name: str) -> dict[str, str]:
     root = REPO_ROOT.resolve()
     kept = {}
     for key, value in found.items():
-        target = (root / value).resolve()
+        try:
+            target = (root / value).resolve()
+        except (OSError, RuntimeError, ValueError):  # a NUL, a link loop
+            _complain(f"has an unusable {name!r} path: {value!r}")
+            continue
         if Path(value).is_absolute() or not target.is_relative_to(root):
             _complain(f"has a {name!r} entry outside the repository: {value!r}")
             continue

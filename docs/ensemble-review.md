@@ -82,8 +82,9 @@ HAS_GEMINI=false; command -v gemini &>/dev/null && HAS_GEMINI=true
 # OR when the project pinned it via .use-hermes.
 PREFER_HERMES=false
 if [ -f ".use-hermes" ]; then PREFER_HERMES=true; fi
-# From every base the diff may be taken against too, as the convergence loop does: a branch that
-# deletes the pin would otherwise send its own code to OpenAI and Google.
+# From every base the diff may be taken against too -- origin/main, the base full mode diffs
+# against, as the convergence loop reads it from --base: a branch that deletes the pin would
+# otherwise send its own code to OpenAI and Google.
 for ref in origin/main "$(git merge-base origin/main HEAD 2>/dev/null)" HEAD~1 HEAD; do
   [ -n "$ref" ] && git cat-file -e "$ref:.use-hermes" 2>/dev/null && PREFER_HERMES=true
 done
@@ -162,7 +163,7 @@ Bedrock opt-in precedence (PREFER_HERMES=true), used for regulated codebases tha
 | `codex` | `codex exec` **plus `-s read-only`, `-c approvals_reviewer="user"` and `-c project_doc_max_bytes=0`** (no AGENTS.md from the branch) (in both the convergence loop and this runner) -- all are pinned by the tool and none is optional (with `-c notify=[]`, and each configured MCP server turned off by name with `-c mcp_servers.<name>.enabled=false` -- `mcp_servers={}` leaves them on, measured -- so a configured or project-level `.codex/config.toml` runs nothing; a server whose name cannot be written so drops codex's slot; codex reads one only in a project you have marked trusted -- measured, an untrusted one's `model` was ignored -- and there its other keys, `model_provider` among them, would apply: do not mark a repository you review as trusted): no sandbox flag was passed at all before, and `-s read-only` on its own is silently overridden by a global `approvals_reviewer = "auto_review"` (see docs/codex-sandbox.md). Codex is also canary-tested at launch and its slot is DROPPED if the sandbox does not actually refuse a write (optional `-m <model> -c model_reasoning_effort=<level>` -- override via `CODEX_MODEL`, `CODEX_REASONING_EFFORT`; `=high` is the "GPT-5.5 Pro" equivalent) | verified read-only for writes, not assumed; its reads are not confined -- it can read your home directory, credentials included, and what it reads goes to OpenAI | stdin (file) | `-o <file>` writes last message |
 | `gemini` | (no `-p`: the prompt is on stdin, and gemini runs headless when stdin is not a terminal) | `--model <m> --approval-mode plan --skip-trust` (default `<m>` is `gemini-2.5-flash` for free-tier compatibility; override via `GEMINI_MODEL`) | stdin (file) | stdout (text, may have fences) |
 | `agy` | `--input-format stream-json --output-format stream-json` (no `-p`: the prompt is one JSON line on stdin, because a single argument is capped at 128 KB) **plus `--sandbox --disable-slash-commands`**, pinned. On by default where installed; `REVIEW_USE_AGY=0` switches it off. Model: `AGY_MODEL` if set, else the best Gemini model `agy models` lists, picked each run. agy has no deny list and was measured writing outside its workspace, so it runs under **bubblewrap** (see docs/agy-sandbox.md), verified at startup without a model call and again before each launch; the slot goes to its next backend if that fails. The prompt opens with a no-tools preamble: a refused tool call ends agy's turn with no answer | bubblewrap read-only filesystem, verified; `--sandbox --disable-slash-commands` (no `--mode=plan`: it is a slash command, so a no-op once expansion is off) | stdin (one stream-json line) | stream-json; the last `result` event carries `structured_output` (enforced by `--json-schema`) |
-| `hermes` | `-z --yolo --ignore-rules` (not the branch's AGENTS.md, SOUL.md or .cursorrules, nor memory) | none: `-t file` limits it to the file toolset, which writes under `--yolo`; only the convergence loop's tamper check reports writes | `-z` flag (has ARG_MAX risk for large prompts) | stdout (the answer text; the prompt asks for the JSON in the reply, not in a file) |
+| `hermes` | `-z --yolo --ignore-rules`, run from an empty directory outside the repository (with a `.git`, and TERMINAL_CWD cleared): the `-z` path ignores `--ignore-rules`, so where it runs is what keeps the branch's AGENTS.md, SOUL.md, .cursorrules and .hermes.md out | none: `-t file` limits it to the file toolset, which writes under `--yolo`; only the convergence loop's tamper check reports writes | `-z` flag (has ARG_MAX risk for large prompts) | stdout (the answer text; the prompt asks for the JSON in the reply, not in a file) |
 
 ### Retrieving the reviewers' output
 
@@ -1072,8 +1073,8 @@ make_scratch PROMPT_DIR mmcra-prompt- \
   || { echo "ERROR: could not copy the reviewers' prompts"; exit 1; }
 
 # R1: Security (Opus) -- local CLI by default (free), Hermes only when opted in
-if $PREFER_HERMES && $HAS_HERMES; then
-  launch_hermes 1 us.anthropic.claude-opus-4-6-v1 "$PROMPT_DIR/prompt-1.txt"
+if $PREFER_HERMES && $HAS_HERMES && launch_hermes 1 us.anthropic.claude-opus-4-6-v1 "$PROMPT_DIR/prompt-1.txt"; then
+  :  # launched; if hermes could not be set up, the next backend runs
 elif $HAS_CLAUDE && launch_cli 1 claude-opus "$PROMPT_DIR/prompt-1.txt"; then
   :  # launched; if claude could not be set up, Hermes is next, as the routing tables say
 elif $HAS_HERMES; then
@@ -1082,8 +1083,8 @@ fi
 
 # R2: Correctness -- Codex (GPT-5.5) preferred for cross-provider diversity.
 # When PREFER_HERMES is set, the Bedrock haiku path runs first.
-if $PREFER_HERMES && $HAS_HERMES; then
-  launch_hermes 2 us.anthropic.claude-haiku-4-5-20251001-v1:0 "$PROMPT_DIR/prompt-2.txt"
+if $PREFER_HERMES && $HAS_HERMES && launch_hermes 2 us.anthropic.claude-haiku-4-5-20251001-v1:0 "$PROMPT_DIR/prompt-2.txt"; then
+  :  # launched; if hermes could not be set up, the next backend runs
 elif $HAS_CODEX && { ! $PREFER_HERMES || review_helper flag REVIEW_USE_CODEX; } \
      && launch_cli 2 codex "$PROMPT_DIR/prompt-2.txt"; then
   # A project pinned to Bedrock does not fall to OpenAI by default when Hermes is unavailable.
@@ -1103,8 +1104,8 @@ fi
 # providers it chose must not fall to Google by default when Hermes is unavailable.
 # `${HAS_AGY:-false}`, not `$HAS_AGY`: an unset variable expands to an empty command, which
 # succeeds, and would route the slot to a backend nobody verified.
-if $PREFER_HERMES && $HAS_HERMES; then
-  launch_hermes 3 us.anthropic.claude-sonnet-4-6-v1 "$PROMPT_DIR/prompt-3.txt"
+if $PREFER_HERMES && $HAS_HERMES && launch_hermes 3 us.anthropic.claude-sonnet-4-6-v1 "$PROMPT_DIR/prompt-3.txt"; then
+  :  # launched; if hermes could not be set up, the next backend runs
 elif ${HAS_AGY:-false} && [ -n "${AGY_SELECTED_MODEL:-}" ] \
     && { ! $PREFER_HERMES || review_helper flag REVIEW_USE_AGY; } \
      && launch_cli 3 agy "$PROMPT_DIR/prompt-3.txt"; then
@@ -1119,8 +1120,8 @@ elif $HAS_HERMES; then
 fi
 
 # R4: Spec-contract (Opus) -- local CLI by default (free), Hermes only when opted in
-if $PREFER_HERMES && $HAS_HERMES; then
-  launch_hermes 4 us.anthropic.claude-opus-4-6-v1 "$PROMPT_DIR/prompt-4.txt"
+if $PREFER_HERMES && $HAS_HERMES && launch_hermes 4 us.anthropic.claude-opus-4-6-v1 "$PROMPT_DIR/prompt-4.txt"; then
+  :  # launched; if hermes could not be set up, the next backend runs
 elif $HAS_CLAUDE && launch_cli 4 claude-opus "$PROMPT_DIR/prompt-4.txt"; then
   :  # launched; if claude could not be set up, Hermes is next, as the routing tables say
 elif $HAS_HERMES; then

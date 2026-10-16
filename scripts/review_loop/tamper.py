@@ -80,7 +80,9 @@ def snapshot(repo: Path, exclude: Path | None = None) -> str:
         # Not knowing is not "unchanged": a line no other snapshot has.
         return f"?? git status failed ({done.returncode}) at {time.monotonic_ns()}\n"
     lines = []
-    entries = done.stdout.decode("utf-8", errors="replace").split("\0")
+    # The filesystem's own decoding: with "replace", two names differing in a byte that
+    # is not UTF-8 became one, and neither file could be read back to fingerprint.
+    entries = os.fsdecode(done.stdout).split("\0")
     skip = False
     for entry in entries:
         if skip:  # a rename's or copy's source path
@@ -117,6 +119,11 @@ def snapshot(repo: Path, exclude: Path | None = None) -> str:
             lines.append(f"home {startup} {_fingerprint(startup, False)}")
         for extra in (".ssh/authorized_keys", ".claude/settings.json"):
             lines.append(f"home {home / extra} {_fingerprint(home / extra, False)}")
+        # And the user's own bin directories, early on PATH: a program planted there
+        # under git's name, or python's, is what the loop runs next.
+        for bin_dir in (".local/bin", "bin", ".cargo/bin"):
+            for program in _files(home / bin_dir):
+                lines.append(f"home {program} {_fingerprint(program, True)}")
     return "\n".join(sorted(set(lines))) + "\n"
 
 
@@ -134,7 +141,11 @@ def _fingerprint(path: Path, cheap: bool) -> str:
     the many files under an ignored path -- its size and mtime."""
     try:
         if path.is_symlink():
-            return "link:" + os.readlink(path)
+            # And what it leads to: a write through an existing link to a startup file
+            # or a hook changes the target, and the link alone looked the same.
+            target = path.resolve()
+            through = _fingerprint(target, cheap) if target.is_file() else "dangling"
+            return "link:" + os.readlink(path) + ":" + through
         if path.is_dir():
             return "dir"
         if cheap:

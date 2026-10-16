@@ -319,18 +319,25 @@ def _requote_from_source(raw: Path, repo: Path) -> None:
             continue
         path = (root / file).resolve()
         if not path.is_relative_to(root):
+            # Not re-read, so not shown to be clean: redacted, as a quote that cannot
+            # be checked whole is one that might be cut through a credential.
+            hit["text"] = REDACTED_TEXT
+            changed = True
             continue
         if path not in read:
             try:
                 text = path.read_bytes().decode("utf-8", errors="replace")
             except OSError:
-                text = ""
-            # By both numberings: this checkout's ("\n" alone, as git's) and an older
-            # preflight's (str.splitlines, which also breaks at "\r", form feeds and
-            # Unicode's separators). Not knowing which wrote it, either one redacts.
-            read[path] = (text.split("\n"), text.splitlines())
+                read[path] = ([], [])  # unreadable: no line, so its quotes are redacted
+            else:
+                # By both numberings: this checkout's ("\n" alone, as git's) and an older
+                # preflight's (str.splitlines, which also breaks at "\r", form feeds and
+                # Unicode's separators). Not knowing which wrote it, either one redacts.
+                read[path] = (text.split("\n"), text.splitlines())
         candidates = [lines[number - 1] for lines in read[path] if number <= len(lines)]
-        if any(redacts(line) for line in candidates):
+        # A line that is not there -- the file unreadable, or shorter -- cannot be
+        # shown clean either.
+        if not candidates or any(redacts(line) for line in candidates):
             hit["text"] = REDACTED_TEXT
             changed = True
     if changed:

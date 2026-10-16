@@ -107,14 +107,21 @@ KEYWORD_PATTERNS = [
 ]
 
 #: A URL password that is no password: a template's field -- {password},
-#: ${DB_PASS}, %(pw)s, <password> -- or a placeholder word or mask. A port can be a
-#: field too (localhost:{port}/...), so before a "/" it is no password either. Each
-#: part bounded, as the pattern's are, so that a line of unfinished ones is scanned
-#: in linear time.
-_URL_PLACEHOLDER = (
+#: ${DB_PASS}, %(pw)s, <password>. A port can be a field too (localhost:{port}/...),
+#: so before a "/" it is no password either. Each part bounded, as the pattern's are,
+#: so that a line of unfinished ones is scanned in linear time.
+_URL_FIELD = (
     r"(?:\{[^}@\s]{0,64}\}|\$\{[A-Za-z_]\w{0,64}\}|\$[A-Z_][A-Z0-9_]{0,64}"
-    + r"|%\([^)@\s]{0,64}\)s|%[sd]|<[^>@\s]{0,64}>|\*{1,64}|x{1,64}|X{1,64}"
-    + r"|pass(?:w(?:or)?d)?|pwd?|secret|changeme)"
+    + r"|%\([^)@\s]{0,64}\)s|%[sd]|<[^>@\s]{0,64}>)"
+)
+
+#: Or a placeholder word or mask, but only as the whole password: before a "/" it is
+#: the start of a real one ("pass/W0rd9").
+_URL_PLACEHOLDER = (
+    r"(?:"
+    + _URL_FIELD
+    + r"|\*{1,64}|x{1,64}|X{1,64}|pass(?:w(?:or)?d)?|pwd?|secret"
+    + r"|changeme)"
 )
 
 
@@ -159,8 +166,10 @@ SHAPE_PATTERNS = [
     re.compile(
         r"(?<![a-zA-Z0-9+.-])[a-zA-Z][a-zA-Z0-9+.-]{0,31}:"
         + r"//[^\s/:\"?#\[\]]{0,256}:(?!\d{1,5}/)(?!"
+        + _URL_FIELD
+        + r"/)(?!"
         + _URL_PLACEHOLDER
-        + r"[/@])[^\s@\"?#]{1,256}@"
+        + r"@)[^\s@\"?#]{1,256}@"
     ),
     # The same with no "/" in the password, which may then be any length: the scan
     # stops at the next "/", and every URL after it has one, so it stays linear.

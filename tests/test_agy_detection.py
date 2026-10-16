@@ -171,4 +171,5 @@ class TestAgyRunner(AgyCase):
     def test_a_bedrock_project_gets_agy_only_by_name_in_the_runner(self) -> None:
         runner = runner_script()
         gate = "{ ! $PREFER_HERMES || review_helper flag REVIEW_USE_AGY; }"
-        assert f"elif ${{HAS_AGY:-false}} && {gate}" in runner
+        assert 'elif ${HAS_AGY:-false} && [ -n "${AGY_SELECTED_MODEL:-}" ]' in runner
+        assert f"    && {gate}" in runner

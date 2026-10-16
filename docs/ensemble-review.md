@@ -108,8 +108,10 @@ if $HAS_CODEX; then review_helper codex-check || HAS_CODEX=false; fi
 # REVIEW_USE_AGY=1 and Hermes is not installed (Hermes answers slot 3 when it is). Status lines go to stderr; the model it settled on is the only thing on stdout.
 HAS_AGY=false
 if command -v agy &>/dev/null; then
-  AGY_MODEL="$(review_helper agy-detect "$PREFER_HERMES")"
-  [ -n "$AGY_MODEL" ] && HAS_AGY=true
+  # Its own variable: written back into AGY_MODEL, the pick would be taken next time for a model
+  # asked for by name, and no longer picked fresh each run.
+  AGY_SELECTED_MODEL="$(review_helper agy-detect "$PREFER_HERMES")"
+  [ -n "$AGY_SELECTED_MODEL" ] && HAS_AGY=true
 fi
 
 ```
@@ -252,7 +254,7 @@ If the scrubber exits non-zero, **STOP**, as for the diff: a credential is quote
 
 ## 4. Read the diff and audit into your context
 
-Read `$REVIEW_TMP/diff.patch` and `$REVIEW_TMP/runtime-audit.json` so you can include their content in the prompts you give to reviewers. The reviewers (whether subagents or Hermes) need the full diff and audit text in their prompt -- they cannot read files from your temp directory.
+Read `$REVIEW_TMP/diff.patch` and `$REVIEW_TMP/runtime-audit.json` so you can include their content in the prompts you give to reviewers. The reviewers (whether subagents or CLI reviewers) need the full diff and audit text in their prompt -- they cannot read files from your temp directory.
 
 ---
 
@@ -588,8 +590,8 @@ JOB_PID=()
 JOB_BACKEND=()   # which CLI ran each slot, which decides how its output is read (unwrap_envelope)
 JOB_OUT=()       # the one file each slot's CLI writes its answer to, the only one read for it
 JOB_PROVIDER=()  # whose model answers each slot, for the diversity count
-JOB_MODEL=()     # the model launched for each slot, written into its result; the loop instead
-                 # keeps the label its prompt named, which is the same model
+JOB_MODEL=()     # the model launched for each slot, written into its result; the loop keeps
+                 # the model the reviewer itself reported, so the two can differ
 SCRATCH=()
 kill_jobs() {
   local sig
@@ -930,7 +932,7 @@ launch_cli() {
         done 2>/dev/null
         cd "$AGY_WS" && "${AGY_ENVP[@]}" timeout --foreground -k 10 "$REVIEWER_TIMEOUT" "${AGY_BWRAP[@]}" agy \
           --sandbox --disable-slash-commands \
-          --model "$AGY_MODEL" \
+          --model "$AGY_SELECTED_MODEL" \
           --input-format stream-json --output-format stream-json \
           --print-timeout 0 --json-schema "$AGY_SCHEMA" \
           < "$AGY_IN" \
@@ -943,14 +945,14 @@ launch_cli() {
       JOB_PID[$num]=$!
       JOB_OUT[$num]="$REVIEW_TMP/stdout-$num.txt"
       # The family of the model agy runs, which AGY_MODEL can make Claude's or GPT's.
-      case "$AGY_MODEL" in
+      case "$AGY_SELECTED_MODEL" in
         claude-*) JOB_PROVIDER[$num]=anthropic ;;
         gpt-*)    JOB_PROVIDER[$num]=openai ;;
         *)        JOB_PROVIDER[$num]=google ;;
       esac
-      JOB_MODEL[$num]="$AGY_MODEL"
+      JOB_MODEL[$num]="$AGY_SELECTED_MODEL"
       echo $! > "$REVIEW_TMP/pid-$num"
-      echo "R$num: Antigravity CLI ($AGY_MODEL) [Google AI plan]"
+      echo "R$num: Antigravity CLI ($AGY_SELECTED_MODEL) [Google AI plan]"
       echo "R$num: agy sends diff, audit and context to Google (REVIEW_USE_AGY=0 to stop)"
       ;;
     *)
@@ -998,7 +1000,8 @@ fi
 # succeeds, and would route the slot to a backend nobody verified.
 if $PREFER_HERMES && $HAS_HERMES; then
   launch_hermes 3 us.anthropic.claude-sonnet-4-6-v1 "$REVIEW_TMP/prompt-3.txt"
-elif ${HAS_AGY:-false} && { ! $PREFER_HERMES || review_helper flag REVIEW_USE_AGY; } \
+elif ${HAS_AGY:-false} && [ -n "${AGY_SELECTED_MODEL:-}" ] \
+    && { ! $PREFER_HERMES || review_helper flag REVIEW_USE_AGY; } \
      && launch_cli 3 agy "$REVIEW_TMP/prompt-3.txt"; then
   :  # launched; if agy could not be set up, launch_cli returned 1 and the next backend runs
 elif $HAS_GEMINI && review_helper flag REVIEW_USE_GEMINI \
@@ -1121,10 +1124,12 @@ Run with `run_in_background: true`. Export the detection variables first: the sc
 shell and inherits nothing from the call that wrote it.
 
 ```bash
-export REVIEW_TMP HAS_CLAUDE HAS_HERMES HAS_CODEX HAS_GEMINI HAS_AGY AGY_MODEL PREFER_HERMES \
+export REVIEW_TMP HAS_CLAUDE HAS_HERMES HAS_CODEX HAS_GEMINI HAS_AGY AGY_SELECTED_MODEL PREFER_HERMES \
   MMCRA_SKIP_AGY_SANDBOX_CHECK MMCRA_AGY_STRICT_SOCKETS REVIEW_USE_AGY REVIEW_USE_GEMINI \
   REVIEW_USE_CODEX
+rm -f "$REVIEW_TMP/runner-exit"
 "$REVIEW_TMP/run-reviewers.sh" 2>&1 | tee "$REVIEW_TMP/round.log"
+echo "${PIPESTATUS[0]}" > "$REVIEW_TMP/runner-exit"   # however it ended: the poll below stops on it
 ```
 
 Launch it ONCE. Everything after this point only ever reads files.
@@ -1147,8 +1152,10 @@ nothing, reads only marker files, and is safe to run as many times as you need.
 # this works from a later call when a bare `wait` there would return instantly and lie.
 deadline=$((SECONDS + 570))
 while [ "$SECONDS" -lt "$deadline" ]; do
-  [ "$(ls "$REVIEW_TMP"/done-* 2>/dev/null | wc -l)" -ge 4 ] && break
-  grep -q "ROUND COMPLETE" "$REVIEW_TMP/round.log" 2>/dev/null && break
+  # The runner's end, not the reviewers': four done-markers come before their outputs are
+  # published and each result is extracted, and a poll that stopped on them read a half-made round.
+  grep -qx "ROUND COMPLETE" "$REVIEW_TMP/round.log" 2>/dev/null && break
+  [ -f "$REVIEW_TMP/runner-exit" ] && break   # ended without completing: say so below
   sleep 10
 done
 for num in 1 2 3 4; do
@@ -1158,14 +1165,18 @@ for num in 1 2 3 4; do
   else echo "R$num: process gone, no done-marker (died without being reaped)"; fi
 done
 tail -1 "$REVIEW_TMP/round.log" 2>/dev/null
+[ -f "$REVIEW_TMP/runner-exit" ] && ! grep -qx "ROUND COMPLETE" "$REVIEW_TMP/round.log" \
+  && echo "The runner ended (status $(cat "$REVIEW_TMP/runner-exit")) without completing the round"
 ```
 
 Each reviewer runs under `timeout --foreground -k 10 "$REVIEWER_TIMEOUT"` (600 seconds by default), and the watchdog gives up at REVIEWER_TIMEOUT+90, so a round can outlast one 570 second wait. If the output
 still says "still running", call the SAME block again - do not relaunch the runner, and do not treat
 a second wait as a sign anything is wrong.
 
-When it reports four done-markers and `ROUND COMPLETE`, go straight to section 7. `result-N.json`
-exists for every slot, including synthetic ones for slots that failed.
+When `round.log` ends with `ROUND COMPLETE`, go straight to section 7. `result-N.json` exists for
+every slot, including synthetic ones for slots that failed. Four done-markers alone are not that:
+they come before the outputs are published and the results extracted. If the runner ended without
+completing, say so, with its status, rather than reading what it left.
 
 **If you are woken by the background task before the poll returns, that is fine** - take the wake,
 skip the rest of the wait, and go to section 7. The poll exists so that the wake is an optimisation

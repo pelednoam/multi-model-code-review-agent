@@ -71,7 +71,7 @@ review missed.
 | Write isolation | no | no | `--disallowedTools`; codex and agy sandboxed; gemini (opt-in) policy-only | none for hermes (see the backends table) |
 | Structured JSON schema | no | no | yes | yes |
 | Review packet persistence | no | no | yes | yes |
-| Cross-provider models | no | no | with Codex + agy/Gemini | any provider |
+| Cross-provider models | no | no | with Codex + agy/Gemini | no: Anthropic on Bedrock (Codex or agy only by name, where Hermes is absent) |
 | Mandatory CI gate before commit | no | no | yes | yes |
 | Cost | free | free | free beyond subscriptions | ~$5-40 |
 | Latency | instant | ~30s | ~3 min | ~5 min |

@@ -13,11 +13,14 @@ from .git_state import is_safe_relpath
 
 try:  # run as scripts/review_preflight.py, with scripts/ on the path
     from scrub_diff import CREDENTIAL_PATTERNS
+    from scrub_diff import REDACTED as _DIFF_REDACTED
 except ImportError:  # imported as the scripts package
     from scripts.scrub_diff import CREDENTIAL_PATTERNS
+    from scripts.scrub_diff import REDACTED as _DIFF_REDACTED
 
-#: What a quoted line becomes when it looks like it holds a credential.
-REDACTED = "[REDACTED: credential pattern detected]"
+#: What a quoted line becomes when it looks like it holds a credential: the diff's own
+#: marker, without the "# " that keeps a redacted diff line a comment.
+REDACTED = _DIFF_REDACTED.removeprefix("# ")
 
 
 def _quoted(line: str) -> str:

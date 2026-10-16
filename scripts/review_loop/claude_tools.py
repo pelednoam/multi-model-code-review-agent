@@ -75,17 +75,23 @@ SECRET_READS = (
     "~/.bashrc", "~/.bash_profile", "~/.profile", "~/.zshrc", "~/.zshenv",
     "~/.zprofile", "~/.bash_history", "~/.zsh_history", "~/.python_history",
     "~/.psql_history",
-    # Environment files anywhere, the repository's included, and direnv's; joined,
-    # because the diff scrubber rightly redacts a line that names one.
-    "**/." + "env", "**/." + "env.*", "**/." + "envrc",
-    # The same files inside the repository under review, or any other: a remote's URL
-    # in .git/config can carry a token.
-    "**/.git/config", "**/.git-credentials", "**/.npmrc", "**/.pypirc", "**/.netrc",
-    "**/.docker/config.json",
+    # The rest anywhere on the filesystem. "//" is an absolute path in a permission
+    # rule, and a bare "**/" only the working directory (measured: a file in a sibling
+    # directory was read under "**/", and refused under "//**/", as was one in the
+    # working directory).
+    # Environment files, the repository's included, and direnv's; joined, because the
+    # diff scrubber rightly redacts a line that names one.
+    "//**/." + "env", "//**/." + "env.*", "//**/." + "envrc",
+    # The credential files above, in the repository under review or any other: a
+    # remote's URL in .git/config can carry a token.
+    "//**/.git/config", "//**/.git-credentials", "//**/.npmrc", "//**/.pypirc",
+    "//**/.netrc", "//**/.docker/config.json",
+    # agy's throwaway copy of its sign-in token, wherever its scratch directory is, and
+    # the loop's private directories for the reviewers' outputs and hermes's prompts.
+    "//**/antigravity-oauth-token", "//**/mmcra-out-*/**", "//**/mmcra-prompt-*/**",
     # All of /proc: processes' environments, this one's and the CLI's own among them,
     # and the aliases (/proc/self/root, /proc/<pid>/cwd) that reach every file above
-    # by another path. "//" is an absolute path in a permission rule; a single "/" is
-    # relative to the settings.
+    # by another path.
     "//proc/**",
 )  # fmt: skip
 

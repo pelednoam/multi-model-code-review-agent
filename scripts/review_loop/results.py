@@ -125,7 +125,7 @@ def agy_answer(result: dict[str, Any] | None) -> str:
     if result is None or agy_failure(result):
         return ""
     if isinstance(result.get("structured_output"), dict):
-        return json.dumps(result["structured_output"])
+        return encode_review(result["structured_output"], indent=None) or ""
     return str(result.get("response") or "")
 
 
@@ -187,10 +187,24 @@ def _extract_from(
     d = validate_result(d, slot, EXPECTED_REVIEWERS)
     if d is None:
         return None
-    (round_dir / f"result-{slot}.json").write_text(
-        json.dumps(d, indent=2), encoding="utf-8"
-    )
+    encoded = encode_review(d)
+    if encoded is None:
+        return None
+    (round_dir / f"result-{slot}.json").write_text(encoded, encoding="utf-8")
     return d
+
+
+def encode_review(review: dict[str, Any], indent: int | None = 2) -> str | None:
+    """``review`` as JSON, or None if it cannot be written.
+
+    Parsed within the parser's limit, a review nested deep enough can still exceed the
+    encoder's -- which recurses further per level when indenting -- and the error
+    raised there took the whole round with it, not only this slot.
+    """
+    try:
+        return json.dumps(review, indent=indent)
+    except (ValueError, RecursionError):
+        return None
 
 
 def extract_results(

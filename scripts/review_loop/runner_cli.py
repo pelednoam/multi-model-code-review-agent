@@ -36,6 +36,7 @@ from .results import (
     agy_answer,
     agy_failure,
     agy_result,
+    encode_review,
     parse_review,
     unwrap_envelope,
 )
@@ -170,7 +171,11 @@ def _extract(raw: str, out: str, slot: str, backend: str = "", model: str = "") 
         # The model that ran, as the runner launched it: the prompt names the lens's
         # own, which a fallback backend is not.
         review["model"] = model
-    Path(out).write_text(json.dumps(review, indent=2), encoding="utf-8")
+    encoded = encode_review(review)
+    if encoded is None:
+        print("the review is nested too deep to write", file=sys.stderr)
+        return 1
+    Path(out).write_text(encoded, encoding="utf-8")
     return 0
 
 

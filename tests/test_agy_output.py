@@ -183,3 +183,19 @@ class TestAgyOutput(AgyCase):
         (tmp_path / "raw-1.txt").write_text(deep)
         assert extract_results(tmp_path, {1: "claude"})[0] is None
         assert "R1" in describe_outputs(tmp_path, {1: "claude"})
+
+    def test_a_review_too_deep_to_write_costs_only_its_slot(
+        self, tmp_path: Path
+    ) -> None:
+        # Parsed within the parser's limit, it went past the encoder's when its result
+        # was written, and the RecursionError ended the round for every reviewer.
+        deep = "[" * 3000 + "]" * 3000
+        head = '{"reviewer": "security", "model": "m", "findings": []'
+        head += ', "overall_assessment": "a"'
+        (tmp_path / "raw-1.txt").write_text(head + ', "x": ' + deep + "}")
+        (tmp_path / "raw-2.txt").write_text(
+            head.replace("security", "correctness") + "}"
+        )
+        results = extract_results(tmp_path, {1: "hermes", 2: "hermes"})
+        assert results[0] is None and results[1] is not None
+        assert not (tmp_path / "result-1.json").exists()

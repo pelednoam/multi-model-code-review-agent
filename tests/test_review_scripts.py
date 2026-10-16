@@ -2087,6 +2087,33 @@ class TestRunnerScript:
         out, _ = proc.communicate(timeout=10)
         assert out == "ran\n"
 
+    @pytest.mark.parametrize(
+        ("files", "stops"),
+        [
+            ({"done-1": "0", "done-2": "0", "done-3": "0", "done-4": "0"}, False),
+            ({"round.log": "x\nROUND COMPLETE\n"}, True),
+            ({"runner-exit": "143"}, True),
+        ],
+    )
+    def test_the_poll_waits_for_the_runner_not_the_reviewers(
+        self, tmp_path: Path, files: dict[str, str], stops: bool
+    ) -> None:
+        # Four done-markers come before the outputs are published and extracted: a
+        # poll that stopped on them read a half-made round.
+        doc = AGENT_DOC.read_text()
+        start = doc.index("deadline=$((SECONDS + 570))")
+        poll = doc[start : doc.index("```", start)]
+        poll = poll.replace("SECONDS + 570", "SECONDS + 2")
+        poll = poll.replace("sleep 10", "sleep 0.2")
+        for name, text in files.items():
+            (tmp_path / name).write_text(text)
+        started = time.monotonic()
+        subprocess.run(
+            ["bash", "-c", poll], env={**os.environ, "REVIEW_TMP": str(tmp_path)},
+            capture_output=True, timeout=30,
+        )  # fmt: skip
+        assert (time.monotonic() - started < 1) == stops
+
     def test_cdpath_is_cleared_before_any_cd(self) -> None:
         # Set, it made "$(cd DIR && pwd -P)" capture cd's own line in the path.
         runner = runner_script()
@@ -2743,6 +2770,7 @@ class TestCredentialShapes:
             "mysql://root" + ":12345" + "@localhost/db",
             "postgres://u" + ":" + "q7A_" * 80 + "@db/prod",
             "redis://" + ":8080/abc" + "@cache:6379/0",
+            "postgres://u" + ":pass/W0rd9" + "@db/prod",
             "ya" + "29." + "a" * 30,
             "1/" + "/0" + "a" * 40,
             "GOC" + "SPX-" + "a" * 28,
@@ -2762,6 +2790,7 @@ class TestCredentialShapes:
         ids=["url-userinfo", "url-no-user", "url-short-password", "url-slash-password",
              "url-quote-password", "url-azure-user", "url-ipv6-host", "url-dollar-password", "url-numeric-password",
              "url-long-password", "url-no-user-slash-password",
+             "url-placeholder-word-prefix",
              "google-oauth-access", "google-oauth-refresh",
              "google-client-secret", "huggingface", "npm", "pypi", "google-api-key", "github-fine-grained", "github-app",
              "stripe-live", "slack", "slack-app", "slack-webhook", "discord-webhook",

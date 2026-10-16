@@ -637,6 +637,8 @@ def _prepare_agy(
     if agy_unsandboxed():
         return cmd, workspace
     try:
+        # Made where the workspace was, under the same TMPDIR, so outside the repository
+        # whenever the workspace is.
         state = agy_seed_state(_scratch_dir("mmcra-agy-state-"))
         sandbox = agy_wrapper(workspace, state, _under_review(repo))
     except OSError as exc:

@@ -59,7 +59,9 @@ def snapshot(repo: Path, exclude: Path | None = None) -> str:
     ]  # fmt: skip
     if exclude is not None:
         with contextlib.suppress(ValueError):
-            cmd.append(f":(exclude){exclude.resolve().relative_to(repo.resolve())}")
+            # literal: its name is a path, not a glob ([ ] in it matched something else).
+            relative = exclude.resolve().relative_to(repo.resolve())
+            cmd.append(f":(exclude,literal){relative}")
     done = subprocess.run(cmd, cwd=repo, capture_output=True, text=True, check=False)
     return done.stdout
 

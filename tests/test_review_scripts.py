@@ -3055,6 +3055,8 @@ class TestCredentialShapes:
             "http://localhost:000080/@scope/pkg",
             "git+ssh://git@github.com:org/repo.git@v1.0",
             "'https://example.com'.replace('x','mailto:ops@example.com')",
+            '<a href="http://localhost:8080">ops@example.com</a>',
+            "<a href='http://localhost:8080'>ops@example.com</a>",
             "postgres://u:{{password}}@h",
             "postgres://u:{password!r}@h",
             "postgres://u:%(pw)d@h",
@@ -3560,6 +3562,11 @@ class TestScrubJson:
         code, out = self._scrub({"k": [begin, "MIIbody1", "MIIbody2", end, "after"]})
         assert code == 1
         assert out == {"k": [scrub_diff.REDACTED_TEXT] * 4 + ["after"]}
+
+    @pytest.mark.parametrize("field", ["access_token", "refresh_token", "id_token"])
+    def test_oauth_token_fields_are_redacted(self, field: str) -> None:
+        code, out = self._scrub({field: "abcd1234", "user": "bob"})
+        assert code == 1 and out == {field: scrub_diff.REDACTED_TEXT, "user": "bob"}
 
     def test_a_key_shaped_like_a_credential_is_redacted(self) -> None:
         key = "gh" + "p_" + "a" * 36

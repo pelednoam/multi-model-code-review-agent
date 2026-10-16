@@ -149,9 +149,9 @@ _URL_PLACEHOLDER = (
 _SCHEME_NAME = r"[a-zA-Z][a-zA-Z0-9+.-]{0,31}:"
 _URL_SCHEME = r"(?<![a-zA-Z0-9+.-])" + _SCHEME_NAME
 #: After a quote, ' or ", what says the string goes on: not the end of a string --
-#: followed by , . ) ] } ; : + or a space, as in ['http://h:8080','ops@x'] or
+#: followed by , . ) ] } ; : + > or a space (an HTML attribute's end), as in ['http://h:8080','ops@x'] or
 #: 'https://h'.format(...) -- or the pattern runs from one string into the next.
-_QUOTE_GOES_ON = r"(?![.,\])};:+\s])"
+_QUOTE_GOES_ON = r"(?![.,\])};:+>\s])"
 #: The user: like the password (``_URL_PASSWORD_CHAR``), not past a quote that closes
 #: a string -- or it ran from one into the next: ['https://example.com','mailto:a@b'].
 #: Without an @ in it (``_URL_USER_NO_AT``) or with one (``_URL_USER_WITH_AT``), whose
@@ -578,7 +578,10 @@ def redacts(text: str) -> bool:
 def _secret_field(key: str) -> bool:
     """Whether ``key`` names a credential: whether the scrubber would redact it
     assigned an ordinary-looking value. The value is not put in the probe -- one
-    holding a quote or a newline changed what the line said, and passed."""
+    holding a quote or a newline changed what the line said, and passed. OAuth's own
+    names are named outright: the line patterns do not read access_token as one."""
+    if re.fullmatch(r"(?:access|refresh|id|auth|bearer)[_-]?token", key, re.IGNORECASE):
+        return True
     return any(
         redacts(probe)
         for probe in (f'{key} = "Zq7xK9mP2w4t"', f'"{key}": "Zq7xK9mP2w4t"')

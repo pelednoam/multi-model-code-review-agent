@@ -35,14 +35,19 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import os
+import json
 import re
+import stat
 import subprocess
 import sys
 import time
 from pathlib import Path
 
+from .config import GIT
+from .results import printable
 
-def snapshot(repo: Path, exclude: Path | None = None) -> str:
+
+def snapshot(repo: Path, exclude: Path | None = None, before: str | None = None) -> str:
     """Everything git can see about the working tree, as one string: a line per path,
     with what is in it.
 
@@ -57,12 +62,25 @@ def snapshot(repo: Path, exclude: Path | None = None) -> str:
     ``exclude`` is the round's own directory, when it is inside the repository:
     the round writes its outputs there, and they are no reviewer's doing. Not
     covered: a change to an ignored file that keeps its size and mtime.
+
+    ``before``, the snapshot taken before the reviewers ran: when the files that make
+    git run a command (its config and attributes, a filter's, the hooks, a program
+    planted under its name) are not what they were, ``git status`` is not run -- it is
+    what would run the reviewer's command -- and the snapshot says so instead.
     """
     # No bytecode written into the tree from here on, by this process: a module the
     # loop imports late would otherwise leave a __pycache__ the check calls a write.
     sys.dont_write_bytecode = True
+    control = _control_lines(repo)
+    if before is not None and not set(control) <= set(before.splitlines()):
+        return "\n".join([*control, "?? git status not run: its control files changed"])
+    return "\n".join(sorted({*_status_lines(repo, exclude), *control})) + "\n"
+
+
+def _status_lines(repo: Path, exclude: Path | None) -> list[str]:
+    """A line for each path ``git status`` lists, with what is in it."""
     cmd = [
-        "git", "-c", "core.fsmonitor=false", "status", "--porcelain=v1", "-z",
+        GIT, "-c", "core.fsmonitor=false", "status", "--porcelain=v1", "-z",
         "--untracked-files=all", "--ignored=traditional", "--", ".",
     ]  # fmt: skip
     if exclude is not None:
@@ -75,7 +93,7 @@ def snapshot(repo: Path, exclude: Path | None = None) -> str:
     )
     if done.returncode != 0:
         # Not knowing is not "unchanged": a line no other snapshot has.
-        return f"?? git status failed ({done.returncode}) at {time.monotonic_ns()}\n"
+        return [f"?? git status failed ({done.returncode}) at {time.monotonic_ns()}"]
     lines = []
     # The filesystem's own decoding: with "replace", two names differing in a byte that
     # is not UTF-8 became one, and neither file could be read back to fingerprint.
@@ -89,7 +107,16 @@ def snapshot(repo: Path, exclude: Path | None = None) -> str:
             continue
         status, path = entry[:2], entry[3:]
         skip = status[0] in "RC"
-        lines.append(f"{status} {path} {_fingerprint(repo / path, status == '!!')}")
+        lines.append(
+            f"{status} {_shown(path)} {_fingerprint(repo / path, status == '!!')}"
+        )
+    return lines
+
+
+def _control_lines(repo: Path) -> list[str]:
+    """A line for each file outside git's own listing that a reviewer's write turns
+    into a command the loop runs, read without running git on the tree."""
+    lines = []
     # The same git directories the merge agent may not write, the hooks directory git
     # runs from among them (core.hooksPath can put it anywhere): scanned whole when it
     # is that, and otherwise for what turns a write into a command.
@@ -104,7 +131,7 @@ def snapshot(repo: Path, exclude: Path | None = None) -> str:
         )
         for part in parts:
             for control in _files(part):
-                lines.append(f"git {control} {_fingerprint(control, False)}")
+                lines.append(f"git {_shown(control)} {_fingerprint(control, False)}")
     # And the home's files that run code: hermes writes under --yolo, outside the
     # repository too, and a write to ~/.bashrc is no less a reviewer's for that. Files
     # named, not the directories (~/.config/**) the merge agent is kept out of whole.
@@ -113,7 +140,7 @@ def snapshot(repo: Path, exclude: Path | None = None) -> str:
             if pattern.endswith("/**") or any(c in pattern for c in "*?["):
                 continue
             startup = home / pattern[2:]
-            lines.append(f"home {startup} {_fingerprint(startup, False)}")
+            lines.append(f"home {_shown(startup)} {_fingerprint(startup, False)}")
         # And what the loop's own git and ssh read next: their configs, which can name a
         # command to run (core.fsmonitor, a credential helper, ProxyCommand).
         xdg = Path(os.environ.get("XDG_CONFIG_HOME") or home / ".config")
@@ -122,13 +149,19 @@ def snapshot(repo: Path, exclude: Path | None = None) -> str:
             home / ".claude" / "settings.json", xdg / "git" / "config",
             xdg / "git" / "attributes",
         ):  # fmt: skip
-            lines.append(f"home {extra} {_fingerprint(extra, False)}")
+            lines.append(f"home {_shown(extra)} {_fingerprint(extra, False)}")
         # And the user's own bin directories, early on PATH: a program planted there
         # under git's name, or python's, is what the loop runs next.
         for bin_dir in (".local/bin", "bin", ".cargo/bin"):
             for program in _files(home / bin_dir):
-                lines.append(f"home {program} {_fingerprint(program, True)}")
-    return "\n".join(sorted(set(lines))) + "\n"
+                lines.append(f"home {_shown(program)} {_fingerprint(program, True)}")
+    return sorted(set(lines))
+
+
+def _shown(name: str | Path) -> str:
+    """``name`` with what does not print as itself escaped: a snapshot is a line per
+    path, and a reviewer's file name with a line break in it was two."""
+    return "".join(c if c.isprintable() else f"\\x{ord(c):02x}" for c in str(name))
 
 
 def _files(path: Path) -> list[Path]:
@@ -153,10 +186,20 @@ def _fingerprint(path: Path, cheap: bool) -> str:
                 return f"link:{os.readlink(path)}:loop"
             through = _fingerprint(target, cheap) if target.is_file() else "dangling"
             return "link:" + os.readlink(path) + ":" + through
+        info = path.stat()
+        if (info.st_dev, info.st_ino) in _own_outputs():
+            # The loop's own output, redirected into the tree (> data/reviews/run.log):
+            # it grows with every line printed, and is no reviewer's doing.
+            return "the loop's output"
         if path.is_dir():
-            return "dir"
+            # What is under it: a submodule, or a repository inside the tree, is one
+            # entry in git's listing however many of its files a reviewer changed.
+            inside = [
+                (str(child.relative_to(path)), _fingerprint(child, True))
+                for child in _files(path)
+            ]
+            return "dir:" + hashlib.sha256(json.dumps(inside).encode()).hexdigest()
         if cheap:
-            info = path.stat()
             return f"{info.st_size}:{info.st_mtime_ns}"
         # Streamed: a large untracked file, a build artefact, was read whole twice a round.
         digest = hashlib.sha256()
@@ -166,6 +209,17 @@ def _fingerprint(path: Path, cheap: bool) -> str:
         return digest.hexdigest()
     except OSError as exc:
         return f"unreadable:{exc.errno}"
+
+
+def _own_outputs() -> set[tuple[int, int]]:
+    """The files this process's stdout and stderr go to, when they are files."""
+    found = set()
+    for fd in (1, 2):
+        with contextlib.suppress(OSError):
+            info = os.fstat(fd)
+            if stat.S_ISREG(info.st_mode):
+                found.add((info.st_dev, info.st_ino))
+    return found
 
 
 def changed(before: str, after: str) -> list[str]:
@@ -196,7 +250,7 @@ def _strangers(round_dir: Path) -> list[str]:
     # A regular file under one of those names, for a slot there is: a directory or a
     # link planted under one is no output of the round's.
     return [
-        f"?? {entry}"
+        f"?? {_shown(entry)}"
         for entry in entries
         if not _ROUND_FILES.fullmatch(entry.name)
         or entry.is_symlink()
@@ -211,7 +265,7 @@ def report(repo: Path, before: str, exclude: Path | None = None) -> list[str]:
     is not a small thing: it puts text nobody wrote next to text somebody did,
     in a tree whose next command is very often ``git add -A``.
     """
-    touched = changed(before, snapshot(repo, exclude))
+    touched = changed(before, snapshot(repo, exclude, before))
     if exclude is not None:
         touched += _strangers(exclude)
     if not touched:
@@ -220,5 +274,7 @@ def report(repo: Path, before: str, exclude: Path | None = None) -> list[str]:
     print("A reviewer reads and reports; anything below was written by one of")
     print("them, and is not your work. Inspect before committing:")
     for line in touched:
-        print(f"  {line}")
+        # A name a reviewer chose: an escape sequence or a line break in it could hide
+        # this warning, or forge one.
+        print(f"  {printable(line).replace(chr(10), '?')}")
     return touched

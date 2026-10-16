@@ -1516,11 +1516,15 @@ class TestPreflightScriptSelection:
         installed.write_text("")
         assert _preflight_script(repo) == installed
 
-    def test_the_agents_own_repo_uses_its_own_copy(self, tmp_path: Path) -> None:
+    def test_the_agents_own_repo_uses_its_own_copy(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from scripts.review_loop import config
         from scripts.review_loop.config import SCRIPTS_DIR
         from scripts.review_loop.diff import _preflight_script
 
         repo = tmp_path / "agent"
+        monkeypatch.setattr(config, "REPO_ROOT", repo)
         (repo / "scripts" / "review_loop").mkdir(parents=True)
         (repo / "install.sh").write_text("")
         (repo / "scripts" / "review_preflight.py").write_text("")
@@ -1790,15 +1794,27 @@ class TestVendoredExclusion:
         _warn_of_vendored_changes(repo, ["--merge-base", "no-such-ref"])
         assert "could not tell" in capsys.readouterr().out
 
-    def test_agent_repo_still_reviews_itself(self, tmp_path: Path) -> None:
+    def test_agent_repo_still_reviews_itself(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from scripts.review_loop import config
         from scripts.review_loop.config import diff_pathspec, is_agent_repo
 
         repo = tmp_path / "agent"
         (repo / "scripts" / "review_loop").mkdir(parents=True)
         (repo / "install.sh").write_text("#!/bin/sh\n")
+        # A host with an install.sh of its own, reviewed from the agent's checkout, is
+        # the host: the scrubber's fixture pass is for this repository only.
+        assert not is_agent_repo(repo)
 
+        monkeypatch.setattr(config, "REPO_ROOT", repo)
         assert is_agent_repo(repo)
         assert diff_pathspec(repo) == ["."]
+
+    def test_a_worktree_of_the_agent_is_the_agent(self, tmp_path: Path) -> None:
+        from scripts.review_loop.config import REPO_ROOT, _common_dir
+
+        assert _common_dir(REPO_ROOT / "scripts") == _common_dir(REPO_ROOT)
 
     def test_host_project_excludes_the_vendored_paths(self, tmp_path: Path) -> None:
         from scripts.review_loop.config import (
@@ -3349,6 +3365,9 @@ class TestAMissingReviewerIsNotConvergence:
         # --report-only reports it, and goes on to its own exit.
         code, _, _ = self._round(tmp_path, results, report_only=True, touched=planted)
         assert code == 10
+        # But not to "converged" when nothing is blocking.
+        code, _, said = self._round(tmp_path, clean, report_only=True, touched=planted)
+        assert code == 12 and "NOT CONVERGED" in said
 
     def test_the_new_exit_code_is_documented(self) -> None:
         readme = (REPO_ROOT / "README.md").read_text()
@@ -3677,6 +3696,102 @@ class TestTamper:
         (tmp_path / "a.py").write_text("x\n")
         before = tamper.snapshot(tmp_path)
         assert tamper.changed(before, tamper.snapshot(tmp_path)) == []
+
+
+class TestTamperHardening:
+    """What a reviewer's write could hide from the tamper check, or run through it."""
+
+    @staticmethod
+    def _repo(path: Path) -> Path:
+        subprocess.run(["git", "init", "-q", str(path)], check=True)
+        (path / "a.txt").write_text("a\n")
+        subprocess.run(["git", "-C", str(path), "add", "a.txt"], check=True)
+        return path
+
+    def test_an_edit_inside_an_already_dirty_embedded_repo_is_seen(
+        self, tmp_path: Path
+    ) -> None:
+        # git lists a repository inside the tree as one entry, whatever changed in it.
+        from scripts.review_loop import tamper
+
+        repo = self._repo(tmp_path / "r")
+        inner = repo / "vendor"
+        subprocess.run(["git", "init", "-q", str(inner)], check=True)
+        (inner / "x.py").write_text("one\n")
+        before = tamper.snapshot(repo)
+        (inner / "x.py").write_text("two, longer\n")
+        touched = tamper.changed(before, tamper.snapshot(repo))
+        assert any(line.startswith("?? vendor/ ") for line in touched)
+
+    def test_the_loops_own_log_in_the_tree_is_no_reviewers_write(
+        self, tmp_path: Path
+    ) -> None:
+        # > data/reviews/run.log 2>&1: the log grows with each line the loop prints.
+        repo = self._repo(tmp_path / "r")
+        (repo / ".gitignore").write_text("data/\n")
+        (repo / "data").mkdir()
+        script = (
+            "import sys; sys.path.insert(0, sys.argv[1])\n"
+            "from pathlib import Path\n"
+            "from scripts.review_loop import tamper\n"
+            "repo = Path(sys.argv[2])\n"
+            "before = tamper.snapshot(repo)\n"
+            "print('x' * 4096, flush=True)\n"
+            "(repo / 'data' / 'planted.py').write_text('')\n"
+            "Path(sys.argv[3]).write_text(repr(tamper.changed(before, "
+            "tamper.snapshot(repo))))\n"
+        )
+        result = tmp_path / "touched.txt"
+        with (repo / "data" / "run.log").open("w") as log:
+            subprocess.run(
+                [sys.executable, "-c", script, str(REPO_ROOT), str(repo), str(result)],
+                stdout=log, stderr=subprocess.STDOUT, check=True,
+            )  # fmt: skip
+        touched = result.read_text()
+        assert "planted.py" in touched and "run.log" not in touched
+
+    def test_a_filter_planted_in_git_config_is_not_run_by_the_check(
+        self, tmp_path: Path
+    ) -> None:
+        # git status runs a clean filter on a file whose stat changed.
+        from scripts.review_loop import tamper
+
+        repo = self._repo(tmp_path / "r")
+        before = tamper.snapshot(repo)
+        marker = tmp_path / "ran"
+        with (repo / ".git" / "config").open("a") as config:
+            config.write(f'[filter "x"]\n\tclean = touch {marker}; cat\n')
+        (repo / ".git" / "info").mkdir(exist_ok=True)
+        (repo / ".git" / "info" / "attributes").write_text("* filter=x\n")
+        (repo / "a.txt").write_text("b\n")
+        touched = tamper.report(repo, before)
+        assert not marker.exists()
+        assert any("git status not run" in line for line in touched)
+
+    def test_a_reviewers_file_name_cannot_rewrite_the_warning(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from scripts.review_loop import tamper
+
+        repo = self._repo(tmp_path / "r")
+        before = tamper.snapshot(repo)
+        (repo / "x\x1b[1A\x1b[2K\nok.py").write_text("")
+        assert tamper.report(repo, before)
+        listed = capsys.readouterr().out.split("Inspect before committing:\n")[1]
+        assert "\x1b" not in listed and listed.count("\n") == 1
+
+    def test_no_home_at_all_is_no_crash(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import pwd
+
+        from scripts.review_loop.merge_agent import _homes
+
+        monkeypatch.delenv("HOME", raising=False)
+
+        def no_entry(uid: int) -> object:
+            raise KeyError(uid)
+
+        monkeypatch.setattr(pwd, "getpwuid", no_entry)
+        assert _homes() == set()
 
 
 class TestAuditScrub:

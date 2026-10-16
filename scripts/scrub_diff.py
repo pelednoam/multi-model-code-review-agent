@@ -316,6 +316,27 @@ SHAPE_PATTERNS = [
     re.compile(r'"type"\s*:\s*"service_account"'),
 ]
 
+#: A web URL's port and then its query or fragment, which the URL patterns'
+#: own port rule (``_URL_NOT_A_PASSWORD``) leaves to a "=" to tell: on a web scheme
+#: it is always that (http://h:8080#frag@x), on any other it may be a password that
+#: starts with digits and then a "#". Told here, after the match: the scheme is too
+#: far back for a look-behind.
+_WEB_PORT_AND_QUERY = re.compile(
+    r"""["'`]?(?i:https?|wss?)://[^\s/:]{0,256}:\d{1,16}[?#]"""
+)
+
+
+def _hits(pattern: re.Pattern[str], body: str) -> bool:
+    """Whether ``pattern`` finds a credential in ``body``, a URL pattern's match that
+    is a web URL's port and query aside (``_WEB_PORT_AND_QUERY``)."""
+    if _URL_NOT_A_PASSWORD not in pattern.pattern:
+        return pattern.search(body) is not None
+    return any(
+        not _WEB_PORT_AND_QUERY.match(match.group(0))
+        for match in pattern.finditer(body)
+    )
+
+
 #: Every pattern, for callers and tests that do not care about the split.
 CREDENTIAL_PATTERNS = [*KEYWORD_PATTERNS, *SHAPE_PATTERNS]
 
@@ -510,7 +531,7 @@ def scrub_line(
     # prose was redacted.
     body = _body(line, in_hunk=in_hunk)
     for pattern in SHAPE_PATTERNS:
-        if pattern.search(body):
+        if _hits(pattern, body):
             return _redact_preserving_prefix(line)
     # A linter already asked the keyword question and a person already answered
     # it. `S105`/`S106`/`S107` are ruff's "possible hardcoded password", so a

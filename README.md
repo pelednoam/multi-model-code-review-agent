@@ -163,6 +163,11 @@ When opted in, the precedence flips for Anthropic reviewers:
 | Readability | Hermes Sonnet (Bedrock) | agy only with `REVIEW_USE_AGY=1` and only where Hermes is not installed (with Hermes installed, agy is not detected at all), else Gemini CLI only with `REVIEW_USE_GEMINI=1` (a project that pinned Bedrock never falls to Google by default) | Claude CLI sonnet (free) |
 | Spec-contract (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
 
+The pin covers the reviewers, not the fixing: fix mode's merge agent is the
+claude CLI, whichever way the project is pinned, so the code and the findings
+it applies go to Anthropic's API. A project whose code must stay on Bedrock
+should run the loop with `--report-only`, which starts no merge agent.
+
 **With all CLIs installed** (claude + codex + agy, or gemini with `REVIEW_USE_GEMINI=1`): the full review
 costs nothing beyond the subscriptions the CLIs sign in with (Claude, ChatGPT,
 and for agy a Google account's plan; the gemini CLI runs on AI Studio's free
@@ -256,7 +261,7 @@ key past a scrubber.
 | 9 | **Scrubber failed** | `scrub_diff.py` aborted part-way through. The patch on disk is truncated and its tail was never scrubbed, so it is not shown to a reviewer. Nothing needs rotating; fix the input or the environment and re-run |
 | 10 | **Report only** | `--report-only` was set and there are blocking findings. Nothing was changed; read them and fix them yourself |
 | 11 | **Incomplete** | No blocking findings among the reviewers that answered, but at least one produced nothing (a revoked key, a network drop, a timeout). Its findings are unknown, so this is not convergence: fix what stopped it -- `stderr-N.txt` says -- and re-run. Every round with a missing reviewer also prints `INCOMPLETE:` naming it, whatever else happens |
-| 12 | **Tampered** | A reviewer changed the working tree (the tamper check lists what). Fix mode stops before the merge agent, the gate and any commit, rather than build on files nobody wrote; `--report-only` only reports it |
+| 12 | **Tampered** | A reviewer changed the working tree (the tamper check lists what). Fix mode stops before the merge agent, the gate and any commit, rather than build on files nobody wrote; `--report-only` reports it, and returns 12 rather than 0 for a round with nothing blocking |
 
 **Watching a round.** Four models on a large diff is fifteen minutes, and the
 loop used to say nothing during it. It now prints a line every 30 seconds

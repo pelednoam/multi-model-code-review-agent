@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 REPO_ROOT = SCRIPTS_DIR.parent
+
+#: git, by the path it has when the loop starts: a reviewer that can write files can
+#: plant one under its name early on PATH (~/.local/bin/git), for the loop's own checks
+#: of what the reviewers wrote to run.
+GIT = shutil.which("git") or "git"
 
 #: Seconds a reviewer gets on a *small* diff. Scaled by size below, because a
 #: flat budget kills exactly the reviewer worth waiting for: the slowest one is
@@ -81,10 +87,34 @@ def is_agent_repo(repo: Path) -> bool:
     install.sh is not among the files it copies, so its presence next to the
     loop package is what distinguishes the source repository from an installed
     copy. Developing the agent must still review the agent.
+
+    And only the checkout this loop runs from, or a worktree of its repository: a
+    host project reviewed with --repo from the agent's checkout may have an install.sh
+    of its own. (A host running its vendored copy on itself, with one, is not told
+    apart: the files are all the branch's.)
     """
-    return (repo / "install.sh").is_file() and (
-        repo / "scripts" / "review_loop"
-    ).is_dir()
+    if not (
+        (repo / "install.sh").is_file() and (repo / "scripts" / "review_loop").is_dir()
+    ):
+        return False
+    return _common_dir(repo) == _common_dir(REPO_ROOT)
+
+
+def _common_dir(repo: Path) -> Path | None:
+    """The repository ``repo`` is a worktree of, by its git common directory."""
+    import subprocess
+
+    try:
+        found = subprocess.run(
+            [GIT, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=repo, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+            check=False,
+        )  # fmt: skip
+    except OSError:
+        return None
+    if found.returncode != 0 or not found.stdout.strip():
+        return repo.resolve()
+    return Path(found.stdout.strip()).resolve()
 
 
 def diff_pathspec(repo: Path) -> list[str]:

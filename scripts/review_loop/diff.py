@@ -12,7 +12,7 @@ import sys
 from typing import TYPE_CHECKING
 
 from .config import SCRIPTS_DIR, VENDORED_PATHS, diff_pathspec, is_agent_repo
-from .proc import run
+from .proc import run, signals_unwind
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -277,6 +277,8 @@ def _run_tree(
     proc = subprocess.Popen(
         cmd,
         cwd=cwd,
+        # The repository to audit, whichever copy of the preflight runs.
+        env={**os.environ, "MMCRA_PREFLIGHT_REPO": str(cwd.resolve())},
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -286,7 +288,10 @@ def _run_tree(
         start_new_session=True,
     )
     try:
-        out, err = proc.communicate(timeout=timeout)
+        # A SIGTERM or SIGHUP raises here rather than ending Python with the session it
+        # started still running: the handler below then kills it.
+        with signals_unwind():
+            out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         with contextlib.suppress(OSError):
             os.killpg(proc.pid, signal.SIGKILL)

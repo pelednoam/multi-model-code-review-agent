@@ -16,7 +16,7 @@ from .claude_tools import (
     claude_tool_names,
     rule_safe,
 )
-from .config import MERGE_TIMEOUT, REPO_ROOT
+from .config import GIT, MERGE_TIMEOUT, REPO_ROOT
 from .proc import run
 
 #: What the merge agent may use: it edits files, and nothing more.
@@ -75,7 +75,7 @@ def _git_dirs(repo: Path) -> list[Path]:
     dirs = [repo / ".git", repo.resolve() / ".git"]
     # And the hooks directory git runs from, which core.hooksPath can put anywhere.
     found = run(
-        ["git", "rev-parse", "--absolute-git-dir", "--git-common-dir",
+        [GIT, "rev-parse", "--absolute-git-dir", "--git-common-dir",
          "--git-path", "hooks"],
         cwd=repo,
     )  # fmt: skip
@@ -86,13 +86,19 @@ def _git_dirs(repo: Path) -> list[Path]:
 
 
 def _homes() -> set[Path]:
-    """$HOME and the account's own home, which differ where HOME is pointed elsewhere."""
-    homes = {Path.home().resolve()}
+    """$HOME and the account's own home, which differ where HOME is pointed elsewhere.
+
+    Either may be missing -- a container's user with no HOME and no passwd entry --
+    and then there is none of it: the repository's checks stand without.
+    """
+    homes = set()
+    with contextlib.suppress(OSError, RuntimeError):
+        homes.add(Path.home().resolve())
     try:
         import pwd
 
         homes.add(Path(pwd.getpwuid(os.getuid()).pw_dir).resolve())
-    except (ImportError, KeyError):
+    except (ImportError, KeyError, OSError, RuntimeError):
         pass
     return homes
 

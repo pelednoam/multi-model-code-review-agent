@@ -18,11 +18,16 @@ changes it was reporting on.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+#: The repository audited: where this preflight is installed, unless the loop names
+#: another -- run from a trusted checkout with --repo, this copy audited and tested
+#: the checkout instead of the branch under review.
+_INSTALLED_IN = Path(__file__).resolve().parent.parent.parent
+REPO_ROOT = Path(os.environ.get("MMCRA_PREFLIGHT_REPO") or _INSTALLED_IN).resolve()
 
 #: A host project's overrides, read from the repo root. Optional, and every
 #: key in it is optional: what is not there keeps the default below.

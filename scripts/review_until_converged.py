@@ -215,6 +215,14 @@ def _run_one_round(
                 "(see its stderr file) and re-run."
             )
             return 11, previous_fp
+        if touched:
+            # --report-only goes on past a write, to report; but a round a reviewer
+            # wrote in is no clean bill, whatever it found.
+            print(
+                "\nNOT CONVERGED: nothing blocking, but the reviewers changed the "
+                "working tree. Inspect the files listed above."
+            )
+            return 12, previous_fp
         print("\nCONVERGED: only suggestions remain.")
         return 0, previous_fp
 

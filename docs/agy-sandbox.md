@@ -107,8 +107,9 @@ only where Hermes is not installed, since Hermes answers slot 3 when it is.
   pointing at the branch. That keeps the sandbox, the scrubber and the prompts the
   checkout's own, not everything: the preflight runs the branch's test suite for its
   coverage figures -- from the project's installed copy of the preflight when it has
-  one -- and the fix loop's gate runs its tests again. Run either only on a branch
-  you would run the tests of; `--report-only` still runs the preflight.
+  one, and otherwise from the checkout's, told which directory to audit -- and the
+  fix loop's gate runs its tests again. Run either only on a branch you would run
+  the tests of; `--report-only` still runs the preflight.
 - **agy's browser and MCP tools.** Headless agy refused the one shell command it
   tried, but whether those tools reach the network unprompted has not been tested.
 - **Root's and other users' abstract sockets.** They are not counted: they usually

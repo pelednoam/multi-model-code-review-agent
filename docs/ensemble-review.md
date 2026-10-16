@@ -627,7 +627,11 @@ live_group() {
 session_groups() {
   local stat line pgrp sid mine="" groups=" "
   for stat in "/proc/$$/stat" /proc/[0-9]*/stat; do
-    { read -r line < "$stat"; } 2>/dev/null || continue   # gone since the glob: not a member
+    # The whole file, to its end (-d ''): a command name can hold a newline, and the first line
+    # alone then ends inside it. Empty if it went since the glob: not a member.
+    line=""
+    { IFS= read -r -d '' line < "$stat"; } 2>/dev/null
+    [ -n "$line" ] || continue
     # After the command name, which can hold spaces and parentheses: state, ppid, pgrp, session.
     read -r _ _ pgrp sid _ <<< "${line##*) }"
     if [ -z "$mine" ]; then mine=$sid; continue; fi

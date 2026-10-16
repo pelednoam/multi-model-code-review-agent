@@ -683,8 +683,14 @@ def _stop(proc: subprocess.Popen[str]) -> None:
         proc.wait(timeout=10)
 
 
+#: Set once ``ps`` is found missing, so that it is not looked for again every poll.
+_NO_PS: list[bool] = []
+
+
 def _is_zombie(pid: int) -> bool | None:
     """Whether ``pid`` has exited and awaits its reap; None when ``ps`` cannot say."""
+    if _NO_PS:
+        return None
     try:
         done = subprocess.run(
             ["ps", "-o", "stat=", "-p", str(pid)],
@@ -693,6 +699,9 @@ def _is_zombie(pid: int) -> bool | None:
             timeout=10,
             check=False,
         )
+    except FileNotFoundError:
+        _NO_PS.append(True)
+        return None
     except (OSError, subprocess.SubprocessError):
         return None
     state = done.stdout.strip()

@@ -565,7 +565,8 @@ warning so you don't miss it.
 ### 3. Run from Claude Code
 
 Say any of:
-- "review this" or "quick review" -- quick mode (free, 2 subagents)
+- "review this", "quick review" or just "ensemble review" -- quick mode (free,
+  2 subagents)
 - "full review" or "full ensemble review" -- full mode (4 reviewers)
 - "run until converged" -- convergence loop, see [The convergence
   loop](#the-convergence-loop-external-loop) for details

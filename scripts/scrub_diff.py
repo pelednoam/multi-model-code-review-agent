@@ -162,6 +162,22 @@ SHAPE_PATTERNS = [
         + _URL_PLACEHOLDER
         + r"[/@])[^\s@\"?#]{1,256}@"
     ),
+    # The same with no "/" in the password, which may then be any length: the scan
+    # stops at the next "/", and every URL after it has one, so it stays linear.
+    re.compile(
+        r"(?<![a-zA-Z0-9+.-])[a-zA-Z][a-zA-Z0-9+.-]{0,31}:"
+        + r"//[^\s/:\"?#\[\]]{0,256}:(?!"
+        + _URL_PLACEHOLDER
+        + r"@)[^\s/@\"?#]+@"
+    ),
+    # And with no user name, where nothing before the ":" is a host, so nothing after
+    # it is a port.
+    re.compile(
+        r"(?<![a-zA-Z0-9+.-])[a-zA-Z][a-zA-Z0-9+.-]{0,31}:"
+        + r"//:(?!"
+        + _URL_PLACEHOLDER
+        + r"@)[^\s@\"?#]{1,256}@"
+    ),
     # Google's OAuth access and refresh tokens and client secrets, and the package
     # registries' tokens.
     re.compile(r"ya29\.[0-9A-Za-z_-]{20,}"),

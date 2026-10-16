@@ -2260,6 +2260,28 @@ class TestRunnerScript:
             subprocess.run(["kill", "-KILL", "--", f"-{job}"])
         assert alive.returncode != 0, "the job outlived the runner's cleanup"
 
+    @pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="needs /proc")
+    def test_a_group_whose_name_holds_a_newline_is_found(self, tmp_path: Path) -> None:
+        # Read a line at a time, its stat ended inside the name, and the group was
+        # taken for gone: the cleanup left it running.
+        runner = runner_script()
+        named = (
+            "import ctypes, time; "
+            "ctypes.CDLL(None).prctl(15, b'help\\nname', 0, 0, 0); time.sleep(30)"
+        )
+        script = tmp_path / "t.sh"
+        script.write_text(
+            "set -m\n"
+            + shell_function(runner, "session_groups")
+            + f"exec {sys.executable} -c {shlex.quote(named)} &\nchild=$!\nsleep 0.5\n"
+            + 'case "$(session_groups)" in *" $child "*) echo found ;; *) echo lost ;; esac\n'
+            + "kill $child\n"
+        )
+        done = subprocess.run(
+            ["bash", str(script)], capture_output=True, text=True, timeout=30
+        )
+        assert done.stdout.strip() == "found", done.stdout + done.stderr
+
     def test_a_second_signal_does_not_cut_the_cleanup_short(
         self, tmp_path: Path
     ) -> None:
@@ -2719,6 +2741,8 @@ class TestCredentialShapes:
             "postgres://u" + ":hunter2pass" + "@[::1]:5432/db",
             "postgres://u" + ":$ecret9" + "@db/prod",
             "mysql://root" + ":12345" + "@localhost/db",
+            "postgres://u" + ":" + "q7A_" * 80 + "@db/prod",
+            "redis://" + ":8080/abc" + "@cache:6379/0",
             "ya" + "29." + "a" * 30,
             "1/" + "/0" + "a" * 40,
             "GOC" + "SPX-" + "a" * 28,
@@ -2737,6 +2761,7 @@ class TestCredentialShapes:
         ],
         ids=["url-userinfo", "url-no-user", "url-short-password", "url-slash-password",
              "url-quote-password", "url-azure-user", "url-ipv6-host", "url-dollar-password", "url-numeric-password",
+             "url-long-password", "url-no-user-slash-password",
              "google-oauth-access", "google-oauth-refresh",
              "google-client-secret", "huggingface", "npm", "pypi", "google-api-key", "github-fine-grained", "github-app",
              "stripe-live", "slack", "slack-app", "slack-webhook", "discord-webhook",
@@ -2756,7 +2781,7 @@ class TestCredentialShapes:
         scrub_diff.scrub_line(line, False)
         assert clock.monotonic() - started < 2
 
-    @pytest.mark.parametrize("piece", [":{", ":${A", ":<", ":%(", ":*"])
+    @pytest.mark.parametrize("piece", [":{", ":${A", ":<", ":%(", ":*", ":c", "@:"])
     def test_a_line_of_unfinished_placeholders_is_scanned_quickly(
         self, piece: str
     ) -> None:

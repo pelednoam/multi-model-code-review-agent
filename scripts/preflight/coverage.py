@@ -136,8 +136,8 @@ def measure_test_coverage(
             warnings.append(
                 "coverage gate inoperative: "
                 f"{len(changed_python)} Python file(s) changed but none "
-                f"matched SOURCE_DIRS={SOURCE_DIRS}. Override SOURCE_DIRS "
-                "in scripts/preflight/config.py for this repo's layout."
+                f'matched SOURCE_DIRS={SOURCE_DIRS}. Set "source_dirs" in '
+                "review-config.json at the repo root for this repo's layout."
             )
         return []
     cov_data = _run_pytest_with_coverage(warnings)

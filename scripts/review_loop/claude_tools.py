@@ -92,6 +92,8 @@ SECRET_READS = (
     "~/.config/rclone/**", "~/.config/op/**", "~/.config/containers/**",
     "//run/user/*/containers/**", "~/.config/doctl/**", "~/.config/hcloud/**",
     "~/.config/heroku/**", "//**/*.tfstate", "//**/*.tfstate.backup", "//**/*.tfvars",
+    # Container and orchestrator secret mounts, and the host's private TLS keys.
+    "//run/secrets/**", "//var/run/secrets/**", "//etc/ssl/private/**",
     # Browsers' and editors' profiles: cookies, saved sign-ins, extension tokens.
     "~/.config/google-chrome/**", "~/.config/chromium/**", "~/.mozilla/**",
     "~/.config/Code/**",

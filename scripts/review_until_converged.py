@@ -284,7 +284,9 @@ def main() -> int:
         action="store_true",
         help=(
             "Route Anthropic reviewers through Hermes/Bedrock (paid API) "
-            "instead of the local claude CLI. Also triggered automatically "
+            "instead of the local claude CLI, and send nothing to OpenAI (codex) "
+            "or Google (agy, gemini) unless asked for by name: REVIEW_USE_CODEX=1, "
+            "REVIEW_USE_AGY=1, REVIEW_USE_GEMINI=1. Also triggered automatically "
             "when .use-hermes exists in the project root."
         ),
     )
@@ -302,7 +304,10 @@ def main() -> int:
     # before detection: a project pinned to Bedrock does not run agy.
     prefer_hermes = args.prefer_hermes or (repo / ".use-hermes").exists()
     if prefer_hermes:
-        print("Bedrock opt-in: routing Anthropic reviewers via Hermes")
+        print(
+            "Bedrock opt-in: routing Anthropic reviewers via Hermes; OpenAI and"
+            " Google only if asked for by name"
+        )
 
     backends = detect_backends(prefer_hermes=prefer_hermes, repo=repo)
     print(f"Backends: {backends}")

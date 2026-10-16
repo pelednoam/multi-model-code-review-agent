@@ -761,13 +761,19 @@ have detected it via fingerprint matching and exited with code 2
   Hermes only when you need Bedrock isolation.
 - **Claude Code orchestrates**: Hermes `delegate_task` cannot route
   children to different models. Claude Code spawns parallel processes.
-- **Secrets never touch disk**: `scrub_diff.py` reads stdin via pipe.
+- **Secrets are scrubbed before anything is sent**: the diff on its way in
+  from git, through a pipe (a redaction stops the review). The audit and
+  full mode's context bundle are written once unscrubbed to a private
+  temporary directory, scrubbed, and the raw copy removed; a failed scrub
+  stops the review.
   Exits non-zero on redaction, blocking the review until secrets are
   removed and rotated.
 - **Evidence-based convergence**: a single finding with artifact
   evidence is high-priority even if only one reviewer flags it.
 - **Strict schema**: `additionalProperties: false` at both levels.
-  Extracted JSON is validated for required keys before writing.
+  Extracted JSON is checked for the required top-level keys and a list of
+  finding objects before it is written; `validate_review_results.py` is the
+  strict check against the full schema.
 - **Private temp directory**: `mktemp -d`, not world-readable `/tmp/`.
 
 ## Privacy and isolation

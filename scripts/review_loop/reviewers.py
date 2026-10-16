@@ -26,6 +26,7 @@ from .agy import (
 )
 from .agy_sandbox import agy_seed_state, agy_wrapper
 from .agy_sandbox_check import agy_reachable
+from .backends import codex_mcp_off
 from .claude_tools import claude_disallowed, claude_tool_names
 from .config import (
     LATE_RESULT_GRACE,
@@ -351,16 +352,16 @@ def _codex_extra_args() -> list[str]:
     #                           under review chose it -- as instructions, outside the
     #                           diff's fence. Measured: told there to end every answer
     #                           with a word, codex did; with this, it did not.
-    #   notify=[], mcp_servers={}  no command run on its events, and no MCP server -- the
-    #                           two settings a project-level .codex/config.toml in the
-    #                           repository, which is codex's working directory, could set
-    #                           to run something outside its sandbox.
+    #   notify=[]               no command run on its events, which a trusted project's
+    #                           .codex/config.toml could set. Its MCP servers are turned
+    #                           off one by one at launch (backends.codex_mcp_off):
+    #                           mcp_servers={} does not do it (measured).
     #
     # This is belt AND braces: backends.codex_is_confined() still canary-tests the result,
     # because a flag that is silently overridden is exactly the failure being defended against.
     args: list[str] = [
         "-s", "read-only", "-c", 'approvals_reviewer="user"',
-        "-c", "project_doc_max_bytes=0", "-c", "notify=[]", "-c", "mcp_servers={}",
+        "-c", "project_doc_max_bytes=0", "-c", "notify=[]",
     ]  # fmt: skip
     model = os.environ.get("CODEX_MODEL")
     if model:
@@ -571,6 +572,15 @@ def _pick_backend(slot: int, round_: _Round) -> _Picked | None:
             # would then know: a directory of the slot's own.
             prompt_path = _scratch_dir(f"mmcra-prompt-{slot}-") / "prompt.txt"
             cmd = _hermes_cmd(prompt_path, cmd[cmd.index("-m") + 1])
+        if cmd[0] == "codex":
+            # Each MCP server it is configured with, off by name: each one a tool, and a
+            # process, outside its sandbox. Not knowing which there are, it does not run.
+            off = codex_mcp_off(round_.repo)
+            if off is None:
+                print(f"  R{slot}: codex's MCP servers could not be listed; not run")
+                backends["codex"] = False
+                continue
+            cmd = [*cmd[:2], *off, *cmd[2:]]
         if cmd[0] not in ("agy", "gemini"):
             # In the repository under review, whose files its tools read: from the
             # directory the loop was started in -- a trusted checkout of this agent,
@@ -662,7 +672,11 @@ def _prepare_agy(
         # Made where the workspace was, under the same TMPDIR, so outside the repository
         # whenever the workspace is.
         state = agy_seed_state(_scratch_dir("mmcra-agy-state-"))
-        sandbox = agy_wrapper(workspace, state, _under_review(repo))
+        # The round's other private directories hidden too -- the reviewers' outputs,
+        # hermes's prompts: outside /tmp, which is emptied inside, TMPDIR would leave
+        # them readable. Its own workspace and state are mounted after.
+        private = [d for d in _ROUND_SCRATCH if d not in (workspace, state)]
+        sandbox = agy_wrapper(workspace, state, (*_under_review(repo), *private))
     except OSError as exc:
         print(f"  R{slot}: could not prepare agy's sandbox ({exc})")
         return None

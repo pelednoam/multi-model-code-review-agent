@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -54,7 +56,9 @@ def codex_is_confined() -> tuple[bool, str]:
             timeout=_CODEX_CHECK_TIMEOUT,
         )
         if "SANDBOX_OK" not in (ran.stdout or ""):
-            detail = ((ran.stderr or ran.stdout or "").strip().splitlines() or [""])[-1][:200]
+            detail = ((ran.stderr or ran.stdout or "").strip().splitlines() or [""])[
+                -1
+            ][:200]
             hint = ""
             if "uid map" in detail or "RTM_NEWADDR" in detail or "userns" in detail:
                 hint = (
@@ -73,7 +77,10 @@ def codex_is_confined() -> tuple[bool, str]:
             timeout=_CODEX_CHECK_TIMEOUT,
         )
         if "original" not in (rd.stdout or ""):
-            return False, "codex sandbox could not read a file; a reviewer needs read access"
+            return (
+                False,
+                "codex sandbox could not read a file; a reviewer needs read access",
+            )
 
         # 3. the one that matters: is a write REFUSED?
         run(
@@ -110,6 +117,34 @@ def codex_usable() -> tuple[bool, str]:
 
 #: How long each step of codex's sandbox check may take.
 _CODEX_CHECK_TIMEOUT = 30
+
+
+def codex_mcp_off(cwd: Path | None = None) -> list[str] | None:
+    """The ``-c`` arguments that turn off each MCP server codex is configured with --
+    the user's, and a trusted project's, as codex lists them run from ``cwd`` -- or
+    None when that cannot be established, and codex is then not to run.
+
+    ``-c mcp_servers={}`` does not do it: measured, a configured server stayed
+    enabled under it, and ``mcp_servers.<name>.enabled=false`` turned it off.
+    """
+    try:
+        done = run(
+            ["codex", "mcp", "list", "--json"], cwd=cwd, timeout=_CODEX_CHECK_TIMEOUT
+        )
+        servers = json.loads(done.stdout) if done.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    if not isinstance(servers, list):
+        return None
+    args: list[str] = []
+    for server in servers:
+        name = server.get("name") if isinstance(server, dict) else None
+        # -c takes a plain dotted path, not TOML's quoted keys (measured: a quoted one
+        # made a server of its own, invalid): a name that is not plain cannot be named.
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+            return None
+        args += ["-c", f"mcp_servers.{name}.enabled=false"]
+    return args
 
 
 def _codex_sh(script: str, path: Path) -> list[str]:

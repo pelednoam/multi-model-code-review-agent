@@ -236,25 +236,27 @@ def run_preflight(round_dir: Path, repo: Path) -> Path:
     JSON wasn't produced at all.
     """
     audit_path = round_dir / "audit.json"
-    result = run(
-        [
-            sys.executable,
-            str(_preflight_script(repo)),
-            "--output",
-            str(audit_path),
-        ],
-        cwd=repo,
-    )
-    if not audit_path.exists():
-        raise RuntimeError(
-            f"preflight failed (no audit JSON, exit {result.returncode}): {result.stderr}"
+    # Written raw beside it, scrubbed into it, and removed whatever happens: the round
+    # directory is kept, and a raw audit there would be what the scrub keeps out.
+    raw = round_dir / ".audit.raw.json"
+    try:
+        result = run(
+            [sys.executable, str(_preflight_script(repo)), "--output", str(raw)],
+            cwd=repo,
         )
-    _scrub_audit(audit_path)
+        if not raw.exists():
+            raise RuntimeError(
+                f"preflight failed (no audit JSON, exit {result.returncode}): "
+                f"{result.stderr}"
+            )
+        _scrub_audit(raw, audit_path)
+    finally:
+        raw.unlink(missing_ok=True)
     return audit_path
 
 
-def _scrub_audit(audit_path: Path) -> None:
-    """Scrub the audit's strings with this checkout's scrubber, in place.
+def _scrub_audit(raw: Path, audit_path: Path) -> None:
+    """Scrub the audit in ``raw`` with this checkout's scrubber into ``audit_path``.
 
     The audit quotes the files under review, and goes into every prompt. The
     preflight that wrote it may be the project's own installed copy
@@ -262,7 +264,7 @@ def _scrub_audit(audit_path: Path) -> None:
     whichever wrote them. A redaction is not an abort, as it is for the diff: the
     quote is replaced, and the review goes on. One that cannot be done is.
     """
-    with audit_path.open(encoding="utf-8", errors="replace") as source:
+    with raw.open(encoding="utf-8", errors="replace") as source:
         done = run(
             [sys.executable, str(SCRIPTS_DIR / "scrub_diff.py"), "--json"], stdin=source
         )

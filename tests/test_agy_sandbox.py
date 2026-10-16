@@ -96,6 +96,10 @@ class TestAgySandboxCheck(AgyCase):
     ) -> None:
         monkeypatch.setattr(agy.shutil, "which", lambda c: f"/usr/bin/{c}")
         monkeypatch.setattr(agy_sandbox_check, "run", self._unconfined)
+        # The write alone: the host's capabilities and sockets, which the checks
+        # before it look at, have tests of their own.
+        self._quiet_host(monkeypatch)
+        monkeypatch.setattr(agy_sandbox_check, "_check_capabilities", lambda seen: None)
         ok, reason = agy_sandbox_check.agy_is_confined()
         assert not ok and "ALLOWED a write" in reason
 

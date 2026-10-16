@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 import tempfile
@@ -81,30 +82,53 @@ def _homes() -> set[Path]:
     return homes
 
 
-def _in_home_dot_dir(repo: Path) -> bool:
-    """Whether ``repo`` is under a dot-directory of either home (~/.worktrees/x)."""
+def _home_dot_entries(repo: Path) -> tuple[list[Path], bool]:
+    """Every dotfile and dot-directory in either home but the one holding ``repo``,
+    and whether one does (~/.worktrees/project): that one the agent is there to fix,
+    and the rest stay denied, as ``_HOME_DOT_DENIED`` denies them all otherwise."""
+    entries: list[Path] = []
+    holding = False
     for home in _homes():
         try:
             inside = repo.resolve().relative_to(home)
         except ValueError:
-            continue
-        if inside.parts and inside.parts[0].startswith("."):
-            return True
-    return False
+            inside = None
+        keep = inside.parts[0] if inside and inside.parts else None
+        if keep is not None and keep.startswith("."):
+            holding = True
+        with contextlib.suppress(OSError):
+            entries += [
+                entry
+                for entry in home.iterdir()
+                if entry.name.startswith(".") and entry.name != keep
+            ]
+    return entries, holding
+
+
+def _trusted_checkout(repo: Path) -> list[Path]:
+    """This agent's own checkout, when it is not the one being fixed: the loop runs its
+    code, and a trusted checkout is the point of running from one. Where the target is
+    inside it (a worktree under .claude/worktrees), its code and docs, not all of it."""
+    trusted, target = REPO_ROOT.resolve(), repo.resolve()
+    if trusted == target:
+        return []
+    if not target.is_relative_to(trusted):
+        return [trusted]
+    parts = [trusted / "scripts", trusted / "docs", trusted / "install.sh"]
+    return [part for part in parts if not target.is_relative_to(part)]
 
 
 def _merge_denied(repo: Path) -> list[str]:
     """The merge agent's --disallowedTools: the reviewers' list for its tools, and
-    writes to the repository's git directories, ``_MERGE_REPO_DENIED`` and
-    ``_MERGE_WRITE_DENIED``."""
+    writes to the repository's git directories, ``_MERGE_REPO_DENIED``,
+    ``_MERGE_WRITE_DENIED`` and the home's other dot entries."""
     paths = ["//**/.git", "//**/.git/**"]  # every repository's hooks and config
-    # This agent's own checkout, when it is not the one being fixed: the loop runs its
-    # code, and a trusted checkout is the point of running from one.
-    others = [] if REPO_ROOT.resolve() == repo.resolve() else [REPO_ROOT.resolve()]
+    dot_entries, in_dot_dir = _home_dot_entries(repo)
     protected = [
         *_git_dirs(repo),
         *(repo.resolve() / name for name in _MERGE_REPO_DENIED),
-        *others,
+        *_trusted_checkout(repo),
+        *(dot_entries if in_dot_dir else []),
     ]
     for path in protected:
         root = str(path).rstrip("/")
@@ -113,7 +137,6 @@ def _merge_denied(repo: Path) -> list[str]:
             print(f"  WARNING: the merge agent is not denied {root}: a space in it")
         else:
             paths += [f"/{root}", f"/{root}/**"]
-    in_dot_dir = _in_home_dot_dir(repo)
     denied = (
         _MERGE_WRITE_DENIED if in_dot_dir else (*_MERGE_WRITE_DENIED, *_HOME_DOT_DENIED)
     )

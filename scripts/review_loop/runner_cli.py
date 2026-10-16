@@ -27,7 +27,7 @@ from .agy import (
 )
 from .agy_sandbox import agy_seed_state, agy_wrapper_parts
 from .agy_sandbox_check import agy_reachable
-from .backends import codex_usable, detect_backends
+from .backends import codex_mcp_off, codex_usable, detect_backends
 from .claude_tools import claude_denied, claude_disallowed, claude_tool_names
 from .config import env_flag
 from .findings import validate_result
@@ -81,17 +81,20 @@ def _agy_schema(path: str) -> int:
     return 0
 
 
-def _agy_sandbox(workspace: str, state: str, review_root: str) -> int:
+def _agy_sandbox(workspace: str, state: str, review_root: str, *hide: str) -> int:
     """NUL-separated: the length of the env part, the env part, bwrap's part.
 
     ``review_root``, the repository under review, is hidden inside, as the loop hides
-    it. ``0`` and nothing else when the host is trusted to be the sandbox itself.
+    it, and ``hide`` -- the runner's private directories, wherever TMPDIR put them.
+    ``0`` and nothing else when the host is trusted to be the sandbox itself.
     """
     if agy_unsandboxed():
         sys.stdout.write("0\0")
         return 0
     env, bwrap = agy_wrapper_parts(
-        Path(workspace), agy_seed_state(Path(state)), (Path(review_root),)
+        Path(workspace),
+        agy_seed_state(Path(state)),
+        (Path(review_root), *(Path(path) for path in hide)),
     )
     sys.stdout.write("\0".join([str(len(env)), *env, *bwrap]) + "\0")
     return 0
@@ -203,6 +206,18 @@ def _claude_deny(tools: str) -> int:
     return 0
 
 
+def _codex_mcp_off(cwd: str = ".") -> int:
+    """Print the ``-c`` arguments that turn off codex's MCP servers, one per line
+    (``backends.codex_mcp_off``); exit 1, and codex is not to run, when they cannot
+    be listed."""
+    off = codex_mcp_off(Path(cwd))
+    if off is None:
+        print("codex's MCP servers could not be listed", file=sys.stderr)
+        return 1
+    print("\n".join(off))
+    return 0
+
+
 def _claude_tools(tools: str) -> int:
     """Print the --tools value for a claude reviewer allowed ``tools``: the names it
     grants, comma-separated (``claude_tools.claude_tool_names``)."""
@@ -241,6 +256,7 @@ _COMMANDS: dict[str, Callable[..., int]] = {
     "placeholder": _placeholder,
     "claude-deny": _claude_deny,
     "claude-tools": _claude_tools,
+    "codex-mcp-off": _codex_mcp_off,
     "flag": _flag,
 }
 
@@ -250,7 +266,9 @@ def _usage(name: str) -> str:
     them by position, so the order is the interface."""
     params = inspect.signature(_COMMANDS[name]).parameters.values()
     shown = [
-        p.name.upper()
+        f"[{p.name.upper()}...]"
+        if p.kind is inspect.Parameter.VAR_POSITIONAL
+        else p.name.upper()
         if p.default is inspect.Parameter.empty
         else f"[{p.name.upper()}]"
         for p in params

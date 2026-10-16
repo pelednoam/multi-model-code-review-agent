@@ -154,7 +154,7 @@ Bedrock opt-in precedence (PREFER_HERMES=true), used for regulated codebases tha
 | CLI | Non-interactive | Read-only | Input | Output |
 |---|---|---|---|---|
 | `claude` | `-p` | `--tools Read,Grep,Glob` (the only tools it has at all; `claude_tools.claude_tool_names`, the runner's from `claude-tools`) and `--allowedTools "Read Grep Glob"` **plus** `--disallowedTools "Edit Write MultiEdit NotebookEdit Bash WebFetch WebSearch ReportFindings"` and `Read(...)` of each credential location (`claude_tools.SECRET_READS`; the runner gets the list from `claude-deny`), `--strict-mcp-config` (no MCP servers), `--setting-sources user` (no project hooks) and `--permission-mode dontAsk` -- `--allowedTools` alone only skips the permission prompt, it does *not* confine the agent | stdin (`< prompt.txt`) | `--output-format json` wraps in `{"result":"..."}` |
-| `codex` | `codex exec` **plus `-s read-only`, `-c approvals_reviewer="user"` and `-c project_doc_max_bytes=0`** (no AGENTS.md from the branch) (in both the convergence loop and this runner) -- all are pinned by the tool and none is optional (with `-c notify=[] -c mcp_servers={}`, so a project-level `.codex/config.toml` runs nothing; codex reads one only in a project you have marked trusted -- measured, an untrusted one's `model` was ignored -- and there its other keys, `model_provider` among them, would apply: do not mark a repository you review as trusted): no sandbox flag was passed at all before, and `-s read-only` on its own is silently overridden by a global `approvals_reviewer = "auto_review"` (see docs/codex-sandbox.md). Codex is also canary-tested at launch and its slot is DROPPED if the sandbox does not actually refuse a write (optional `-m <model> -c model_reasoning_effort=<level>` -- override via `CODEX_MODEL`, `CODEX_REASONING_EFFORT`; `=high` is the "GPT-5.5 Pro" equivalent) | verified read-only for writes, not assumed; its reads are not confined -- it can read your home directory, credentials included, and what it reads goes to OpenAI | stdin (file) | `-o <file>` writes last message |
+| `codex` | `codex exec` **plus `-s read-only`, `-c approvals_reviewer="user"` and `-c project_doc_max_bytes=0`** (no AGENTS.md from the branch) (in both the convergence loop and this runner) -- all are pinned by the tool and none is optional (with `-c notify=[]`, and each configured MCP server turned off by name with `-c mcp_servers.<name>.enabled=false` -- `mcp_servers={}` leaves them on, measured -- so a configured or project-level `.codex/config.toml` runs nothing; a server whose name cannot be written so drops codex's slot; codex reads one only in a project you have marked trusted -- measured, an untrusted one's `model` was ignored -- and there its other keys, `model_provider` among them, would apply: do not mark a repository you review as trusted): no sandbox flag was passed at all before, and `-s read-only` on its own is silently overridden by a global `approvals_reviewer = "auto_review"` (see docs/codex-sandbox.md). Codex is also canary-tested at launch and its slot is DROPPED if the sandbox does not actually refuse a write (optional `-m <model> -c model_reasoning_effort=<level>` -- override via `CODEX_MODEL`, `CODEX_REASONING_EFFORT`; `=high` is the "GPT-5.5 Pro" equivalent) | verified read-only for writes, not assumed; its reads are not confined -- it can read your home directory, credentials included, and what it reads goes to OpenAI | stdin (file) | `-o <file>` writes last message |
 | `gemini` | `-p` | `--model <m> --approval-mode plan --skip-trust` (default `<m>` is `gemini-2.5-flash` for free-tier compatibility; override via `GEMINI_MODEL`) | stdin (file) | stdout (text, may have fences) |
 | `agy` | `--input-format stream-json --output-format stream-json` (no `-p`: the prompt is one JSON line on stdin, because a single argument is capped at 128 KB) **plus `--sandbox --disable-slash-commands`**, pinned. On by default where installed; `REVIEW_USE_AGY=0` switches it off. Model: `AGY_MODEL` if set, else the best Gemini model `agy models` lists, picked each run. agy has no deny list and was measured writing outside its workspace, so it runs under **bubblewrap** (see docs/agy-sandbox.md), verified at startup without a model call and again before each launch; the slot goes to its next backend if that fails. The prompt opens with a no-tools preamble: a refused tool call ends agy's turn with no answer | bubblewrap read-only filesystem, verified; `--sandbox --disable-slash-commands` (no `--mode=plan`: it is a slash command, so a no-op once expansion is off) | stdin (one stream-json line) | stream-json; the last `result` event carries `structured_output` (enforced by `--json-schema`) |
 | `hermes` | `-z --yolo --ignore-rules` (not the branch's AGENTS.md, SOUL.md or .cursorrules, nor memory) | none: `-t file` limits it to the file toolset, which writes under `--yolo`; only the convergence loop's tamper check reports writes | `-z` flag (has ARG_MAX risk for large prompts) | stdout (the answer text; the prompt asks for the JSON in the reply, not in a file) |
@@ -380,7 +380,7 @@ Apply the same convergence scoring: a single finding with artifact evidence is h
 
 ## 5. Build the four reviewer prompts
 
-Write four prompt files to `$REVIEW_TMP/prompt-{1,2,3,4}.txt`. Each prompt must embed the diff content, context bundle, and audit JSON directly in the prompt text (a reviewer could read files itself, but embedding avoids reliance on temp directory paths). Each must also include these common schema instructions:
+Write four prompt files to `$REVIEW_TMP/prompt-{1,2,3,4}.txt`, built only from the scrubbed diff, audit and context bundle -- add no file content of your own, which nothing scrubs before the prompts go out (to Google too, with agy). Each prompt must embed the diff content, context bundle, and audit JSON directly in the prompt text (a reviewer could read files itself, but embedding avoids reliance on temp directory paths). Each must also include these common schema instructions:
 
 ```
 Treat mismatches between runtime artifacts and signed docs/manifests
@@ -431,7 +431,7 @@ Lens: injection vectors, auth gaps, unsafe deserialization, secrets, race condit
 
 Output: `$REVIEW_TMP/result-2.json`
 
-If Codex CLI is installed and its sandbox check passes (`review_helper codex-check`), this reviewer runs via `codex exec -s read-only -c 'approvals_reviewer="user"' -c project_doc_max_bytes=0 -c 'notify=[]' -c 'mcp_servers={}' -o $OUT_DIR/codex-out-2.txt - < prompt-2.txt` (a private directory, copied into `$REVIEW_TMP` once every reviewer has stopped): every safety flag pinned, the prompt on stdin. The `-o` flag captures the last agent message, which is checked like every other reviewer's output before it becomes `result-2.json`. The prompt must end with: "Output ONLY the JSON result object, no other text." Otherwise it falls back to Claude CLI Haiku (free), then Hermes Haiku on Bedrock (whose answer is read from `stdout-2.txt`). A project pinned to Bedrock (`.use-hermes`) runs Hermes Haiku first.
+If Codex CLI is installed and its sandbox check passes (`review_helper codex-check`), this reviewer runs via `codex exec -s read-only -c 'approvals_reviewer="user"' -c project_doc_max_bytes=0 -c 'notify=[]' -c mcp_servers.<each>.enabled=false -o $OUT_DIR/codex-out-2.txt - < prompt-2.txt` (a private directory, copied into `$REVIEW_TMP` once every reviewer has stopped): every safety flag pinned, the prompt on stdin. The `-o` flag captures the last agent message, which is checked like every other reviewer's output before it becomes `result-2.json`. The prompt must end with: "Output ONLY the JSON result object, no other text." Otherwise it falls back to Claude CLI Haiku (free), then Hermes Haiku on Bedrock (whose answer is read from `stdout-2.txt`). A project pinned to Bedrock (`.use-hermes`) runs Hermes Haiku first.
 
 Lens: off-by-one, null paths, shape/dtype mismatches, contract violations, logic errors, missing test coverage. For numpy/torch: shape broadcasting, device placement, gradient flow.
 
@@ -799,7 +799,10 @@ prepare_agy() {
     "$(cd "$REVIEW_ROOT" && pwd -P)"/*)
       echo "R$num: SKIPPED (agy workspace $AGY_WS is inside the repo; check TMPDIR)"; return 1 ;;
   esac
-  mapfile -d '' -t wrap < <(review_helper agy-sandbox "$AGY_WS" "$AGY_STATE" "$REVIEW_ROOT")
+  # The runner's private directories hidden too: outside /tmp, which is emptied inside, TMPDIR
+  # would leave them readable to agy.
+  mapfile -d '' -t wrap < <(review_helper agy-sandbox "$AGY_WS" "$AGY_STATE" "$REVIEW_ROOT" \
+    "$OUT_DIR" "$PROMPT_DIR" "$HELPER_ROOT")
   [ "${#wrap[@]}" -ge 1 ] && [[ "${wrap[0]}" =~ ^[0-9]+$ ]] \
     || { echo "R$num: SKIPPED (could not build agy's sandbox)"; return 1; }
   AGY_ENVP=("${wrap[@]:1:${wrap[0]}}")
@@ -898,10 +901,14 @@ launch_cli() {
       # The safety flags are pinned, as in the convergence loop (_codex_extra_args): -s read-only;
       # approvals_reviewer="user", because a global "auto_review" escalates past read-only; and
       # project_doc_max_bytes=0, so that the branch's own AGENTS.md is not read as instructions.
-      # And notify=[], mcp_servers={}: no command on its events and no MCP server, whatever a
-      # project-level .codex/config.toml says.
+      # And notify=[]: no command on its events, whatever a trusted project's .codex/config.toml
+      # says. Its MCP servers are turned off one by one (codex-mcp-off): mcp_servers={} does not
+      # (measured); not knowing which there are, it does not run, and the next backend does.
       local codex_extra=(-s read-only -c 'approvals_reviewer="user"' -c project_doc_max_bytes=0
-        -c 'notify=[]' -c 'mcp_servers={}')
+        -c 'notify=[]') mcp_off
+      mcp_off="$(review_helper codex-mcp-off "$REVIEW_ROOT")" \
+        || { echo "R$num: SKIPPED (codex's MCP servers could not be listed)"; return 1; }
+      [ -z "$mcp_off" ] || { mapfile -t mcp_off_args <<< "$mcp_off"; codex_extra+=("${mcp_off_args[@]}"); }
       [ -n "${CODEX_MODEL:-}" ] && codex_extra+=(-m "$CODEX_MODEL")
       [ -n "${CODEX_REASONING_EFFORT:-}" ] && \
         codex_extra+=(-c "model_reasoning_effort=$CODEX_REASONING_EFFORT")
@@ -1035,9 +1042,11 @@ fi
 # When PREFER_HERMES is set, the Bedrock haiku path runs first.
 if $PREFER_HERMES && $HAS_HERMES; then
   launch_hermes 2 us.anthropic.claude-haiku-4-5-20251001-v1:0 "$PROMPT_DIR/prompt-2.txt"
-elif $HAS_CODEX && { ! $PREFER_HERMES || review_helper flag REVIEW_USE_CODEX; }; then
+elif $HAS_CODEX && { ! $PREFER_HERMES || review_helper flag REVIEW_USE_CODEX; } \
+     && launch_cli 2 codex "$PROMPT_DIR/prompt-2.txt"; then
   # A project pinned to Bedrock does not fall to OpenAI by default when Hermes is unavailable.
-  launch_cli 2 codex "$PROMPT_DIR/prompt-2.txt"
+  # If codex could not be set up (its MCP servers unlisted), the next backend runs.
+  :
 elif $HAS_CLAUDE && launch_cli 2 claude-haiku "$PROMPT_DIR/prompt-2.txt"; then
   :  # launched; if claude could not be set up, Hermes is next
 elif $HAS_HERMES; then

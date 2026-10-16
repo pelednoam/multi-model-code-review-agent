@@ -1398,7 +1398,13 @@ class TestMergeAgentPrompt:
         monkeypatch.setenv("HOME", str(tmp_path))
         hidden = tmp_path / ".worktrees" / "project"
         hidden.mkdir(parents=True)
-        assert "Write(~/.*/**)" not in merge_agent._merge_denied(hidden)
+        (tmp_path / ".bashrc.d").mkdir()
+        monkeypatch.setattr(merge_agent, "_homes", lambda: {tmp_path})
+        denied = merge_agent._merge_denied(hidden)
+        assert "Write(~/.*/**)" not in denied
+        # The others stay denied, one by one: dropping them all left them writable.
+        assert f"Write(/{tmp_path / '.bashrc.d'}/**)" in denied
+        assert f"Write(/{tmp_path / '.worktrees'}/**)" not in denied
         # Nor where HOME points elsewhere and the repository is in the account's.
         monkeypatch.setattr(merge_agent, "_homes", lambda: {Path("/x"), tmp_path})
         assert "Write(~/.*/**)" not in merge_agent._merge_denied(hidden)
@@ -1414,6 +1420,20 @@ class TestMergeAgentPrompt:
         assert f"Write(/{REPO_ROOT.resolve()}/**)" in denied
         # CI definitions, which --auto-commit would push and CI would run.
         assert f"Write(/{plain.resolve()}/.github/workflows/**)" in denied
+
+    def test_a_worktree_inside_this_checkout_stays_editable(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Denied this checkout whole, a target worktree inside it could not be fixed.
+        from scripts.review_loop import merge_agent
+
+        agent = tmp_path / "agent"
+        nested = agent / ".claude" / "worktrees" / "fix"
+        nested.mkdir(parents=True)
+        monkeypatch.setattr(merge_agent, "REPO_ROOT", agent)
+        denied = merge_agent._merge_denied(nested)
+        assert f"Write(/{agent.resolve()}/**)" not in denied
+        assert f"Write(/{(agent / 'scripts').resolve()}/**)" in denied
 
     def test_a_hooks_path_set_elsewhere_is_denied(self, tmp_path: Path) -> None:
         # core.hooksPath puts the hooks git runs anywhere: in the repository, a
@@ -2098,7 +2118,7 @@ class TestCodexEnvOverrides:
     # is not enough: a global `approvals_reviewer = "auto_review"` overrides it.
     SAFETY = [
         "-s", "read-only", "-c", 'approvals_reviewer="user"',
-        "-c", "project_doc_max_bytes=0", "-c", "notify=[]", "-c", "mcp_servers={}",
+        "-c", "project_doc_max_bytes=0", "-c", "notify=[]",
     ]  # fmt: skip
 
     def test_no_env_still_pins_the_safety_flags(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3351,6 +3371,23 @@ class TestScrubText:
         )  # fmt: skip
         assert "MIIbody" not in done.stdout and done.stdout.endswith("+after\n")
 
+    def test_a_second_key_begun_on_an_end_line_is_redacted(self) -> None:
+        # The END closed the block, and the next key's body passed: in a diff and as
+        # text alike.
+        begin = "-----BEGIN RSA PRIVATE " + "KEY-----"
+        end = "-----END RSA PRIVATE " + "KEY-----"
+        text = f"{begin}\nMIIfirst\n{end} {begin}\nMIIsecond\n{end}\nafter\n"
+        done = self._scrub(text)
+        assert "MIIsecond" not in done.stdout and done.stdout.endswith("after\n")
+        diff = "diff --git a/k b/k\n@@ -0,0 +1,6 @@\n" + "".join(
+            "+" + line + "\n" for line in text.splitlines()
+        )
+        done = subprocess.run(
+            [sys.executable, str(SCRUB_SCRIPT)], input=diff, capture_output=True,
+            text=True, timeout=30,
+        )  # fmt: skip
+        assert "MIIsecond" not in done.stdout and done.stdout.endswith("+after\n")
+
     def test_clean_text_passes_through(self) -> None:
         done = self._scrub("nothing here\n")
         assert done.returncode == 0 and done.stdout == "nothing here\n"
@@ -3406,7 +3443,7 @@ class TestAuditScrub:
         audit.write_text(
             json.dumps({"patterns": [{"line": f"t = '{key}'"}, {"line": "ok"}]})
         )
-        diff._scrub_audit(audit)
+        diff._scrub_audit(audit, audit)
         scrubbed = json.loads(audit.read_text())
         assert key not in audit.read_text()
         assert scrubbed["patterns"][1]["line"] == "ok"
@@ -3414,10 +3451,32 @@ class TestAuditScrub:
     def test_an_audit_that_cannot_be_scrubbed_is_not_used(self, tmp_path: Path) -> None:
         from scripts.review_loop import diff
 
-        audit = tmp_path / "audit.json"
-        audit.write_text("not json")
+        raw = tmp_path / "raw.json"
+        raw.write_text("not json")
         with pytest.raises(RuntimeError, match="could not scrub the audit"):
-            diff._scrub_audit(audit)
+            diff._scrub_audit(raw, tmp_path / "audit.json")
+        # Nothing written for the prompts to read.
+        assert not (tmp_path / "audit.json").exists()
+
+    def test_no_raw_audit_is_left_in_the_round(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Scrubbed in place, a failed scrub left the raw audit in the round directory,
+        # which is kept.
+        from scripts.review_loop import diff
+
+        real_run = diff.run
+
+        def preflight(cmd: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
+            if "--output" in cmd:
+                Path(cmd[cmd.index("--output") + 1]).write_text("not json")
+                return subprocess.CompletedProcess(cmd, 1, "", "")
+            return real_run(cmd, **kw)
+
+        monkeypatch.setattr(diff, "run", preflight)
+        with pytest.raises(RuntimeError):
+            diff.run_preflight(tmp_path, tmp_path)
+        assert list(tmp_path.iterdir()) == []
 
 
 class TestScrubJson:
@@ -3447,6 +3506,19 @@ class TestScrubJson:
         code, out = self._scrub({field: value, "port": 5432})
         assert code == 1 and out == {field: scrub_diff.REDACTED_TEXT, "port": 5432}
 
+    def test_a_credential_fields_list_or_object_is_redacted(self) -> None:
+        # Walked into, its leaves lost the key that said what they were.
+        field = "pass" + "word"
+        code, out = self._scrub(
+            {field: ["hunter2"], "token": {"v": "hunter2"}, "tags": ["a", "b"]}
+        )
+        assert code == 1
+        assert out == {
+            field: scrub_diff.REDACTED_TEXT,
+            "token": scrub_diff.REDACTED_TEXT,
+            "tags": ["a", "b"],
+        }
+
     def test_a_key_shaped_like_a_credential_is_redacted(self) -> None:
         key = "gh" + "p_" + "a" * 36
         code, out = self._scrub({key: 1, "other": 2})
@@ -3459,3 +3531,62 @@ class TestScrubJson:
             input="x\n", capture_output=True, text=True, timeout=30,
         )  # fmt: skip
         assert done.returncode == 2 and "unknown arguments" in done.stderr
+
+
+class TestCodexMcpOff:
+    """codex's MCP servers, each turned off by name: mcp_servers={} does not."""
+
+    def _codex(self, monkeypatch: pytest.MonkeyPatch, stdout: str, rc: int = 0) -> None:
+        from scripts.review_loop import backends
+
+        monkeypatch.setattr(
+            backends, "run",
+            lambda *a, **k: subprocess.CompletedProcess([], rc, stdout, ""),
+        )  # fmt: skip
+
+    def test_each_server_is_turned_off_by_name(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Measured: under -c mcp_servers={}, a configured server stayed enabled.
+        from scripts.review_loop import backends
+
+        self._codex(monkeypatch, json.dumps([{"name": "fs"}, {"name": "git-hub_2"}]))
+        assert backends.codex_mcp_off() == [
+            "-c", "mcp_servers.fs.enabled=false",
+            "-c", "mcp_servers.git-hub_2.enabled=false",
+        ]  # fmt: skip
+
+    @pytest.mark.parametrize(
+        ("stdout", "rc"),
+        [
+            ("[]", 1),
+            ("not json", 0),
+            ('{"a": 1}', 0),
+            ('[{"name": "a\\nb"}]', 0),
+            ('[{"name": "a.b"}]', 0),
+        ],
+    )
+    def test_not_knowing_the_servers_is_not_running_codex(
+        self, monkeypatch: pytest.MonkeyPatch, stdout: str, rc: int
+    ) -> None:
+        from scripts.review_loop import backends
+
+        self._codex(monkeypatch, stdout, rc)
+        assert backends.codex_mcp_off() is None
+
+    def test_a_codex_whose_servers_are_unknown_falls_through(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from scripts.review_loop import reviewers
+
+        monkeypatch.setattr(reviewers, "codex_mcp_off", lambda cwd: None)
+        found = {"hermes": False, "claude": True, "codex": True, "gemini": False,
+                 "agy": False}  # fmt: skip
+        round_ = reviewers._Round(
+            "d", "{}", "", tmp_path, found, False, tmp_path, out_dir=tmp_path
+        )
+        picked = reviewers._pick_backend(2, round_)
+        assert picked is not None and picked.backend == "claude"
+        monkeypatch.setattr(reviewers, "codex_mcp_off", lambda cwd: ["-c", "x"])
+        picked = reviewers._pick_backend(2, round_)
+        assert picked is not None and picked.cmd[:4] == ["codex", "exec", "-c", "x"]

@@ -35,6 +35,7 @@ Exit codes:
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 import sys
@@ -147,8 +148,9 @@ _SCHEME_NAME = r"[a-zA-Z][a-zA-Z0-9+.-]{0,31}:"
 _URL_SCHEME = r"(?<![a-zA-Z0-9+.-])" + _SCHEME_NAME
 #: The user: like the password (``_URL_PASSWORD_CHAR``), not past a quote that closes
 #: a string -- or it ran from one into the next: ['https://example.com','mailto:a@b'].
-#: Inside double quotes, where a ' ends nothing, any ' (``_URL_USER_DOUBLE_QUOTED``).
-_URL_USER = r"//(?:\\[^\s]|[^\s/:\"?#\[\]'\\]|'(?![,\])};:+\s])){0,256}:"
+#: Without an @ in it (``_URL_USER_NO_AT``) or with one (``_URL_USER_WITH_AT``), whose
+#: password may hold no "/". Inside double quotes, where a ' ends nothing, any '
+#: (``_URL_USER_DOUBLE_QUOTED``, ``_URL_USER_DOUBLE_QUOTED_NO_AT``).
 _URL_USER_DOUBLE_QUOTED = r"//[^\s/:\"?#\[\]]{0,256}:"
 _URL_USER_DOUBLE_QUOTED_NO_AT = r"//[^\s/:\"?#\[\]@]{0,256}:"
 #: The user without an @ in it, and with one.
@@ -215,7 +217,7 @@ SHAPE_PATTERNS = [
     re.compile(r"hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]{20,}"),
     re.compile(r"discord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9_-]{50,}"),
     re.compile(r"SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}"),
-    # A password in a URL's userinfo (``_URL_USER``), "@" -- in a postgres, redis or
+    # A password in a URL's userinfo (``_URL_USER_NO_AT``), "@" -- in a postgres, redis or
     # proxy URL -- unless it is no password (``_URL_NOT_A_PASSWORD``): documentation
     # and connection-string code are full of those, and a redaction aborts the
     # review. Written in parts, so that this line is not one.
@@ -506,11 +508,18 @@ def _force_utf8(stream: object) -> None:
         reconfigure(encoding="utf-8", errors="replace")
 
 
+def _key_open_after(line: str, before: bool) -> bool:
+    """Whether a private key's body continues past ``line``: what its last BEGIN or END
+    marker says, or ``before`` if it has neither. The last, not the first: a line can
+    end one key and begin another (END ... BEGIN), whose body is on the lines after."""
+    marks = [(m.start(), True) for m in _PEM_BEGIN.finditer(line)]
+    marks += [(m.start(), False) for m in _PEM_END.finditer(line)]
+    return max(marks)[1] if marks else before
+
+
 def _opens_key(line: str) -> bool:
-    """Whether ``line`` begins a private key whose body is on the lines after it: a
-    BEGIN marker with no END after it on the same line."""
-    begin = _PEM_BEGIN.search(line)
-    return begin is not None and not _PEM_END.search(line, begin.end())
+    """Whether ``line`` begins a private key whose body is on the lines after it."""
+    return _key_open_after(line, False)
 
 
 def scrub_text() -> int:
@@ -524,7 +533,7 @@ def scrub_text() -> int:
         if in_key:
             # A private key's body, after its redacted BEGIN line, to its END line.
             clean = _redact_preserving_prefix("+" + line)[1:]
-            in_key = not _PEM_END.search(line)
+            in_key = _key_open_after(line, True)
         else:
             clean = scrub_line("+" + line, False, in_hunk=True)[1:]
             # A key on one line -- JSON- or \n-escaped -- opens no block: its END is on
@@ -551,6 +560,7 @@ def redacts(text: str) -> bool:
     return False
 
 
+@functools.lru_cache(maxsize=1024)
 def _secret_field(key: str) -> bool:
     """Whether ``key`` names a credential: whether the scrubber would redact it
     assigned an ordinary-looking value. The value is not put in the probe -- one
@@ -563,7 +573,11 @@ def _secret_field(key: str) -> bool:
 
 def _holds_value(value: object) -> bool:
     """Whether a field's value could be a credential: a string or number with some
-    length to it, not an empty one or a flag."""
+    length to it, not an empty one or a flag -- or a list or object that is not empty,
+    under a key that names a credential ({"token": ["..."]}), whose leaves would lose
+    that key's context once walked into."""
+    if isinstance(value, (list, dict)):
+        return bool(value)
     if isinstance(value, bool) or not isinstance(value, (str, int, float)):
         return False
     return len(str(value)) >= 4
@@ -655,8 +669,7 @@ def main() -> None:
 
         if in_key:
             clean = _redact_preserving_prefix(line)
-            if _PEM_END.search(line):
-                in_key = False
+            in_key = _key_open_after(line, True)
         else:
             clean = scrub_line(line, in_safe, in_hunk=in_hunk, in_secret_file=in_secret)
             # Only a *redacted* BEGIN line opens a block. In a safe file the

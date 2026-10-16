@@ -166,7 +166,9 @@ _URL_USER_WITH_AT = (
     r"//" + _URL_USER_CHAR + r"{0,256}@" + r"(?:" + _URL_USER_CHAR + r"|@){0,256}:"
 )
 #: What follows that ":" is no password when it is a port -- digits, any number of them
-#: and none at all among them (an empty port is a valid one), then the path,
+#: and none at all among them (an empty port is a valid one), then the path -- or
+#: digits then a query or fragment that looks like one (a "=" before the "@"): bare,
+#: 2024#Sec9 is a password, and redis://h:6379?x=a@b a query,
 #: query or fragment (http://host:8080/@scope/pkg, redis://cache:6379/0?x=a@b) --
 #: whatever the scheme, as RFC 3986 reads it: a URL's userinfo ends at its first "/",
 #: so a postgres URL with "8080/abc" there has a host and a port, not a password.
@@ -175,7 +177,7 @@ _URL_USER_WITH_AT = (
 #: or a placeholder.
 _URL_PORT_FIELD = r"(?:" + _URL_FIELD + r"|\$\{[A-Za-z_]\w{0,64}:?[-=]\d{1,16}\})"
 _URL_NOT_A_PASSWORD = (
-    r"(?!\d{1,16}[/?#]|/)(?!"
+    r"(?!\d{0,16}/|\d{1,16}[?#][^@\s]*=)(?!"
     + _URL_PORT_FIELD
     + r"[/?#])(?!"
     + _URL_PLACEHOLDER
@@ -712,7 +714,11 @@ def main() -> None:
     _force_utf8(sys.stdin)
     _force_utf8(sys.stdout)
 
-    if sys.argv[1:] and sys.argv[1:] not in (["--text"], ["--json"]):
+    # --agent-repo: the diff is this agent's own, whose scrubber and tests hold the
+    # patterns as fixtures. Only then are those files passed as such: a host project's
+    # file of the same name is the host's, and its keys are keys.
+    agent_repo = sys.argv[1:] == ["--agent-repo"]
+    if sys.argv[1:] and not agent_repo and sys.argv[1:] not in (["--text"], ["--json"]):
         # Not diff mode by default: a line there without a +, - or space passes
         # unscrubbed, and a caller that asked for another mode would get exit 0.
         print(f"# scrub_diff.py: unknown arguments {sys.argv[1:]!r}", file=sys.stderr)
@@ -743,7 +749,9 @@ def main() -> None:
         # `re.compile(` -- which is to say any Python file defining a regex --
         # passed through unscrubbed.
         if line.startswith("diff "):
-            in_safe = line.startswith("diff --git ") and _is_safe_file(line)
+            in_safe = (
+                agent_repo and line.startswith("diff --git ") and _is_safe_file(line)
+            )
             # Every header form, unlike `in_safe`: a `diff --cc` section
             # naming the token file is still the token file. See
             # `_is_secret_file`.

@@ -59,9 +59,9 @@ import scrub_diff  # noqa: E402
 class TestScrubDiff:
     """Tests for scripts/scrub_diff.py."""
 
-    def _run_scrub(self, input_text: str) -> tuple[str, str, int]:
+    def _run_scrub(self, input_text: str, *args: str) -> tuple[str, str, int]:
         result = subprocess.run(
-            [sys.executable, str(SCRUB_SCRIPT)],
+            [sys.executable, str(SCRUB_SCRIPT), *args],
             input=input_text,
             capture_output=True,
             text=True,
@@ -221,7 +221,7 @@ class TestScrubDiff:
             "+-----BEGIN PRIVATE KEY-----\n"
             '+re.compile(r"x")\n'
         )
-        stdout, _, code = self._run_scrub(diff)
+        stdout, _, code = self._run_scrub(diff, "--agent-repo")
         assert "REDACTED" not in stdout
         assert code == 0
 
@@ -250,9 +250,12 @@ class TestScrubDiff:
             "+        diff = '+API_KEY = \"abc123\"\\n'\n"
             "+        diff = '+password = \"hunter2\"\\n'\n"
         )
-        stdout, _, code = self._run_scrub(diff)
+        stdout, _, code = self._run_scrub(diff, "--agent-repo")
         assert "REDACTED" not in stdout
         assert code == 0
+        # In a host project, a file of the same name is the host's: scrubbed as any.
+        stdout, _, code = self._run_scrub(diff)
+        assert "REDACTED" in stdout and code == 1
 
     def test_exit_code_nonzero_on_redaction(self) -> None:
         diff = '+secret_key = "abc123def456"\n'
@@ -2961,6 +2964,7 @@ class TestCredentialShapes:
             "postgres://u" + ":${DB_PASS:-hunter2}" + "@db",
             "postgres://u" + ":{x!y-9}" + "@db",
             "postgres://u" + ":#Ab9x!" + "@db",
+            "postgres://app" + ":2024#Sec9" + "@db/prod",
             "postgres://u" + ':ab"cd9' + "@db",
             "ya" + "29." + "a" * 30,
             "1/" + "/0" + "a" * 40,
@@ -2985,6 +2989,7 @@ class TestCredentialShapes:
              "url-upper-case-scheme", "url-query-chars-password", "url-dotted-user",
              "url-double-quoted-apostrophe", "url-shell-default-password",
              "url-braced-password", "url-hash-first-password", "url-dquote-password",
+             "url-digits-hash-password",
              "google-oauth-access", "google-oauth-refresh",
              "google-client-secret", "huggingface", "npm", "pypi", "google-api-key", "github-fine-grained", "github-app",
              "stripe-live", "slack", "slack-app", "slack-webhook", "discord-webhook",
@@ -3639,8 +3644,12 @@ class TestTamper:
         before = tamper.snapshot(tmp_path, round_dir)
         (round_dir / "raw-1.txt").write_text("")  # the round's own
         (round_dir / "evil.py").write_text("")
+        (round_dir / "raw-7.txt").write_text("")  # no slot 7
+        (round_dir / "stderr-2.txt").mkdir()  # a directory under an output's name
         touched = tamper.report(tmp_path, before, round_dir)
         assert any("evil.py" in line for line in touched)
+        assert any("raw-7.txt" in line for line in touched)
+        assert any("stderr-2.txt" in line for line in touched)
         assert not any("raw-1.txt" in line for line in touched)
 
     def test_a_write_through_a_link_to_a_startup_file_is_reported(
@@ -3715,6 +3724,37 @@ class TestAuditScrub:
         hit = json.loads(raw.read_text())["suspicious_patterns"][0]
         assert hit["text"] == scrub_diff.REDACTED_TEXT
 
+    def test_a_legacy_line_is_read_as_the_whole_line_it_is_part_of(
+        self, tmp_path: Path
+    ) -> None:
+        # An older preflight numbered at "\r" too: its line 3 was the half after the CR,
+        # the value without the name that makes it a credential.
+        from scripts.review_loop import diff
+
+        field = "pass" + "word"
+        (tmp_path / "a.py").write_bytes(f'x = 1\n{field} = "a\rhunter2"\n'.encode())
+        raw = tmp_path / "raw.json"
+        quote = {"file": "a.py", "line": 3, "text": 'hunter2"'}
+        raw.write_text(json.dumps({"suspicious_patterns": [quote]}))
+        diff._requote_from_source(raw, tmp_path)
+        hit = json.loads(raw.read_text())["suspicious_patterns"][0]
+        assert hit["text"] == scrub_diff.REDACTED_TEXT
+
+    def test_a_preflight_past_its_deadline_is_killed_whole(
+        self, tmp_path: Path
+    ) -> None:
+        # Killing only the preflight left the test suite it started running on.
+        from scripts.review_loop import diff
+
+        marker = tmp_path / "child"
+        cmd = ["sh", "-c", f"sleep 60 & echo $! > {marker}; sleep 60"]
+        with pytest.raises(RuntimeError, match="did not finish"):
+            diff._run_tree(cmd, tmp_path, 1)
+        child = int(marker.read_text())
+        time.sleep(0.3)
+        stat = Path(f"/proc/{child}/stat")
+        assert not stat.exists() or stat.read_text().split()[2] == "Z"
+
     def test_no_raw_audit_is_left_in_the_round(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -3722,15 +3762,13 @@ class TestAuditScrub:
         # which is kept.
         from scripts.review_loop import diff
 
-        real_run = diff.run
+        def preflight(
+            cmd: list[str], cwd: Path, timeout: float
+        ) -> subprocess.CompletedProcess[str]:
+            Path(cmd[cmd.index("--output") + 1]).write_text("not json")
+            return subprocess.CompletedProcess(cmd, 1, "", "")
 
-        def preflight(cmd: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
-            if "--output" in cmd:
-                Path(cmd[cmd.index("--output") + 1]).write_text("not json")
-                return subprocess.CompletedProcess(cmd, 1, "", "")
-            return real_run(cmd, **kw)
-
-        monkeypatch.setattr(diff, "run", preflight)
+        monkeypatch.setattr(diff, "_run_tree", preflight)
         with pytest.raises(RuntimeError):
             diff.run_preflight(tmp_path, tmp_path)
         assert list(tmp_path.iterdir()) == []

@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import bisect
+import contextlib
 import json
+import os
+import signal
 import subprocess
 import sys
 from typing import TYPE_CHECKING
@@ -103,7 +107,9 @@ def _git_diff(cmd: list[str], repo: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
-def collect_diff(round_dir: Path, repo: Path, base: str = DEFAULT_BASE) -> tuple[Path, int]:
+def collect_diff(
+    round_dir: Path, repo: Path, base: str = DEFAULT_BASE
+) -> tuple[Path, int]:
     """Collect the scrubbed diff between ``base`` and the working tree.
 
     The working tree includes files git does not track yet (``_untracked``):
@@ -125,7 +131,9 @@ def collect_diff(round_dir: Path, repo: Path, base: str = DEFAULT_BASE) -> tuple
             was reviewed that never was.
     """
     if base != DEFAULT_BASE:
-        named = run(["git", "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"], cwd=repo)
+        named = run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"], cwd=repo
+        )
         if named.returncode != 0:
             msg = f"--base {base!r} does not name a commit in this repository"
             raise RuntimeError(msg)
@@ -164,7 +172,12 @@ def collect_diff(round_dir: Path, repo: Path, base: str = DEFAULT_BASE) -> tuple
     # raised -- and this repository's own sources are full of en dashes.
     with open(diff_path, "w", encoding="utf-8", errors="replace") as out_f:
         scrubber = subprocess.Popen(
-            [sys.executable, str(SCRIPTS_DIR / "scrub_diff.py")],
+            [
+                sys.executable,
+                str(SCRIPTS_DIR / "scrub_diff.py"),
+                # Its own fixtures passed as such in this agent's repository only.
+                *(["--agent-repo"] if is_agent_repo(repo) else []),
+            ],
             stdin=subprocess.PIPE,
             stdout=out_f,
             stderr=subprocess.PIPE,
@@ -255,6 +268,38 @@ def _preflight_script(repo: Path) -> Path:
 _PREFLIGHT_TIMEOUT = 1800
 
 
+def _run_tree(
+    cmd: list[str], cwd: Path, timeout: float
+) -> subprocess.CompletedProcess[str]:
+    """Run ``cmd`` in a session of its own, and at ``timeout`` kill all of it: the
+    preflight runs the project's test suite, and killing the preflight alone left
+    the tests it started running on."""
+    proc = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        start_new_session=True,
+    )
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.communicate()
+        raise RuntimeError(f"preflight did not finish in {timeout:.0f}s") from exc
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.communicate()
+        raise
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
 def run_preflight(round_dir: Path, repo: Path) -> Path:
     """Run preflight audit, return path to audit JSON.
 
@@ -270,16 +315,13 @@ def run_preflight(round_dir: Path, repo: Path) -> Path:
     # directory is kept, and a raw audit there would be what the scrub keeps out.
     raw = round_dir / ".audit.raw.json"
     try:
-        try:
-            result = run(
-                [sys.executable, str(_preflight_script(repo)), "--output", str(raw)],
-                cwd=repo,
-                # Generous -- it runs the project's tests for coverage -- but not none:
-                # the branch's own tests decide how long they take.
-                timeout=_PREFLIGHT_TIMEOUT,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(f"preflight did not finish in {exc.timeout}s") from exc
+        result = _run_tree(
+            [sys.executable, str(_preflight_script(repo)), "--output", str(raw)],
+            repo,
+            # Generous -- it runs the project's tests for coverage -- but not none: the
+            # branch's own tests decide how long they take.
+            _PREFLIGHT_TIMEOUT,
+        )
         if not raw.exists():
             raise RuntimeError(
                 f"preflight failed (no audit JSON, exit {result.returncode}): "
@@ -330,10 +372,7 @@ def _requote_from_source(raw: Path, repo: Path) -> None:
             except OSError:
                 read[path] = ([], [])  # unreadable: no line, so its quotes are redacted
             else:
-                # By both numberings: this checkout's ("\n" alone, as git's) and an older
-                # preflight's (str.splitlines, which also breaks at "\r", form feeds and
-                # Unicode's separators). Not knowing which wrote it, either one redacts.
-                read[path] = (text.split("\n"), text.splitlines())
+                read[path] = _both_numberings(text)
         candidates = [lines[number - 1] for lines in read[path] if number <= len(lines)]
         # A line that is not there -- the file unreadable, or shorter -- cannot be
         # shown clean either.
@@ -342,6 +381,24 @@ def _requote_from_source(raw: Path, repo: Path) -> None:
             changed = True
     if changed:
         raw.write_text(json.dumps(audit), encoding="utf-8")
+
+
+def _both_numberings(text: str) -> tuple[list[str], list[str]]:
+    """``text``'s lines by this checkout's numbering ("\n" alone, as git's) and by an
+    older preflight's (str.splitlines, which also breaks at "\r", form feeds and
+    Unicode's separators) -- each of the latter widened to the whole physical line it
+    is part of: half of one split at a "\r" held a credential's name or value, not
+    both, and looked clean. Not knowing which wrote the audit, either one redacts."""
+    physical = text.split("\n")
+    starts = [0]
+    for line in physical[:-1]:
+        starts.append(starts[-1] + len(line) + 1)
+    legacy = []
+    offset = 0
+    for piece in text.splitlines(keepends=True):
+        legacy.append(physical[bisect.bisect_right(starts, offset) - 1])
+        offset += len(piece)
+    return physical, legacy
 
 
 def _scrub_audit(raw: Path, audit_path: Path) -> None:

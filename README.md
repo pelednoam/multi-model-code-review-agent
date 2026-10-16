@@ -160,7 +160,7 @@ When opted in, the precedence flips for Anthropic reviewers:
 |---|---|---|---|
 | Security (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
 | Correctness | Hermes Haiku (Bedrock) | Codex CLI GPT-5.5, only with `REVIEW_USE_CODEX=1` | Claude CLI haiku (free) |
-| Readability | Hermes Sonnet (Bedrock) | agy only with `REVIEW_USE_AGY=1`, else Gemini CLI only with `REVIEW_USE_GEMINI=1` (a project that pinned Bedrock never falls to Google by default) | Claude CLI sonnet (free) |
+| Readability | Hermes Sonnet (Bedrock) | agy only with `REVIEW_USE_AGY=1` and only where Hermes is not installed (with Hermes installed, agy is not detected at all), else Gemini CLI only with `REVIEW_USE_GEMINI=1` (a project that pinned Bedrock never falls to Google by default) | Claude CLI sonnet (free) |
 | Spec-contract (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
 
 **With all CLIs installed** (claude + codex + agy, or gemini with `REVIEW_USE_GEMINI=1`): the full review
@@ -387,7 +387,9 @@ shells' startup files. That does not make fix mode safe on a branch you
 would not run: the findings it applies come from reviewing that branch,
 the gate then runs the project's tests -- which it may have just
 edited -- and a commit runs the project's hooks; with `--auto-commit` the
-loop pushes whatever the agent wrote (it may not touch CI definitions). Run
+loop pushes whatever the agent wrote. It may not edit CI workflow files,
+but CI runs project files it can edit (a Makefile, tox.ini, package.json,
+conftest.py), so a pushed fix can run in CI with CI's secrets. Run
 fix mode, like the tests, only on code you trust; `--report-only` runs no
 merge agent.
 
@@ -802,7 +804,7 @@ have detected it via fingerprint matching and exited with code 2
 | Backend | Data path | Isolation | Cost |
 |---|---|---|---|
 | Hermes+Bedrock | Your AWS account | Data: best (stays in your AWS account). Tools: the file toolset with `--yolo`, which can write; only the convergence loop's tamper check reports writes (full mode does not check) | Bedrock pricing |
-| Claude CLI | Anthropic infrastructure | Good (`--allowedTools` + `--disallowedTools`) | Claude subscription |
+| Claude CLI | Anthropic infrastructure | Writes: good (`--tools Read,Grep,Glob` + `--disallowedTools`; no MCP, no project settings). Reads: not confined to the repository -- well-known credential paths are denied (`claude_tools.SECRET_READS`), not every file | Claude subscription |
 | Codex CLI | OpenAI infrastructure | Writes: good (`-s read-only`, canary-verified). Reads: not confined -- it can read your home directory, credentials included | ChatGPT subscription |
 | Gemini CLI | Google infrastructure | Weak: read-only by policy (`--approval-mode plan`), not sandboxed; it can read your home directory | AI Studio free tier |
 | Antigravity CLI | Google infrastructure | Good (`bwrap` read-only filesystem; home, `/tmp`, `/run` and env hidden; verified) | Google AI plan |

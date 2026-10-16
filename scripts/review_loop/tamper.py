@@ -39,10 +39,7 @@ import re
 import subprocess
 import sys
 import time
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from pathlib import Path
 
 
 def snapshot(repo: Path, exclude: Path | None = None) -> str:
@@ -117,8 +114,15 @@ def snapshot(repo: Path, exclude: Path | None = None) -> str:
                 continue
             startup = home / pattern[2:]
             lines.append(f"home {startup} {_fingerprint(startup, False)}")
-        for extra in (".ssh/authorized_keys", ".claude/settings.json"):
-            lines.append(f"home {home / extra} {_fingerprint(home / extra, False)}")
+        # And what the loop's own git and ssh read next: their configs, which can name a
+        # command to run (core.fsmonitor, a credential helper, ProxyCommand).
+        xdg = Path(os.environ.get("XDG_CONFIG_HOME") or home / ".config")
+        for extra in (
+            home / ".ssh" / "authorized_keys", home / ".ssh" / "config",
+            home / ".claude" / "settings.json", xdg / "git" / "config",
+            xdg / "git" / "attributes",
+        ):  # fmt: skip
+            lines.append(f"home {extra} {_fingerprint(extra, False)}")
         # And the user's own bin directories, early on PATH: a program planted there
         # under git's name, or python's, is what the loop runs next.
         for bin_dir in (".local/bin", "bin", ".cargo/bin"):
@@ -143,7 +147,10 @@ def _fingerprint(path: Path, cheap: bool) -> str:
         if path.is_symlink():
             # And what it leads to: a write through an existing link to a startup file
             # or a hook changes the target, and the link alone looked the same.
-            target = path.resolve()
+            try:
+                target = path.resolve()
+            except RuntimeError:  # a loop of links, which raised and ended the review
+                return f"link:{os.readlink(path)}:loop"
             through = _fingerprint(target, cheap) if target.is_file() else "dangling"
             return "link:" + os.readlink(path) + ":" + through
         if path.is_dir():
@@ -174,7 +181,7 @@ def changed(before: str, after: str) -> list[str]:
 #: outputs published once they stop (``reviewers._OUTPUTS``).
 _ROUND_FILES = re.compile(
     r"(?:diff\.patch|audit\.json|\.audit\.raw\.json"
-    r"|(?:prompt|backend|raw|stderr|codex-out)-\d\.txt)"
+    r"|(?:prompt|backend|raw|stderr|codex-out)-[1-4]\.txt)"
 )
 
 
@@ -183,11 +190,17 @@ def _strangers(round_dir: Path) -> list[str]:
     tree's snapshot as a whole, it was a place a reviewer could plant a file unseen,
     for --auto-commit's `git add -A` to commit where the directory is in the tree."""
     try:
-        names = sorted(entry.name for entry in round_dir.iterdir())
+        entries = sorted(round_dir.iterdir())
     except OSError:
         return []
+    # A regular file under one of those names, for a slot there is: a directory or a
+    # link planted under one is no output of the round's.
     return [
-        f"?? {round_dir / name}" for name in names if not _ROUND_FILES.fullmatch(name)
+        f"?? {entry}"
+        for entry in entries
+        if not _ROUND_FILES.fullmatch(entry.name)
+        or entry.is_symlink()
+        or not entry.is_file()
     ]
 
 

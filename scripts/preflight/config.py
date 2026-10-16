@@ -58,13 +58,13 @@ def _overrides() -> dict[str, object]:
     return loaded
 
 
-def _complain(problem: str) -> None:
+def _complain(
+    problem: str,
+    outcome: str = "using the agent's defaults, which probably do not cover this "
+    "project's layout",
+) -> None:
     """Say on stderr that the host config is being ignored, and why."""
-    print(
-        f"WARNING: {HOST_CONFIG.name} {problem}; using the agent's defaults, "
-        "which probably do not cover this project's layout.",
-        file=sys.stderr,
-    )
+    print(f"WARNING: {HOST_CONFIG.name} {problem}; {outcome}.", file=sys.stderr)
 
 
 def _dirs(name: str, fallback: list[str]) -> list[str]:
@@ -83,6 +83,10 @@ def _dirs(name: str, fallback: list[str]) -> list[str]:
         _complain(f"has no usable entries in {name!r}")
         return fallback
     return kept
+
+
+#: For a per-entry complaint, where the rest of the setting stands.
+_SKIPPED = "that entry is skipped; the others are kept"
 
 
 def _manifests(name: str) -> dict[str, str]:
@@ -104,10 +108,11 @@ def _manifests(name: str) -> dict[str, str]:
         try:
             target = (root / value).resolve()
         except (OSError, RuntimeError, ValueError):  # a NUL, a link loop
-            _complain(f"has an unusable {name!r} path: {value!r}")
+            _complain(f"has an unusable {name!r} path: {value!r}", _SKIPPED)
             continue
         if Path(value).is_absolute() or not target.is_relative_to(root):
-            _complain(f"has a {name!r} entry outside the repository: {value!r}")
+            _complain(f"has a {name!r} entry outside the repository: {value!r}",
+                      _SKIPPED)  # fmt: skip
             continue
         kept[key] = value
     return kept
@@ -124,12 +129,11 @@ SIGNED_MANIFESTS: dict[str, str] = _manifests("signed_manifests")
 # os.sep-aware prefix matching.
 ARTIFACT_DIRS: list[str] = _dirs("artifact_dirs", ["data/", "docs/"])
 
-# Directories that hold source code in this project. Drives the
-# coverage gap detector and the test/impl alignment check. Override
-# this for monorepos or non-standard layouts (e.g. ["backend/",
-# "frontend/src/", "lib/"]). The defaults match the conventional
-# "src layout" plus a research workspace; for a Django/FastAPI/Next
-# project you almost certainly need to override.
+# Directories that hold source code in this project. Drives the coverage gap
+# detector and the test/impl alignment check. Set "source_dirs" in
+# review-config.json for monorepos or non-src layouts (e.g. ["backend/",
+# "frontend/src/", "lib/"]); this file is overwritten by install.sh. The defaults
+# match the conventional "src layout" plus a research workspace.
 SOURCE_DIRS: list[str] = _dirs("source_dirs", ["src/", "research/"])
 
 # Directories that hold tests. The coverage gate runs pytest on these (those that exist

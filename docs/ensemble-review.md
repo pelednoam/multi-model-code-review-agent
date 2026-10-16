@@ -146,7 +146,7 @@ Bedrock opt-in precedence (PREFER_HERMES=true), used for regulated codebases tha
 |---|---|---|---|
 | Security (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
 | Correctness | Hermes Haiku (Bedrock) | Codex CLI GPT-5.5, only with `REVIEW_USE_CODEX=1` | Claude CLI haiku (free) |
-| Readability | Hermes Sonnet (Bedrock) | agy only with `REVIEW_USE_AGY=1`, else Gemini CLI only with `REVIEW_USE_GEMINI=1` (a project that pinned Bedrock never falls to Google by default) | Claude CLI sonnet (free) |
+| Readability | Hermes Sonnet (Bedrock) | agy only with `REVIEW_USE_AGY=1` and only where Hermes is not installed (with Hermes installed, agy is not detected at all), else Gemini CLI only with `REVIEW_USE_GEMINI=1` (a project that pinned Bedrock never falls to Google by default) | Claude CLI sonnet (free) |
 | Spec-contract (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
 
 **Why local CLIs first by default**: free (uses existing subscriptions), reliable auth (each CLI manages its own OAuth), and for most projects (open-source, non-regulated) there's no real value to paid Bedrock routing.
@@ -233,7 +233,7 @@ git diff --cached --name-only > "$REVIEW_TMP/cached.txt"
 git ls-files --others --exclude-standard > "$REVIEW_TMP/untracked.txt"
 ```
 
-If the scrubber exits non-zero, **STOP**. Secrets must be removed from the branch and rotated before re-running.
+If the scrubber exits non-zero, **STOP**. Secrets must be removed from the branch and rotated before re-running. (Reviewing this agent's own repository, pass `--agent-repo` to the scrubber: its scrubber and tests hold credential patterns as fixtures, which the flag passes as such -- in a host project, a file of the same name is the host's and is scrubbed.)
 
 If the diff is empty, fall back to `git diff --no-color --no-ext-diff --no-textconv HEAD~1 | python3 scripts/scrub_diff.py`. If still empty, ask what to review.
 
@@ -1518,7 +1518,7 @@ concluding anything from a probe, and never suppress its output.
 | Backend | Data path | Isolation | Cost |
 |---|---|---|---|
 | Hermes+Bedrock | Your AWS account | Data: best (stays in your AWS account). Tools: `-t file --yolo`, which can write; only the convergence loop's tamper check reports writes (full mode does not check) | Bedrock API pricing |
-| Claude CLI | Anthropic infrastructure | Good (`--allowedTools` + `--disallowedTools`) | Claude subscription |
+| Claude CLI | Anthropic infrastructure | Writes: good (`--tools Read,Grep,Glob` + `--disallowedTools`; no MCP, no project settings). Reads: not confined to the repository -- well-known credential paths are denied (`claude_tools.SECRET_READS`), not every file | Claude subscription |
 | Codex CLI | OpenAI infrastructure | Writes: good (`-s read-only`, canary-verified). Reads: not confined -- it can read your home directory, credentials included | ChatGPT subscription |
 | Gemini CLI | Google infrastructure | Weak: read-only by policy (`--approval-mode plan`), not sandboxed; it can read your home directory | Google AI Studio (free tier) |
 | Antigravity CLI (agy) | Google infrastructure | Good (bwrap: filesystem read-only; home, /tmp, /run and the environment hidden; verified at launch) | Google AI plan |

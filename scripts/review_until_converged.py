@@ -291,7 +291,8 @@ def main() -> int:
             "run the merge agent and does not touch the working tree. Exits "
             "10 when there are blocking findings (whether or not every reviewer "
             "answered), 0 when every reviewer answered and none is blocking, 11 "
-            "when nothing is blocking but one produced nothing, 7 when none did."
+            "when nothing is blocking but one produced nothing, 7 when none did; 8 "
+            "or 9 when the diff could not be scrubbed safely, as without the flag."
         ),
     )
     parser.add_argument(

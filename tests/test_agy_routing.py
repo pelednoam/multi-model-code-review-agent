@@ -302,7 +302,7 @@ class TestAgyCommand(AgyCase):
         found = {**self.BACKENDS, "codex": False}
         choice = _choose_command(2, tmp_path / "p.txt", tmp_path, found)
         assert choice is not None and choice[0][0] == "claude"
-        assert choice[1] == "claude-haiku-4.5"
+        assert choice[1] == "claude-haiku"  # by its alias, as the runner names it
 
     @pytest.mark.parametrize(
         ("opted_in", "first"), [(False, "claude"), (True, "codex")]

@@ -382,8 +382,10 @@ It has no Bash, and it may not write the repository's git directories
 shells' startup files. That does not make fix mode safe on a branch you
 would not run: the findings it applies come from reviewing that branch,
 the gate then runs the project's tests -- which it may have just
-edited -- and a commit runs the project's hooks. Run fix mode, like the
-tests, only on code you trust; `--report-only` runs no merge agent.
+edited -- and a commit runs the project's hooks; with `--auto-commit` the
+loop pushes whatever the agent wrote (it may not touch CI definitions). Run
+fix mode, like the tests, only on code you trust; `--report-only` runs no
+merge agent.
 
 ### Invoking the loop
 

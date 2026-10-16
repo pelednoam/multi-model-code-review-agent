@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import signal
 import subprocess
@@ -15,6 +16,7 @@ from agy_case import AgyCase
 from helpers import REPO_ROOT
 
 from scripts.review_loop import reviewers
+from scripts.review_loop.results import extract_results
 
 
 class TestReviewerProcesses(AgyCase):
@@ -307,6 +309,19 @@ class TestReviewerProcesses(AgyCase):
         (out / "raw-1.txt").write_text("review")
         reviewers._publish_outputs(out, round_dir)
         assert (round_dir / "raw-1.txt").read_text() == "review"
+
+    def test_a_directory_planted_at_a_result_costs_only_its_slot(
+        self, tmp_path: Path
+    ) -> None:
+        # Its unlink raised IsADirectoryError, and the round ended for every reviewer.
+        (tmp_path / "result-1.json" / "x").mkdir(parents=True)
+        review = {
+            "reviewer": "correctness", "model": "m", "findings": [],
+            "overall_assessment": "a",
+        }  # fmt: skip
+        (tmp_path / "raw-2.txt").write_text(json.dumps(review))
+        results = extract_results(tmp_path, {1: "claude", 2: "hermes"})
+        assert results[1] is not None and not (tmp_path / "result-1.json").exists()
 
     @pytest.mark.skipif(sys.platform != "linux", reason="reads /proc/<pid>/status")
     def test_a_signal_while_a_reviewer_starts_still_stops_it(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import tempfile
 import uuid
@@ -45,6 +46,9 @@ _HOME_DOT_DENIED = ("~/.*", "~/.*/**")
 _MERGE_REPO_DENIED = (
     ".claude", ".vscode", ".idea", ".venv", "venv", ".direnv", ".husky", ".githooks",
     ".pre-commit-config.yaml", ".mcp.json", ".envrc",
+    # CI definitions: --auto-commit pushes what the agent writes, and CI runs them.
+    ".github/workflows", ".gitlab-ci.yml", ".circleci", ".buildkite",
+    "azure-pipelines.yml", "Jenkinsfile", ".travis.yml",
 )  # fmt: skip
 
 
@@ -65,6 +69,30 @@ def _git_dirs(repo: Path) -> list[Path]:
     return list(dict.fromkeys(dirs))
 
 
+def _homes() -> set[Path]:
+    """$HOME and the account's own home, which differ where HOME is pointed elsewhere."""
+    homes = {Path.home().resolve()}
+    try:
+        import pwd
+
+        homes.add(Path(pwd.getpwuid(os.getuid()).pw_dir).resolve())
+    except (ImportError, KeyError):
+        pass
+    return homes
+
+
+def _in_home_dot_dir(repo: Path) -> bool:
+    """Whether ``repo`` is under a dot-directory of either home (~/.worktrees/x)."""
+    for home in _homes():
+        try:
+            inside = repo.resolve().relative_to(home)
+        except ValueError:
+            continue
+        if inside.parts and inside.parts[0].startswith("."):
+            return True
+    return False
+
+
 def _merge_denied(repo: Path) -> list[str]:
     """The merge agent's --disallowedTools: the reviewers' list for its tools, and
     writes to the repository's git directories, ``_MERGE_REPO_DENIED`` and
@@ -73,21 +101,19 @@ def _merge_denied(repo: Path) -> list[str]:
     # This agent's own checkout, when it is not the one being fixed: the loop runs its
     # code, and a trusted checkout is the point of running from one.
     others = [] if REPO_ROOT.resolve() == repo.resolve() else [REPO_ROOT.resolve()]
-    for git in [
+    protected = [
         *_git_dirs(repo),
         *(repo.resolve() / name for name in _MERGE_REPO_DENIED),
         *others,
-    ]:
-        root = str(git).rstrip("/")
+    ]
+    for path in protected:
+        root = str(path).rstrip("/")
         if any(c.isspace() for c in root):
             # --disallowedTools takes its rules space-separated: this one would be two.
             print(f"  WARNING: the merge agent is not denied {root}: a space in it")
         else:
             paths += [f"/{root}", f"/{root}/**"]
-    home = Path.home().resolve()
-    in_dot_dir = repo.resolve().is_relative_to(home) and any(
-        part.startswith(".") for part in repo.resolve().relative_to(home).parts[:1]
-    )
+    in_dot_dir = _in_home_dot_dir(repo)
     denied = (
         _MERGE_WRITE_DENIED if in_dot_dir else (*_MERGE_WRITE_DENIED, *_HOME_DOT_DENIED)
     )

@@ -451,8 +451,11 @@ def _choose_command(
             "--skip-trust",
         ], _gemini_model()
     if backends["claude"]:
-        # Slot 2's lens names codex's model; on claude it is haiku, and says so.
-        return _claude_cmd(slot), ("claude-haiku-4.5" if slot == 2 else None)
+        # Named by its alias, as the full-mode runner names it: opus, sonnet and haiku
+        # are aliases, and the version one runs is claude's to say. Slot 2's lens names
+        # codex's model, which on claude it is not.
+        alias = "opus" if slot in (1, 4) else "sonnet" if slot == 3 else "haiku"
+        return _claude_cmd(slot), f"claude-{alias}"
 
     # Last-resort Hermes paths if no local CLI matched.
     if slot in (1, 4) and backends["hermes"]:

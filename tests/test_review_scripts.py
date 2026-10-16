@@ -1399,6 +1399,11 @@ class TestMergeAgentPrompt:
         hidden = tmp_path / ".worktrees" / "project"
         hidden.mkdir(parents=True)
         assert "Write(~/.*/**)" not in merge_agent._merge_denied(hidden)
+        # Nor where HOME points elsewhere and the repository is in the account's.
+        monkeypatch.setattr(merge_agent, "_homes", lambda: {Path("/x"), tmp_path})
+        assert "Write(~/.*/**)" not in merge_agent._merge_denied(hidden)
+        monkeypatch.undo()
+        monkeypatch.setenv("HOME", str(tmp_path))
         assert "Write(~/.bashrc)" in merge_agent._merge_denied(hidden)
         plain = tmp_path / "code" / "project"
         plain.mkdir(parents=True)
@@ -1407,6 +1412,8 @@ class TestMergeAgentPrompt:
         # Every repository's git directory, and this agent's own checkout.
         assert "Write(//**/.git/**)" in denied
         assert f"Write(/{REPO_ROOT.resolve()}/**)" in denied
+        # CI definitions, which --auto-commit would push and CI would run.
+        assert f"Write(/{plain.resolve()}/.github/workflows/**)" in denied
 
     def test_a_hooks_path_set_elsewhere_is_denied(self, tmp_path: Path) -> None:
         # core.hooksPath puts the hooks git runs anywhere: in the repository, a
@@ -2897,6 +2904,7 @@ class TestCredentialShapes:
             "postgres://app.user" + ":hunter2" + "@db",
             '"postgresql://alice' + ":K7a');s9" + '@db/prod"',
             "postgres://u" + ":${DB_PASS:-hunter2}" + "@db",
+            "postgres://u" + ":{x!y-9}" + "@db",
             "ya" + "29." + "a" * 30,
             "1/" + "/0" + "a" * 40,
             "GOC" + "SPX-" + "a" * 28,
@@ -2919,6 +2927,7 @@ class TestCredentialShapes:
              "url-placeholder-word-prefix",
              "url-upper-case-scheme", "url-query-chars-password", "url-dotted-user",
              "url-double-quoted-apostrophe", "url-shell-default-password",
+             "url-braced-password",
              "google-oauth-access", "google-oauth-refresh",
              "google-client-secret", "huggingface", "npm", "pypi", "google-api-key", "github-fine-grained", "github-app",
              "stripe-live", "slack", "slack-app", "slack-webhook", "discord-webhook",
@@ -2954,9 +2963,11 @@ class TestCredentialShapes:
         url = "postgresql://alice:" + "K7a');s9" + "@db/prod"
         line = '+DSN = "' + url + '"\n'
         assert scrub_diff.scrub_line(line, False) != line
-        # And in double quotes, a port and a path with an @ are still no password.
-        kept = '+URL = "http://host:8080/@scope/pkg"\n'
-        assert scrub_diff.scrub_line(kept, False) == kept
+        # And in double quotes, a port and a path with an @ are still no password, nor
+        # an scp-style git address with a revision.
+        for url in ("http://host:8080/@scope/pkg", "git+ssh://git@h.com:org/r.git@v1"):
+            kept = f'+URL = "{url}"\n'
+            assert scrub_diff.scrub_line(kept, False) == kept
 
     @pytest.mark.parametrize("piece", [":{", ":${A", ":<", ":%(", ":*", ":c", "@:"])
     def test_a_line_of_unfinished_placeholders_is_scanned_quickly(
@@ -3000,6 +3011,9 @@ class TestCredentialShapes:
             "http://localhost:${PORT}/@scope/pkg",
             "http://localhost:/@scope/pkg",
             "http://localhost:000080/@scope/pkg",
+            "git+ssh://git@github.com:org/repo.git@v1.0",
+            "postgres://u:{{password}}@h",
+            "postgres://u:{0}@h",
             "['http://localhost:8080','ops@example.com']",
             "redis://h:6379/0?x=a@b",
             "redis://localhost:6379/@x",
@@ -3422,6 +3436,16 @@ class TestScrubJson:
         code, out = self._scrub({field: "hunter2", "user": "bob", "port": 5432})
         assert code == 1
         assert out == {field: scrub_diff.REDACTED_TEXT, "user": "bob", "port": 5432}
+
+    @pytest.mark.parametrize("value", ['hun"ter2', "hun\nter2", "hun\\ter2"])
+    def test_a_value_that_breaks_a_quoted_line_is_still_redacted(
+        self, value: str
+    ) -> None:
+        # Put in a probe line, a quote or a newline in the value changed what the line
+        # said, and the password passed.
+        field = "pass" + "word"
+        code, out = self._scrub({field: value, "port": 5432})
+        assert code == 1 and out == {field: scrub_diff.REDACTED_TEXT, "port": 5432}
 
     def test_a_key_shaped_like_a_credential_is_redacted(self) -> None:
         key = "gh" + "p_" + "a" * 36

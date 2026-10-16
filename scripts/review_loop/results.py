@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import unicodedata
 from typing import TYPE_CHECKING, Any
 
@@ -226,7 +227,18 @@ def extract_results(
     """
     results: list[dict[str, Any] | None] = []
     for i in range(1, 5):
-        (round_dir / f"result-{i}.json").unlink(missing_ok=True)
+        stale = round_dir / f"result-{i}.json"
+        try:
+            # A directory planted under the name, too: unlink raised, and the round
+            # ended for every reviewer, not this one.
+            if stale.is_dir() and not stale.is_symlink():
+                shutil.rmtree(stale)
+            else:
+                stale.unlink(missing_ok=True)
+        except OSError as exc:
+            print(f"  R{i}: cannot clear {stale.name} ({exc}); its result is not read")
+            results.append(None)
+            continue
         backend = answered_by.get(i)
         found = None
         if backend == "codex":
@@ -248,4 +260,3 @@ def missing_reviewers(results: list[dict[str, Any] | None]) -> list[int]:
     unknown, so "no blocking findings" among the others is not convergence.
     """
     return [slot for slot, one in enumerate(results, start=1) if one is None]
-

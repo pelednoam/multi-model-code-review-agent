@@ -89,7 +89,9 @@ SECRET_READS = (
     "~/.config/**/credentials*", "~/.pgpass", "~/.my.cnf", "~/.vault-token",
     "~/.cargo/credentials*", "~/.terraform.d/**", "~/.s3cfg", "~/.boto", "~/.oci/**",
     "~/.config/hub", "~/.cache/huggingface/**", "~/.huggingface/**", "~/.kaggle/**",
-    "~/.config/rclone/**", "~/.config/op/**",
+    "~/.config/rclone/**", "~/.config/op/**", "~/.config/containers/**",
+    "//run/user/*/containers/**", "~/.config/doctl/**", "~/.config/hcloud/**",
+    "~/.config/heroku/**", "//**/*.tfstate", "//**/*.tfstate.backup", "//**/*.tfvars",
     # Browsers' and editors' profiles: cookies, saved sign-ins, extension tokens.
     "~/.config/google-chrome/**", "~/.config/chromium/**", "~/.mozilla/**",
     "~/.config/Code/**",

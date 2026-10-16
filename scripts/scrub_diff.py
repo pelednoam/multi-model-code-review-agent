@@ -9,11 +9,23 @@ Lines matching credential patterns are replaced with a redaction marker.
 The diff structure (headers, hunks) is preserved so reviewers can still
 see file/line context.
 
+Modes:
+
+* (no argument) -- stdin is a unified diff.
+* ``--text`` -- stdin is plain text, every line content: full mode's context
+  bundle.
+* ``--json`` -- stdin is a JSON document, whose keys and strings are scrubbed
+  and which is written back as JSON: the preflight audit.
+
+Any other argument is exit 2.
+
 Exit codes:
 
 * ``0`` -- nothing redacted, the diff is clean.
-* ``1`` -- at least one line was redacted. The review pipeline should block
-  until the secrets are removed from the branch and rotated.
+* ``1`` -- at least one line was redacted. For a diff, the review pipeline
+  should block until the secrets are removed from the branch and rotated; for
+  ``--text`` and ``--json``, the redacted output is safe to send and the
+  review goes on.
 * ``2`` -- the scrubber itself failed. The output on stdout is truncated and
   must not be treated as a scrubbed diff. This is deliberately distinct from
   ``1``: a crash halfway through writing ``diff.patch`` leaves a plausible
@@ -107,13 +119,14 @@ KEYWORD_PATTERNS = [
     re.compile(r"(?i)client[_-]?secret\s*[:=]\s*" + _SECRET_VALUE),
 ]
 
-#: A URL password that is no password: a template's field -- {password},
-#: ${DB_PASS}, %(pw)s, <password>. A port can be a field too (localhost:{port}/...),
+#: A URL password that is no password: a template's field, named as a template names
+#: one -- {password}, {{password}}, {0}, ${DB_PASS}, %(pw)s, <password> -- not any text
+#: in braces, which a password can be. A port can be a field too (localhost:{port}/...),
 #: so before a "/" it is no password either. Each part bounded, as the pattern's are,
 #: so that a line of unfinished ones is scanned in linear time.
 _URL_FIELD = (
-    r"(?:\{[^}@\s]{0,64}\}|\$\{[A-Za-z_]\w{0,64}\}|\$[A-Z_][A-Z0-9_]{0,64}"
-    + r"|%\([^)@\s]{0,64}\)s|%[sd]|<[^>@\s]{0,64}>)"
+    r"(?:\{\{?[A-Za-z_][\w.]{0,63}\}?\}|\{\d{0,3}\}|\$\{[A-Za-z_]\w{0,64}\}"
+    + r"|\$[A-Z_][A-Z0-9_]{0,64}|%\([A-Za-z_]\w{0,63}\)s|%[sd]|<[A-Za-z_][\w.-]{0,63}>)"
 )
 
 #: Or a placeholder word or mask, but only as the whole password: before a "/" it is
@@ -137,6 +150,13 @@ _URL_SCHEME = r"(?<![a-zA-Z0-9+.-])" + _SCHEME_NAME
 #: Inside double quotes, where a ' ends nothing, any ' (``_URL_USER_DOUBLE_QUOTED``).
 _URL_USER = r"//(?:\\[^\s]|[^\s/:\"?#\[\]'\\]|'(?![,\])};:+\s])){0,256}:"
 _URL_USER_DOUBLE_QUOTED = r"//[^\s/:\"?#\[\]]{0,256}:"
+_URL_USER_DOUBLE_QUOTED_NO_AT = r"//[^\s/:\"?#\[\]@]{0,256}:"
+#: The user without an @ in it, and with one.
+_URL_USER_CHAR = r"(?:\\[^\s@]|[^\s/:\"?#\[\]'\\@]|'(?![,\])};:+\s]))"
+_URL_USER_NO_AT = r"//" + _URL_USER_CHAR + r"{0,256}:"
+_URL_USER_WITH_AT = (
+    r"//" + _URL_USER_CHAR + r"{0,256}@" + r"(?:" + _URL_USER_CHAR + r"|@){0,256}:"
+)
 #: What follows that ":" is no password when it is a port -- digits, any number of them
 #: and none at all among them (an empty port is a valid one), then the path,
 #: query or fragment (http://host:8080/@scope/pkg, redis://cache:6379/0?x=a@b) --
@@ -199,15 +219,34 @@ SHAPE_PATTERNS = [
     # proxy URL -- unless it is no password (``_URL_NOT_A_PASSWORD``): documentation
     # and connection-string code are full of those, and a redaction aborts the
     # review. Written in parts, so that this line is not one.
-    re.compile(_URL_SCHEME + _URL_USER + _URL_NOT_A_PASSWORD + _URL_PASSWORD + r"@"),
+    re.compile(
+        _URL_SCHEME + _URL_USER_NO_AT + _URL_NOT_A_PASSWORD + _URL_PASSWORD + r"@"
+    ),
+    # A user holding an @ (Azure's user@server) with a password that has no "/": with
+    # one, it is an scp-style git address with a revision -- a "/" path, then "@v1" --
+    # not a password (git+ssh://git@github.com:org/repo.git@v1).
+    re.compile(
+        _URL_SCHEME
+        + _URL_USER_WITH_AT
+        + _URL_NOT_A_PASSWORD
+        + r"(?:\\[^\s/]|[^\s@\"'/\\]|'(?![,\])};:+\s]))+@"
+    ),
     # Inside double quotes, where a ' is no string's end and ends nothing: the password
     # runs to the "@" (K7a');s9 is one).
     re.compile(
         r'"'
         + _URL_SCHEME
-        + _URL_USER_DOUBLE_QUOTED
+        + _URL_USER_DOUBLE_QUOTED_NO_AT
         + _URL_NOT_A_PASSWORD
         + r'[^"\s@]{1,256}@'
+    ),
+    # And with an @ in the user, a password with no "/", as outside quotes.
+    re.compile(
+        r'"'
+        + _URL_SCHEME
+        + _URL_USER_DOUBLE_QUOTED
+        + _URL_NOT_A_PASSWORD
+        + r'[^"\s@/]{1,256}@'
     ),
     # And with no user name, where nothing before the ":" is a host, so nothing after
     # it is a port.
@@ -512,6 +551,24 @@ def redacts(text: str) -> bool:
     return False
 
 
+def _secret_field(key: str) -> bool:
+    """Whether ``key`` names a credential: whether the scrubber would redact it
+    assigned an ordinary-looking value. The value is not put in the probe -- one
+    holding a quote or a newline changed what the line said, and passed."""
+    return any(
+        redacts(probe)
+        for probe in (f'{key} = "Zq7xK9mP2w4t"', f'"{key}": "Zq7xK9mP2w4t"')
+    )
+
+
+def _holds_value(value: object) -> bool:
+    """Whether a field's value could be a credential: a string or number with some
+    length to it, not an empty one or a flag."""
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        return False
+    return len(str(value)) >= 4
+
+
 def scrub_json() -> int:
     """``--json``: scrub a JSON document's strings -- every line of each is content, as
     an added line is -- and write it back out, still JSON. Returns the number of
@@ -538,12 +595,10 @@ def scrub_json() -> int:
                 name = walk(key)
                 if name == REDACTED_TEXT:
                     name = f"{REDACTED_TEXT} {index}"  # keys stay distinct
-                if isinstance(value, (str, int, float)) and not isinstance(value, bool):
-                    pair = f'{key} = "{value}"'
-                    if redacts(pair) or redacts(f'"{key}": "{value}"'):
-                        redacted += 1
-                        out[str(name)] = REDACTED_TEXT
-                        continue
+                if _secret_field(key) and _holds_value(value):
+                    redacted += 1
+                    out[str(name)] = REDACTED_TEXT
+                    continue
                 out[str(name)] = walk(value)
             return out
         return node

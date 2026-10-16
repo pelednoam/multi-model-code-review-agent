@@ -534,7 +534,9 @@ REVIEW_ROOT="$PWD"
 # A private copy of that code and the result schema, taken before any reviewer starts: a reviewer
 # with a file tool (hermes -t file --yolo) can write the checkout, and the runner goes on running
 # this code -- extraction among it -- after the reviewers have.
-# Links followed (-L): copied as links, a module could still be read from the checkout.
+# Links followed (-L): copied as links, a module could still be read from the checkout. A reviewer
+# running as the same user could still find and rewrite this copy (hermes -t file --yolo can): it
+# takes away the obvious path, not every path, as OUT_DIR does.
 HELPER_ROOT=""
 HELPER_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/mmcra-helper-XXXXXXXX")" && HELPER_ROOT="$(cd "$HELPER_ROOT" && pwd -P)" \
   && mkdir -p "$HELPER_ROOT/scripts" "$HELPER_ROOT/docs" \

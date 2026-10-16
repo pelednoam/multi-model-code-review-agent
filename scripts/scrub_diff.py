@@ -137,16 +137,17 @@ _URL_SCHEME = r"(?<![a-zA-Z0-9+.-])" + _SCHEME_NAME
 #: Inside double quotes, where a ' ends nothing, any ' (``_URL_USER_DOUBLE_QUOTED``).
 _URL_USER = r"//(?:\\[^\s]|[^\s/:\"?#\[\]'\\]|'(?![,\])};:+\s])){0,256}:"
 _URL_USER_DOUBLE_QUOTED = r"//[^\s/:\"?#\[\]]{0,256}:"
-#: What follows that ":" is no password when it is a port -- digits, then the path,
+#: What follows that ":" is no password when it is a port -- digits, any number of them
+#: and none at all among them (an empty port is a valid one), then the path,
 #: query or fragment (http://host:8080/@scope/pkg, redis://cache:6379/0?x=a@b) --
 #: whatever the scheme, as RFC 3986 reads it: a URL's userinfo ends at its first "/",
 #: so a postgres URL with "8080/abc" there has a host and a port, not a password.
 #: Nor when it is a template's field in a port's place -- a shell default among them,
 #: ${PORT:-5432}, which is no password's placeholder: its default can be a real one --
 #: or a placeholder.
-_URL_PORT_FIELD = r"(?:" + _URL_FIELD + r"|\$\{[A-Za-z_]\w{0,64}:?[-=]\d{1,5}\})"
+_URL_PORT_FIELD = r"(?:" + _URL_FIELD + r"|\$\{[A-Za-z_]\w{0,64}:?[-=]\d{1,16}\})"
 _URL_NOT_A_PASSWORD = (
-    r"(?!\d{1,5}[/?#])(?!" + _URL_PORT_FIELD + r"[/?#])(?!" + _URL_PLACEHOLDER + r"@)"
+    r"(?!\d{0,16}[/?#])(?!" + _URL_PORT_FIELD + r"[/?#])(?!" + _URL_PLACEHOLDER + r"@)"
 )
 #: A character of the password: it may hold ' (base64 and generated ones do), but
 #: not a quote that closes a string literal -- one followed by , ) ] } ; : + or a
@@ -496,27 +497,55 @@ def scrub_text() -> int:
     return n_redacted
 
 
+#: What a redacted string becomes, outside a diff: the marker without the "# " that
+#: keeps a redacted diff line a comment.
+REDACTED_TEXT = REDACTED.removeprefix("# ")
+
+
+def redacts(text: str) -> bool:
+    """Whether the scrubber would redact any line of ``text`` read as an added line of
+    a diff -- the one test the audit's quotes and a JSON document's strings share."""
+    for part in text.splitlines() or [text]:
+        added = "+" + part + "\n"
+        if scrub_line(added, False) != added:
+            return True
+    return False
+
+
 def scrub_json() -> int:
     """``--json``: scrub a JSON document's strings -- every line of each is content, as
     an added line is -- and write it back out, still JSON. Returns the number of
     strings redacted. For the preflight audit, which quotes the files under review: a
-    project's own installed copy of the preflight may be too old to scrub its quotes."""
+    project's own installed copy of the preflight may be too old to scrub its quotes.
+
+    Keys too, and a value with its key: a password field's value says, beside its key,
+    what it does not alone -- as the same assignment does in a diff.
+    """
     redacted = 0
-    marker = REDACTED.removeprefix("# ")
 
     def walk(node: object) -> object:
         nonlocal redacted
         if isinstance(node, str):
-            for part in node.splitlines() or [node]:
-                added = "+" + part + "\n"
-                if scrub_line(added, False) != added:
-                    redacted += 1
-                    return marker
+            if redacts(node):
+                redacted += 1
+                return REDACTED_TEXT
             return node
         if isinstance(node, list):
             return [walk(item) for item in node]
         if isinstance(node, dict):
-            return {key: walk(value) for key, value in node.items()}
+            out: dict[str, object] = {}
+            for index, (key, value) in enumerate(node.items()):
+                name = walk(key)
+                if name == REDACTED_TEXT:
+                    name = f"{REDACTED_TEXT} {index}"  # keys stay distinct
+                if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+                    pair = f'{key} = "{value}"'
+                    if redacts(pair) or redacts(f'"{key}": "{value}"'):
+                        redacted += 1
+                        out[str(name)] = REDACTED_TEXT
+                        continue
+                out[str(name)] = walk(value)
+            return out
         return node
 
     document = walk(json.load(sys.stdin))
@@ -530,6 +559,11 @@ def main() -> None:
     _force_utf8(sys.stdin)
     _force_utf8(sys.stdout)
 
+    if sys.argv[1:] and sys.argv[1:] not in (["--text"], ["--json"]):
+        # Not diff mode by default: a line there without a +, - or space passes
+        # unscrubbed, and a caller that asked for another mode would get exit 0.
+        print(f"# scrub_diff.py: unknown arguments {sys.argv[1:]!r}", file=sys.stderr)
+        sys.exit(2)
     if sys.argv[1:] in (["--text"], ["--json"]):
         text = sys.argv[1] == "--text"
         n_text = scrub_text() if text else scrub_json()

@@ -263,14 +263,8 @@ def _scrub_audit(audit_path: Path) -> None:
     quote is replaced, and the review goes on. One that cannot be done is.
     """
     with audit_path.open(encoding="utf-8", errors="replace") as source:
-        done = subprocess.run(
-            [sys.executable, str(SCRIPTS_DIR / "scrub_diff.py"), "--json"],
-            stdin=source,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
+        done = run(
+            [sys.executable, str(SCRIPTS_DIR / "scrub_diff.py"), "--json"], stdin=source
         )
     if done.returncode not in (0, 1):
         raise RuntimeError(f"could not scrub the audit: {done.stderr.strip()[-500:]}")

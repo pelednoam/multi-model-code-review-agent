@@ -121,7 +121,7 @@ fi
 
 **Priority order for each reviewer -- local CLIs first (free), Hermes only when opted in:**
 
-For Anthropic models -- reviewers 1 and 4, and reviewer 3 when neither agy nor (with `REVIEW_USE_GEMINI=1`) the gemini CLI takes it -- the local `claude` CLI is the default when installed. It's free (uses the user's existing Claude subscription) and manages its own OAuth reliably. Hermes/Bedrock is preferred only when `PREFER_HERMES=true` -- it's paid (~$5-40 per full review) and only worth it for regulated codebases that need Bedrock's data-at-rest guarantees.
+For Anthropic models -- reviewers 1 and 4, reviewer 2 when codex does not take it, and reviewer 3 when neither agy nor (with `REVIEW_USE_GEMINI=1`) the gemini CLI takes it -- the local `claude` CLI is the default when installed. It's free (uses the user's existing Claude subscription) and manages its own OAuth reliably. Hermes/Bedrock is preferred only when `PREFER_HERMES=true` -- it's paid (~$5-40 per full review) and only worth it for regulated codebases that need Bedrock's data-at-rest guarantees.
 
 For non-Anthropic models (reviewer 2 correctness via Codex GPT-5.5, reviewer 3 readability via agy or Gemini), the dedicated CLI is the only free path.
 
@@ -154,7 +154,7 @@ Bedrock opt-in precedence (PREFER_HERMES=true), used for regulated codebases tha
 | CLI | Non-interactive | Read-only | Input | Output |
 |---|---|---|---|---|
 | `claude` | `-p` | `--tools Read,Grep,Glob` (the only tools it has at all; `claude_tools.claude_tool_names`, the runner's from `claude-tools`) and `--allowedTools "Read Grep Glob"` **plus** `--disallowedTools "Edit Write MultiEdit NotebookEdit Bash WebFetch WebSearch ReportFindings"` and `Read(...)` of each credential location (`claude_tools.SECRET_READS`; the runner gets the list from `claude-deny`), `--strict-mcp-config` (no MCP servers), `--setting-sources user` (no project hooks) and `--permission-mode dontAsk` -- `--allowedTools` alone only skips the permission prompt, it does *not* confine the agent | stdin (`< prompt.txt`) | `--output-format json` wraps in `{"result":"..."}` |
-| `codex` | `codex exec` **plus `-s read-only`, `-c approvals_reviewer="user"` and `-c project_doc_max_bytes=0`** (no AGENTS.md from the branch) (in both the convergence loop and this runner) -- all are pinned by the tool and none is optional (with `-c notify=[] -c mcp_servers={}`, so a project-level `.codex/config.toml` runs nothing): no sandbox flag was passed at all before, and `-s read-only` on its own is silently overridden by a global `approvals_reviewer = "auto_review"` (see docs/codex-sandbox.md). Codex is also canary-tested at launch and its slot is DROPPED if the sandbox does not actually refuse a write (optional `-m <model> -c model_reasoning_effort=<level>` -- override via `CODEX_MODEL`, `CODEX_REASONING_EFFORT`; `=high` is the "GPT-5.5 Pro" equivalent) | verified read-only for writes, not assumed; its reads are not confined -- it can read your home directory, credentials included, and what it reads goes to OpenAI | stdin (file) | `-o <file>` writes last message |
+| `codex` | `codex exec` **plus `-s read-only`, `-c approvals_reviewer="user"` and `-c project_doc_max_bytes=0`** (no AGENTS.md from the branch) (in both the convergence loop and this runner) -- all are pinned by the tool and none is optional (with `-c notify=[] -c mcp_servers={}`, so a project-level `.codex/config.toml` runs nothing; codex reads one only in a project you have marked trusted -- measured, an untrusted one's `model` was ignored -- and there its other keys, `model_provider` among them, would apply: do not mark a repository you review as trusted): no sandbox flag was passed at all before, and `-s read-only` on its own is silently overridden by a global `approvals_reviewer = "auto_review"` (see docs/codex-sandbox.md). Codex is also canary-tested at launch and its slot is DROPPED if the sandbox does not actually refuse a write (optional `-m <model> -c model_reasoning_effort=<level>` -- override via `CODEX_MODEL`, `CODEX_REASONING_EFFORT`; `=high` is the "GPT-5.5 Pro" equivalent) | verified read-only for writes, not assumed; its reads are not confined -- it can read your home directory, credentials included, and what it reads goes to OpenAI | stdin (file) | `-o <file>` writes last message |
 | `gemini` | `-p` | `--model <m> --approval-mode plan --skip-trust` (default `<m>` is `gemini-2.5-flash` for free-tier compatibility; override via `GEMINI_MODEL`) | stdin (file) | stdout (text, may have fences) |
 | `agy` | `--input-format stream-json --output-format stream-json` (no `-p`: the prompt is one JSON line on stdin, because a single argument is capped at 128 KB) **plus `--sandbox --disable-slash-commands`**, pinned. On by default where installed; `REVIEW_USE_AGY=0` switches it off. Model: `AGY_MODEL` if set, else the best Gemini model `agy models` lists, picked each run. agy has no deny list and was measured writing outside its workspace, so it runs under **bubblewrap** (see docs/agy-sandbox.md), verified at startup without a model call and again before each launch; the slot goes to its next backend if that fails. The prompt opens with a no-tools preamble: a refused tool call ends agy's turn with no answer | bubblewrap read-only filesystem, verified; `--sandbox --disable-slash-commands` (no `--mode=plan`: it is a slash command, so a no-op once expansion is off) | stdin (one stream-json line) | stream-json; the last `result` event carries `structured_output` (enforced by `--json-schema`) |
 | `hermes` | `-z --yolo --ignore-rules` (not the branch's AGENTS.md, SOUL.md or .cursorrules, nor memory) | none: `-t file` limits it to the file toolset, which writes under `--yolo`; only the convergence loop's tamper check reports writes | `-z` flag (has ARG_MAX risk for large prompts) | stdout (the answer text; the prompt asks for the JSON in the reply, not in a file) |
@@ -238,7 +238,10 @@ python3 scripts/review_preflight.py --output "$REVIEW_TMP/runtime-audit.raw.json
 # installed preflight may be too old to scrub them itself.
 python3 scripts/scrub_diff.py --json < "$REVIEW_TMP/runtime-audit.raw.json" \
   > "$REVIEW_TMP/runtime-audit.json"
-echo "audit scrub exit $?"
+status=$?
+echo "audit scrub exit $status"
+# Not left beside the prompts, once scrubbed, as for the context bundle below.
+case $status in 0|1) rm -f "$REVIEW_TMP/runtime-audit.raw.json" ;; esac
 ```
 
 Exit 0 or 1 (a quote was redacted; the review goes on with the redacted audit): use
@@ -612,9 +615,9 @@ JOB_PID=()
 JOB_BACKEND=()   # which CLI ran each slot, which decides how its output is read (unwrap_envelope)
 JOB_OUT=()       # the one file each slot's CLI writes its answer to, the only one read for it
 JOB_PROVIDER=()  # whose model answers each slot, for the diversity count
-JOB_MODEL=()     # the model launched for each slot where the runner knows it exactly -- a
-                 # Bedrock slug, CODEX_MODEL, agy's or gemini's -- written into its result;
-                 # empty, the review keeps the model the reviewer reported, as the loop's does
+JOB_MODEL=()     # the model launched for each slot, written into its result: hermes's as the
+                 # loop labels it, claude's alias, CODEX_MODEL, agy's or gemini's; empty
+                 # (codex on its default) keeps what the reviewer reported
 SCRATCH=()
 kill_jobs() {
   local sig
@@ -738,6 +741,7 @@ launch_hermes() {
   local num=$1 hermes_model=$2 prompt_file=$3
   { timeout --foreground -k 10 "$REVIEWER_TIMEOUT" hermes -z "$(cat "$prompt_file")" \
       -m "$hermes_model" --provider bedrock -t file --yolo --ignore-rules \
+      </dev/null \
       1>"$OUT_DIR/stdout-$num.txt" \
       2>"$OUT_DIR/stderr-$num.txt"
     mark_done "$num" $?; } &
@@ -876,9 +880,10 @@ launch_cli() {
       JOB_BACKEND[$num]=claude
       echo claude > "$REVIEW_TMP/backend-$num.txt"   # for watching
       JOB_PROVIDER[$num]=anthropic
-      # Not named here: opus, sonnet and haiku are aliases, and the version one runs is claude's to
-      # say. The review keeps the model the reviewer reports, as the convergence loop's does.
-      JOB_MODEL[$num]=""
+      # Named by its alias, not a version: opus, sonnet and haiku are aliases, and the version one
+      # runs is claude's to say. Named all the same, since the prompt was written for the lens's
+      # own model, and a slot that fell back to claude would otherwise report that one.
+      JOB_MODEL[$num]="claude-$model"
       echo $! > "$REVIEW_TMP/pid-$num"
       echo "R$num: Claude CLI ($model, tools: $tools) [Claude subscription]"
       ;;
@@ -1247,7 +1252,7 @@ thing to tell a waiting human; silence is not.
 ## 7. Collect and validate results
 
 ```bash
-python scripts/validate_review_results.py "$REVIEW_TMP"/result-{1,2,3,4}.json
+python3 scripts/validate_review_results.py "$REVIEW_TMP"/result-{1,2,3,4}.json
 ```
 
 ## 8. Persist the review packet

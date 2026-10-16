@@ -1388,6 +1388,26 @@ class TestMergeAgentPrompt:
         assert f"Edit(/{own.resolve()}/**)" in denied
         assert f"Edit(/{tree.resolve()}/.git)" in denied
 
+    def test_a_repository_in_a_home_dot_directory_stays_editable(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Denied every home dotfile and dot-directory, the agent could not fix a
+        # repository kept in one (~/.worktrees/project).
+        from scripts.review_loop import merge_agent
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        hidden = tmp_path / ".worktrees" / "project"
+        hidden.mkdir(parents=True)
+        assert "Write(~/.*/**)" not in merge_agent._merge_denied(hidden)
+        assert "Write(~/.bashrc)" in merge_agent._merge_denied(hidden)
+        plain = tmp_path / "code" / "project"
+        plain.mkdir(parents=True)
+        denied = merge_agent._merge_denied(plain)
+        assert "Write(~/.*/**)" in denied
+        # Every repository's git directory, and this agent's own checkout.
+        assert "Write(//**/.git/**)" in denied
+        assert f"Write(/{REPO_ROOT.resolve()}/**)" in denied
+
     def test_a_hooks_path_set_elsewhere_is_denied(self, tmp_path: Path) -> None:
         # core.hooksPath puts the hooks git runs anywhere: in the repository, a
         # directory no fixed name covered.
@@ -2978,6 +2998,8 @@ class TestCredentialShapes:
             "http://[::1]:8080/@scope/pkg",
             "http://localhost:{port}/@scope/pkg",
             "http://localhost:${PORT}/@scope/pkg",
+            "http://localhost:/@scope/pkg",
+            "http://localhost:000080/@scope/pkg",
             "['http://localhost:8080','ops@example.com']",
             "redis://h:6379/0?x=a@b",
             "redis://localhost:6379/@x",
@@ -3382,3 +3404,34 @@ class TestAuditScrub:
         audit.write_text("not json")
         with pytest.raises(RuntimeError, match="could not scrub the audit"):
             diff._scrub_audit(audit)
+
+
+class TestScrubJson:
+    """``scrub_diff.py --json``, which the audit goes through."""
+
+    def _scrub(self, doc: object) -> tuple[int, object]:
+        done = subprocess.run(
+            [sys.executable, str(SCRUB_SCRIPT), "--json"],
+            input=json.dumps(doc), capture_output=True, text=True, timeout=30,
+        )  # fmt: skip
+        return done.returncode, json.loads(done.stdout)
+
+    def test_a_value_is_read_with_its_key(self) -> None:
+        # Values alone were scrubbed: "hunter2" says nothing; "password" beside it does.
+        field = "pass" + "word"
+        code, out = self._scrub({field: "hunter2", "user": "bob", "port": 5432})
+        assert code == 1
+        assert out == {field: scrub_diff.REDACTED_TEXT, "user": "bob", "port": 5432}
+
+    def test_a_key_shaped_like_a_credential_is_redacted(self) -> None:
+        key = "gh" + "p_" + "a" * 36
+        code, out = self._scrub({key: 1, "other": 2})
+        assert code == 1 and key not in json.dumps(out) and out["other"] == 2
+
+    def test_an_unknown_argument_is_an_error(self) -> None:
+        # Taken for diff mode, an unprefixed line passed unscrubbed with exit 0.
+        done = subprocess.run(
+            [sys.executable, str(SCRUB_SCRIPT), "--txt"],
+            input="x\n", capture_output=True, text=True, timeout=30,
+        )  # fmt: skip
+        assert done.returncode == 2 and "unknown arguments" in done.stderr

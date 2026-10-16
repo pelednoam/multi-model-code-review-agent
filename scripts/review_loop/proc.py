@@ -18,7 +18,11 @@ if TYPE_CHECKING:
 def run(
     cmd: list[str], cwd: Path | None = None, **kwargs: Any
 ) -> subprocess.CompletedProcess[str]:
-    """Run a command with sensible defaults."""
+    """Run a command with sensible defaults -- among them no stdin, unless one is
+    given: not the loop's own, which is usually the operator's terminal, for a
+    command that waits on it (codex's sandbox check among them)."""
+    if "input" not in kwargs:
+        kwargs.setdefault("stdin", subprocess.DEVNULL)
     return subprocess.run(
         cmd,
         cwd=cwd if cwd is not None else REPO_ROOT,

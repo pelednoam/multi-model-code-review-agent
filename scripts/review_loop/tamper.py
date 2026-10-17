@@ -216,11 +216,9 @@ def _control_lines(repo: Path) -> list[str]:
 def _shown(name: str | Path) -> str:
     """``name`` with what does not print as itself escaped: a snapshot is a line per
     path, and a reviewer's file name with a line break in it was two."""
-    # A backslash too: a name holding the four characters \x0a was another's with a
-    # line break in it.
-    return "".join(
-        c if c.isprintable() and c != "\\" else f"\\x{ord(c):02x}" for c in str(name)
-    )
+    # As JSON, ASCII only: one name to one string, which the escapes made by hand were
+    # not -- a backslash, or a short escape followed by hex digits, read as another.
+    return json.dumps(str(name), ensure_ascii=True)
 
 
 def _files(path: Path) -> list[Path]:
@@ -243,9 +241,10 @@ def _fingerprint(path: Path, cheap: bool) -> str:
             try:
                 target = path.resolve()
             except RuntimeError:  # a loop of links, which raised and ended the review
-                return f"link:{os.readlink(path)}:loop"
+                return f"link:{_shown(os.readlink(path))}:loop"
             through = _fingerprint(target, cheap) if target.is_file() else "dangling"
-            return "link:" + os.readlink(path) + ":" + through
+            # Escaped as a name is: a reviewer chooses a link's target as freely.
+            return f"link:{_shown(os.readlink(path))}:{through}"
         info = path.stat()
         mode = f"{info.st_mode:o}"
         if (info.st_dev, info.st_ino) in _OWN_OUTPUTS:

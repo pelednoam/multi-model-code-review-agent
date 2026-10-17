@@ -2970,6 +2970,13 @@ class TestUrlBetweenStrings:
     def test_an_operator_after_a_quote_ends_the_string(self, line: str) -> None:
         assert scrub_diff.scrub_line(f"+{line}\n", False) == f"+{line}\n"
 
+    def test_a_template_fields_member_is_no_password(self) -> None:
+        line = "+const dsn = `postgres://${user}:${config.password}@${host}/db`;\n"
+        assert scrub_diff.scrub_line(line, False) == line
+        # A default after the name is a value, as before.
+        given = '+dsn = "postgres://u:${PASSWORD:-' + 'hunter2}@db"\n'
+        assert scrub_diff.scrub_line(given, False) != given
+
     def test_a_line_of_many_urls_is_scanned_in_linear_time(self) -> None:
         # The query's "=" was looked for across every URL after it on the line.
         def took(n: int) -> float:
@@ -3608,7 +3615,8 @@ class TestTamper:
         # The round's own outputs are not a reviewer's.
         (round_dir / "raw-1.txt").write_text("")
         touched = tamper.report(tmp_path, before, round_dir)
-        assert len(touched) == 1 and touched[0].startswith("!! .venv/sitecustomize.py ")
+        assert len(touched) == 1
+        assert touched[0].startswith('!! ".venv/sitecustomize.py" ')
 
     def test_a_second_write_to_a_changed_file_is_reported(self, tmp_path: Path) -> None:
         # Its status line was "M a.py" before and after: a reviewer's edit to a file
@@ -3626,8 +3634,8 @@ class TestTamper:
         (tmp_path / "a.py").write_text("x = 3\n")
         (tmp_path / "new.py").write_text("y = 2\n")
         touched = tamper.changed(before, tamper.snapshot(tmp_path))
-        assert any(" a.py " in line for line in touched)
-        assert any(" new.py " in line for line in touched)
+        assert any(' "a.py" ' in line for line in touched)
+        assert any(' "new.py" ' in line for line in touched)
 
     def test_a_write_to_a_git_hook_is_reported(self, tmp_path: Path) -> None:
         # Where a write becomes a command the loop's own git runs.
@@ -3760,7 +3768,7 @@ class TestTamperHardening:
         before = tamper.snapshot(repo)
         (inner / "x.py").write_text("two, longer\n")
         touched = tamper.changed(before, tamper.snapshot(repo))
-        assert any(line.startswith("?? vendor/ ") for line in touched)
+        assert any(line.startswith('?? "vendor/" ') for line in touched)
 
     def test_the_loops_own_log_in_the_tree_is_no_reviewers_write(
         self, tmp_path: Path
@@ -3874,7 +3882,7 @@ class TestTamperHardening:
         (repo / "a.txt").write_text("changed\n")
         touched = tamper.report(repo, before)
         assert not marker.exists()
-        assert any(line.startswith("AM a.txt ") for line in touched)
+        assert any(line.startswith('AM "a.txt" ') for line in touched)
 
     def test_a_submodules_config_is_a_control_file(self, tmp_path: Path) -> None:
         from scripts.review_loop import tamper
@@ -3893,6 +3901,24 @@ class TestTamperHardening:
 
         assert _shown("a\nb") != _shown("a\\x0ab")
         assert "\n" not in _shown("a\nb")
+        # A short escape and hex digits after it, against one longer character.
+        assert _shown("x\x180e.py") != _shown("x\u180e.py")
+
+    def test_a_link_target_cannot_forge_a_record(self, tmp_path: Path) -> None:
+        # A target holding a line break and a record after it put that record in the
+        # snapshot before the file it described was written.
+        from scripts.review_loop import tamper
+
+        repo = self._repo(tmp_path / "r")
+        planted = repo / "planted.py"
+        planted.write_text("x")
+        forged = tamper.snapshot(repo).splitlines()
+        planted.unlink()
+        record = next(line for line in forged if "planted.py" in line)
+        (repo / "link").symlink_to("missing\n" + record + "\nend")
+        before = tamper.snapshot(repo)
+        planted.write_text("x")
+        assert any("planted.py" in line for line in tamper.report(repo, before))
 
     def test_the_rounds_inputs_may_not_be_rewritten(self, tmp_path: Path) -> None:
         # The round directory is excluded as a whole; what the reviewers were given in

@@ -121,7 +121,9 @@ KEYWORD_PATTERNS = [
         r"(?i)(api[_-]?key|secret[_-]?key|access[_-]?key)" + _KEY_END + _SECRET_VALUE
     ),
     re.compile(r"(?i)(password|passwd|pwd)" + _KEY_END + _SECRET_VALUE),
-    re.compile(r"(?i)\b(token|bearer)" + _KEY_END + _SECRET_VALUE),
+    # At the end of a longer name too (GITHUB_TOKEN, api_token, bot-token): the "_"
+    # before it is a word character, and \b alone let them through.
+    re.compile(r"(?i)(?:\b|(?<=[_-]))(token|bearer)" + _KEY_END + _SECRET_VALUE),
     re.compile(r"(?i)client[_-]?secret" + _KEY_END + _SECRET_VALUE),
 ]
 

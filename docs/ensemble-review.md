@@ -222,10 +222,16 @@ Collect ALL of these, not just the merge-base diff. Use a private temp directory
 # Named mmcra-review-*: a claude reviewer may not read it (claude_tools.SECRET_READS).
 REVIEW_TMP=$(mktemp -d /tmp/mmcra-review-XXXXXXXX)
 
+# This agent's own repository (install.sh is not among the files it installs): its scrubber
+# and tests hold credential patterns as fixtures, which --agent-repo passes as such. In a host
+# project a file of the same name is the host's, and is scrubbed.
+SCRUB_ARGS=()
+if [ -f install.sh ] && [ -d scripts/review_loop ]; then SCRUB_ARGS=(--agent-repo); fi
+
 # --no-color --no-ext-diff --no-textconv: plain lines, whatever git's config says --
 # color.diff=always put an escape before every "+", and the scrubber passed each line.
 git diff --no-color --no-ext-diff --no-textconv --merge-base origin/main -- . \
-  | python3 scripts/scrub_diff.py \
+  | python3 scripts/scrub_diff.py "${SCRUB_ARGS[@]}" \
   > "$REVIEW_TMP/diff.patch"
 
 git status --short > "$REVIEW_TMP/git-status.txt"
@@ -233,9 +239,9 @@ git diff --cached --name-only > "$REVIEW_TMP/cached.txt"
 git ls-files --others --exclude-standard > "$REVIEW_TMP/untracked.txt"
 ```
 
-If the scrubber exits non-zero, **STOP**. Secrets must be removed from the branch and rotated before re-running. (Reviewing this agent's own repository, pass `--agent-repo` to the scrubber: its scrubber and tests hold credential patterns as fixtures, which the flag passes as such -- in a host project, a file of the same name is the host's and is scrubbed.)
+If the scrubber exits non-zero, **STOP**. Secrets must be removed from the branch and rotated before re-running.
 
-If the diff is empty, fall back to `git diff --no-color --no-ext-diff --no-textconv HEAD~1 | python3 scripts/scrub_diff.py`. If still empty, ask what to review.
+If the diff is empty, fall back to `git diff --no-color --no-ext-diff --no-textconv HEAD~1 | python3 scripts/scrub_diff.py "${SCRUB_ARGS[@]}" > "$REVIEW_TMP/diff.patch"`, with the same `SCRUB_ARGS`. If still empty, ask what to review.
 
 ## 2. Run the deterministic preflight audit
 

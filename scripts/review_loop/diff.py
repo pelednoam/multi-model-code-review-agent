@@ -11,7 +11,7 @@ import subprocess
 import sys
 from typing import TYPE_CHECKING
 
-from .config import SCRIPTS_DIR, VENDORED_PATHS, diff_pathspec, is_agent_repo
+from .config import GIT, SCRIPTS_DIR, VENDORED_PATHS, diff_pathspec, is_agent_repo
 from .proc import run, signals_held, signals_unwind
 
 if TYPE_CHECKING:
@@ -64,10 +64,10 @@ def _warn_of_vendored_changes(repo: Path, diff_range: list[str]) -> None:
     if is_agent_repo(repo):
         return
     changed = run(
-        ["git", "diff", *diff_range, "--name-only", "--", *VENDORED_PATHS], cwd=repo
+        [GIT, "diff", *diff_range, "--name-only", "--", *VENDORED_PATHS], cwd=repo
     )
     added = run(
-        ["git", "ls-files", "--others", "--exclude-standard", "--", *VENDORED_PATHS],
+        [GIT, "ls-files", "--others", "--exclude-standard", "--", *VENDORED_PATHS],
         cwd=repo,
     )
     if changed.returncode != 0 or added.returncode != 0:
@@ -132,7 +132,7 @@ def collect_diff(
     """
     if base != DEFAULT_BASE:
         named = run(
-            ["git", "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"], cwd=repo
+            [GIT, "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"], cwd=repo
         )
         if named.returncode != 0:
             msg = f"--base {base!r} does not name a commit in this repository"
@@ -144,12 +144,10 @@ def collect_diff(
     pathspec = diff_pathspec(repo)
     untracked = _untracked(repo, pathspec)
     diff_range = ["--merge-base", base]
-    git = _git_diff(["git", "diff", *_PLAIN, *diff_range, "--", *pathspec], repo)
+    git = _git_diff([GIT, "diff", *_PLAIN, *diff_range, "--", *pathspec], repo)
     if git.returncode != 0:
         diff_range = ["HEAD~1"]
-        fallback = _git_diff(
-            ["git", "diff", *_PLAIN, *diff_range, "--", *pathspec], repo
-        )
+        fallback = _git_diff([GIT, "diff", *_PLAIN, *diff_range, "--", *pathspec], repo)
         if fallback.returncode != 0:
             raise RuntimeError(
                 f"failed to collect diff: {git.stderr}\n{fallback.stderr}"
@@ -162,7 +160,7 @@ def collect_diff(
         # change, and reviewing the last commit instead would review the
         # wrong thing without saying so.
         diff_range = ["HEAD~1"]
-        git = _git_diff(["git", "diff", *_PLAIN, *diff_range, "--", *pathspec], repo)
+        git = _git_diff([GIT, "diff", *_PLAIN, *diff_range, "--", *pathspec], repo)
     _warn_of_vendored_changes(repo, diff_range)
     diff_input = (git.stdout or "") + untracked
     # Every hop is pinned to UTF-8 with replacement. scrub_diff.py pins its own
@@ -227,7 +225,7 @@ def _untracked(repo: Path, pathspec: list[str]) -> str:
             this exists to end, so it does not get to happen quietly here.
     """
     listed = run(
-        ["git", "ls-files", "--others", "--exclude-standard", "-z", "--", *pathspec],
+        [GIT, "ls-files", "--others", "--exclude-standard", "-z", "--", *pathspec],
         cwd=repo,
     )
     if listed.returncode != 0:
@@ -235,7 +233,7 @@ def _untracked(repo: Path, pathspec: list[str]) -> str:
     parts: list[str] = []
     for name in (one for one in listed.stdout.split("\0") if one):
         added = _git_diff(
-            ["git", "diff", *_PLAIN, "--no-index", "--", "/dev/null", name], repo
+            [GIT, "diff", *_PLAIN, "--no-index", "--", "/dev/null", name], repo
         )
         # --no-index exits 1 when the two sides differ, which a new file
         # against /dev/null always does; anything else is git failing.

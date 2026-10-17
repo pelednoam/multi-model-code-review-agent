@@ -67,6 +67,7 @@ from scripts.review_loop import (  # noqa: E402
     validate_result,
 )
 # As _run: the name this shim has always exported, which importers of it still use.
+from scripts.review_loop.config import GIT  # noqa: E402
 from scripts.review_loop.proc import run as _run  # noqa: E402
 
 __all__ = [
@@ -344,9 +345,9 @@ def main() -> int:
     # would otherwise send its own code to OpenAI and Google by default. Every base the
     # diff may be taken against -- the one named, its merge-base, and HEAD~1, which the
     # diff falls back on -- and HEAD: any of them pinned is pinned.
-    merge_base = _run(["git", "merge-base", args.base, "HEAD"], cwd=repo).stdout.strip()
+    merge_base = _run([GIT, "merge-base", args.base, "HEAD"], cwd=repo).stdout.strip()
     pinned_in_base = any(
-        _run(["git", "cat-file", "-e", f"{ref}:.use-hermes"], cwd=repo).returncode == 0
+        _run([GIT, "cat-file", "-e", f"{ref}:.use-hermes"], cwd=repo).returncode == 0
         for ref in (args.base, merge_base, "HEAD~1", "HEAD")
         if ref
     )

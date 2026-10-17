@@ -82,7 +82,7 @@ class TestAgyDetection(AgyCase):
         # Read from the tree under review only, a branch that deleted .use-hermes sent
         # its own code to OpenAI and Google by default.
         entry = (REPO_ROOT / "scripts" / "review_until_converged.py").read_text()
-        assert '"git", "cat-file", "-e", f"{ref}:.use-hermes"' in entry
+        assert 'GIT, "cat-file", "-e", f"{ref}:.use-hermes"' in entry
         # Every base the diff may be taken against, its HEAD~1 fallback among them.
         assert 'for ref in (args.base, merge_base, "HEAD~1", "HEAD")' in entry
         assert "args.prefer_hermes or pinned_in_base or" in entry

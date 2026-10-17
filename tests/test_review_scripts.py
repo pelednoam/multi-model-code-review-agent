@@ -2956,6 +2956,29 @@ class TestCodexCanaryPath:
             assert str(odd) not in cmd[cmd.index("-c") + 1]
 
 
+@pytest.mark.parametrize(
+    "template", ["GITHUB_TOKEN={}", 'api_token: "{}"', '{{"bot-token": "{}"}}']
+)
+def test_a_token_at_the_end_of_a_longer_name_is_redacted(template: str) -> None:
+    # The "_" before it is a word character: \b let every *_TOKEN through.
+    line = template.format("Zq7xK9mP" + "2w4tAB12")
+    assert scrub_diff.scrub_line(f"+{line}\n", False) != f"+{line}\n"
+
+
+@pytest.mark.parametrize(
+    "line", ["next_token = page.cursor", "tokens = tokenize(text)"]
+)
+def test_a_name_ending_in_token_assigned_code_is_not(line: str) -> None:
+    assert scrub_diff.scrub_line(f"+{line}\n", False) == f"+{line}\n"
+
+
+def test_full_modes_diff_is_scrubbed_with_agent_repo_in_this_repository() -> None:
+    # The scrubber passes its own fixtures only with the flag; full mode never gave it.
+    doc = AGENT_DOC.read_text()
+    assert "SCRUB_ARGS=(--agent-repo)" in doc
+    assert doc.count('scripts/scrub_diff.py "${SCRUB_ARGS[@]}"') == 2
+
+
 class TestUrlBetweenStrings:
     """URLs in source, between which the URL patterns must not run on."""
 

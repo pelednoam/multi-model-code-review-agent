@@ -27,7 +27,7 @@ from .agy import (
 from .agy_sandbox import agy_seed_state, agy_wrapper
 from .agy_sandbox_check import agy_reachable
 from .backends import codex_mcp_off
-from .claude_tools import claude_disallowed, claude_tool_names
+from .claude_tools import DOTENV, claude_disallowed, claude_tool_names
 from .config import (
     LATE_RESULT_GRACE,
     POLL_INTERVAL,
@@ -109,7 +109,8 @@ def build_reviewer_prompt(
     # on an open repository attacker-controlled. Spliced in with a bare `DIFF:`
     # label it sat in instruction position, and a source comment could close
     # the section and dictate its own findings -- which flow on to a merge agent
-    # holding Edit, Write and Bash. Fenced, and said out loud to be data.
+    # holding Edit and Write (merge_agent._MERGE_TOOLS). Fenced, and said out loud
+    # to be data.
     fence = f"===== {reviewer_id}-{uuid.uuid4().hex} ====="
     return (
         f"You are a {lens} reviewer. Focus: {focus}. "
@@ -379,10 +380,11 @@ def _codex_extra_args() -> list[str]:
 
 def _choose_command(
     slot: int,
-    prompt_path: Path,
+    prompt_path: Path | Callable[[], Path],
     out_dir: Path,
     backends: dict[str, bool],
     prefer_hermes: bool = False,
+    repo: Path | None = None,
 ) -> tuple[list[str], str | None] | None:
     """Pick the command for a reviewer slot.
 
@@ -397,17 +399,25 @@ def _choose_command(
     Returns ``(cmd, label)``, where ``label`` is the model the prompt should
     name when it is not the lens's own: every slot on claude (its alias), slot 2
     on hermes (haiku) or on codex with CODEX_MODEL set, gemini and agy, which
-    name the model they run. Returns ``None`` if no backend is available. ``prompt_path`` need not
-    exist yet: hermes is handed the path, and reads it when it is launched,
-    after the prompt is written.
+    name the model they run. Returns ``None`` if no backend is available.
+
+    ``prompt_path`` need not exist yet: hermes is handed the path, and reads it when it
+    is launched, after the prompt is written. Or what makes one, called only if hermes
+    is chosen: a hermes slot's prompt is in a directory of its own. ``repo`` is the
+    repository under review, which claude's read denies are made around.
     """
+
+    def hermes(model: str) -> list[str]:
+        where = prompt_path() if callable(prompt_path) else prompt_path
+        return _hermes_cmd(where, model)
+
     if prefer_hermes and backends["hermes"]:
         if slot in (1, 4):
-            return _hermes_cmd(prompt_path, _OPUS_BEDROCK), None
+            return hermes(_OPUS_BEDROCK), None
         if slot == 2:
-            return _hermes_cmd(prompt_path, _HAIKU_BEDROCK), "claude-haiku-4.5"
+            return hermes(_HAIKU_BEDROCK), "claude-haiku-4.5"
         if slot == 3:
-            return _hermes_cmd(prompt_path, _SONNET_BEDROCK), None
+            return hermes(_SONNET_BEDROCK), None
 
     # A project pinned to Bedrock kept its code with providers it chose: with Hermes
     # unavailable, slot 2 does not fall to OpenAI by default any more than slot 3 falls
@@ -460,15 +470,15 @@ def _choose_command(
         # Named by its alias, as the full-mode runner names it: opus, sonnet and haiku
         # are aliases, and the version one runs is claude's to say. Slot 2's lens names
         # codex's model, which on claude it is not.
-        return _claude_cmd(slot), f"claude-{_claude_alias(slot)}"
+        return _claude_cmd(slot, repo), f"claude-{_claude_alias(slot)}"
 
     # Last-resort Hermes paths if no local CLI matched.
     if slot in (1, 4) and backends["hermes"]:
-        return _hermes_cmd(prompt_path, _OPUS_BEDROCK), None
+        return hermes(_OPUS_BEDROCK), None
     if slot == 2 and backends["hermes"]:
-        return _hermes_cmd(prompt_path, _HAIKU_BEDROCK), "claude-haiku-4.5"
+        return hermes(_HAIKU_BEDROCK), "claude-haiku-4.5"
     if slot == 3 and backends["hermes"]:
-        return _hermes_cmd(prompt_path, _SONNET_BEDROCK), None
+        return hermes(_SONNET_BEDROCK), None
     return None
 
 
@@ -553,90 +563,113 @@ def _launch_one(
     return slot, proc, backend, out_f, err_f
 
 
-#: The prompt path _choose_command builds a hermes command with before the backend is
-#: settled; a hermes slot's own (a directory of its own) replaces it once it is.
-_UNCHOSEN_PROMPT = Path("prompt.txt")
-
-
 def _pick_backend(slot: int, round_: _Round) -> _Picked | None:
     """The backend for ``slot`` -- or None if none is available.
 
-    If agy, or gemini, is chosen but cannot be set up, the slot gets the backend it
+    If one is chosen but cannot be set up (``_prepare``), the slot gets the backend it
     would have had without it, as the routing tables say: an empty slot 3 every round
     never converges. The prompt is built once the backend is settled, not per attempt.
     """
     backends = dict(round_.backends)
+    prompt: list[Path] = []  # hermes's, made if it is chosen
+
+    def hermes_prompt() -> Path:
+        # hermes reads its prompt by path. Not from round_dir, where another reviewer
+        # with a file tool could rewrite it first, nor from the reviewers' private
+        # output directory, which hermes -- with a file tool of its own -- would then
+        # know: a directory of the slot's own.
+        prompt.append(_scratch_dir(f"mmcra-prompt-{slot}-") / "prompt.txt")
+        return prompt[-1]
+
     while True:
+        prompt.clear()
         choice = _choose_command(
-            slot, _UNCHOSEN_PROMPT, round_.out_dir, backends, round_.prefer_hermes
-        )
+            slot, hermes_prompt, round_.out_dir, backends, round_.prefer_hermes,
+            round_.repo,
+        )  # fmt: skip
         if choice is None:
             return None
         cmd, label = choice
-        prompt_path = None
-        if cmd[0] == "hermes":
-            # hermes reads its prompt by path. Not from round_dir, where another
-            # reviewer with a file tool could rewrite it first, nor from the reviewers'
-            # private output directory, which hermes -- with a file tool of its own --
-            # would then know: a directory of the slot's own.
-            prompt_path = _scratch_dir(f"mmcra-prompt-{slot}-") / "prompt.txt"
-            cmd = _hermes_cmd(prompt_path, cmd[cmd.index("-m") + 1])
-            # Run from an empty directory outside the repository, as gemini is: its -z
-            # path ignores --ignore-rules (measured in its source: the one-shot agent is
-            # built without skip_context_files), so it reads AGENTS.md and the rest from
-            # its working directory -- TERMINAL_CWD, if set, cleared -- and .hermes.md up
-            # to a .git, which the workspace has, so the search ends there.
-            workspace = _empty_workspace_outside_repo(round_.repo)
-            if workspace is None:
-                print(f"  R{slot}: hermes has no workspace outside the repo (TMPDIR?)")
-                backends["hermes"] = False
-                continue
-            try:
-                (workspace / ".git").mkdir(exist_ok=True)
-            except OSError as exc:
-                print(f"  R{slot}: could not prepare hermes's workspace ({exc})")
-                backends["hermes"] = False
-                continue
-            wrapped = ["env", "-u", "TERMINAL_CWD", *cmd]
-            return _Picked(wrapped, "hermes", label, workspace, prompt_path)
-        if cmd[0] == "codex":
-            # Each MCP server it is configured with, off by name: each one a tool, and a
-            # process, outside its sandbox. Not knowing which there are, it does not run.
-            off = codex_mcp_off(round_.repo)
-            if off is None:
-                print(f"  R{slot}: codex's MCP servers could not be listed; not run")
-                backends["codex"] = False
-                continue
-            cmd = [*cmd[:2], *off, *cmd[2:]]
-        if cmd[0] == "claude":
-            # Its read denies made around the repository, where one would hold it.
-            cmd = _claude_cmd(slot, round_.repo)
-        if cmd[0] not in ("agy", "gemini"):
-            # In the repository under review, whose files its tools read: from the
-            # directory the loop was started in -- a trusted checkout of this agent,
-            # with --repo naming the branch -- it read that checkout instead.
-            return _Picked(cmd, cmd[0], label, round_.repo, prompt_path)
-        if cmd[0] == "gemini":
-            # Not from the repository under review, whose .gemini/settings.json --
-            # chosen by the change being reviewed -- it would load (--skip-trust):
-            # an empty directory of its own, checked to be outside it. Its prompt
-            # carries the diff and the audit.
-            workspace = _empty_workspace_outside_repo(round_.repo)
-            if workspace is None:
-                print(f"  R{slot}: gemini has no workspace outside the repo (TMPDIR?)")
-            else:
-                try:
-                    _end_gemini_search(workspace)
-                except OSError as exc:
-                    print(f"  R{slot}: could not prepare gemini's workspace ({exc})")
-                else:
-                    return _Picked(cmd, "gemini", label, workspace)
-        else:
-            prepared = _prepare_agy(slot, cmd, round_.repo, round_.round_dir.parent)
-            if prepared is not None:
-                wrapped, workspace = prepared
-                return _Picked(wrapped, "agy", label, workspace)
+        picked = _prepare(slot, cmd, label, round_, prompt[-1] if prompt else None)
+        if picked is not None:
+            return picked
         backends[cmd[0]] = False
+
+
+def _prepare(
+    slot: int, cmd: list[str], label: str | None, round_: _Round, prompt: Path | None
+) -> _Picked | None:
+    """``cmd`` made ready to launch for ``slot``, by the backend it runs -- or None,
+    having said why it cannot be."""
+    if cmd[0] == "hermes":
+        return _prepare_hermes(slot, cmd, label, round_.repo, prompt)
+    if cmd[0] == "codex":
+        return _prepare_codex(slot, cmd, label, round_.repo)
+    if cmd[0] == "gemini":
+        return _prepare_gemini(slot, cmd, label, round_.repo)
+    if cmd[0] == "agy":
+        prepared = _prepare_agy(slot, cmd, round_.repo, round_.round_dir.parent)
+        if prepared is None:
+            return None
+        wrapped, workspace = prepared
+        return _Picked(wrapped, "agy", label, workspace)
+    # claude: in the repository under review, whose files its tools read -- from the
+    # directory the loop was started in, a trusted checkout of this agent with --repo
+    # naming the branch, it read that checkout instead.
+    return _Picked(cmd, cmd[0], label, round_.repo)
+
+
+def _prepare_hermes(
+    slot: int, cmd: list[str], label: str | None, repo: Path | None, prompt: Path | None
+) -> _Picked | None:
+    """hermes, run from an empty directory outside the repository, as gemini is: its
+    -z path ignores --ignore-rules (measured in its source: the one-shot agent is built
+    without skip_context_files), so it reads AGENTS.md and the rest from its working
+    directory -- TERMINAL_CWD, if set, cleared -- and .hermes.md up to a .git, which
+    the workspace has, so the search ends there."""
+    workspace = _empty_workspace_outside_repo(repo)
+    if workspace is None:
+        print(f"  R{slot}: hermes has no workspace outside the repo (TMPDIR?)")
+        return None
+    try:
+        (workspace / ".git").mkdir(exist_ok=True)
+    except OSError as exc:
+        print(f"  R{slot}: could not prepare hermes's workspace ({exc})")
+        return None
+    wrapped = ["env", "-u", "TERMINAL_CWD", *cmd]
+    return _Picked(wrapped, "hermes", label, workspace, prompt)
+
+
+def _prepare_codex(
+    slot: int, cmd: list[str], label: str | None, repo: Path | None
+) -> _Picked | None:
+    """codex in the repository under review, with each MCP server it is configured
+    with off by name: each one a tool, and a process, outside its sandbox. Not knowing
+    which there are, it does not run."""
+    off = codex_mcp_off(repo)
+    if off is None:
+        print(f"  R{slot}: codex's MCP servers could not be listed; not run")
+        return None
+    return _Picked([*cmd[:2], *off, *cmd[2:]], "codex", label, repo)
+
+
+def _prepare_gemini(
+    slot: int, cmd: list[str], label: str | None, repo: Path | None
+) -> _Picked | None:
+    """gemini, not from the repository under review, whose .gemini/settings.json --
+    chosen by the change being reviewed -- it would load (--skip-trust): an empty
+    directory of its own, checked to be outside it. Its prompt carries the diff and the
+    audit."""
+    workspace = _empty_workspace_outside_repo(repo)
+    if workspace is None:
+        print(f"  R{slot}: gemini has no workspace outside the repo (TMPDIR?)")
+        return None
+    try:
+        _end_gemini_search(workspace)
+    except OSError as exc:
+        print(f"  R{slot}: could not prepare gemini's workspace ({exc})")
+        return None
+    return _Picked(cmd, "gemini", label, workspace)
 
 
 def _spawn(
@@ -698,7 +731,7 @@ def _end_gemini_search(workspace: Path) -> None:
     """End gemini's upward searches in its own workspace: it looks for GEMINI.md up to
     a .git and for the first environment file up the tree, and the workspace's parent
     is a shared /tmp, where another user can put either."""
-    env_file = "." + "env"  # joined: the diff scrubber redacts a line naming one
+    env_file = DOTENV
     (workspace / ".git").mkdir(exist_ok=True)
     (workspace / ".gemini").mkdir(exist_ok=True)
     (workspace / env_file).write_text("", encoding="utf-8")
@@ -775,11 +808,12 @@ def _stop(proc: subprocess.Popen[str]) -> None:
 
 
 #: Set once ``ps`` is found missing, so that it is not looked for again every poll.
-_NO_PS: list[bool] = []
+_NO_PS = False
 
 
 def _is_zombie(pid: int) -> bool | None:
     """Whether ``pid`` has exited and awaits its reap; None when ``ps`` cannot say."""
+    global _NO_PS
     if _NO_PS:
         return None
     try:
@@ -791,7 +825,7 @@ def _is_zombie(pid: int) -> bool | None:
             check=False,
         )
     except FileNotFoundError:
-        _NO_PS.append(True)
+        _NO_PS = True
         return None
     except (OSError, subprocess.SubprocessError):
         return None

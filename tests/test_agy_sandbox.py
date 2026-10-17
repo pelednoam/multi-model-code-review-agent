@@ -128,7 +128,7 @@ class TestAgySandboxCheck(AgyCase):
         def unknown(uid: int) -> object:
             raise KeyError(uid)
 
-        monkeypatch.setattr(agy_sandbox.pwd, "getpwuid", unknown)
+        monkeypatch.setattr(agy_sandbox.paths.pwd, "getpwuid", unknown)
         monkeypatch.setattr(agy.shutil, "which", lambda c: f"/usr/bin/{c}")
         ok, reason = agy_sandbox_check.agy_is_confined()
         assert not ok and "passwd" in reason

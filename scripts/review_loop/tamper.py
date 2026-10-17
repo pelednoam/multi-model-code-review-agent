@@ -37,13 +37,16 @@ import hashlib
 import os
 import json
 import re
+import shutil
 import stat
 import subprocess
 import sys
 import time
 from pathlib import Path
 
+from . import paths
 from .config import GIT
+from .merge_agent import MERGE_WRITE_DENIED
 from .results import printable
 
 
@@ -68,11 +71,7 @@ def snapshot(repo: Path, exclude: Path | None = None, before: str | None = None)
     planted under its name) are not what they were, ``git status`` is not run -- it is
     what would run the reviewer's command -- and the snapshot says so instead.
     """
-    # No bytecode written into the tree from here on, by this process: a module the
-    # loop imports late would otherwise leave a __pycache__ the check calls a write.
-    sys.dont_write_bytecode = True
-    _OWN_OUTPUTS.clear()
-    _OWN_OUTPUTS.update(_own_outputs())
+    _prepare()
     control = _control_lines(repo)
     # And what the round wrote for the reviewers before they started, which they may
     # not rewrite either: what they were given is what the round reports they read.
@@ -86,11 +85,37 @@ def snapshot(repo: Path, exclude: Path | None = None, before: str | None = None)
     )
     # Compared whole: one deleted (an attributes file, a hook) changes what git runs too.
     if before is not None and set(control) != {
-        line for line in before.splitlines() if line.startswith(("git ", "home "))
+        line for line in before.splitlines() if line.startswith(_CONTROL)
     }:
         skipped = "?? git status not run: its control files changed"
         return "\n".join([*control, *inputs, skipped])
     return "\n".join(sorted({*_status_lines(repo, exclude), *control, *inputs})) + "\n"
+
+
+def _prepare() -> None:
+    """What a snapshot sets up in this process: no bytecode written into the tree from
+    here on -- a module the loop imports late would otherwise leave a __pycache__ the
+    check calls a write -- and where this process's output goes (``_OWN_OUTPUTS``)."""
+    sys.dont_write_bytecode = True
+    _OWN_OUTPUTS.clear()
+    _OWN_OUTPUTS.update(_own_outputs())
+
+
+#: How ``_control_lines``' records start.
+_CONTROL = ("git ", "home ", "exe ", "path ")
+
+#: The home's directories whose files run with no exec bit needed -- sourced by the
+#: next shell, started at the next login -- relative to the home, or to
+#: $XDG_CONFIG_HOME for those under .config.
+_HOME_RUN_DIRS = (".bashrc.d", ".oh-my-zsh/custom", "Library/LaunchAgents")
+_XDG_RUN_DIRS = ("autostart", "systemd/user", "environment.d", "fish/conf.d")
+
+#: What the loop and its reviewers run by name, found on PATH: a reviewer that rewrote
+#: one (an npm CLI's script keeps its exec bit) had its code run by the next round.
+_PROGRAMS = (
+    "git", "claude", "codex", "agy", "gemini", "hermes", "bwrap", "node", "python3",
+    "ruff", "mypy", "pytest", "sh", "bash", "env", "timeout", "setsid",
+)  # fmt: skip
 
 
 def _status_lines(repo: Path, exclude: Path | None) -> list[str]:
@@ -139,10 +164,8 @@ def _status_lines(repo: Path, exclude: Path | None) -> list[str]:
 def _filters(repo: Path) -> set[str]:
     """The names of the filters configured for ``repo`` and its submodules, by reading
     their configs: ``git config`` runs none of them."""
-    from .merge_agent import _git_dirs
-
     configs: list[list[str]] = [[]]  # the repository's own, with the global and system
-    for git_dir in _git_dirs(repo):
+    for git_dir in paths.git_dirs(repo):
         configs += [["--file", str(found)] for found in _module_configs(git_dir)]
     names = set()
     for where in configs:
@@ -172,9 +195,7 @@ def _control_lines(repo: Path) -> list[str]:
     # The same git directories the merge agent may not write, the hooks directory git
     # runs from among them (core.hooksPath can put it anywhere): scanned whole when it
     # is that, and otherwise for what turns a write into a command.
-    from .merge_agent import _MERGE_WRITE_DENIED, _git_dirs, _homes
-
-    for git_dir in _git_dirs(repo):
+    for git_dir in paths.git_dirs(repo):
         names = ("config", "config.worktree", "hooks", "info")
         parts = (
             [git_dir]
@@ -190,8 +211,8 @@ def _control_lines(repo: Path) -> list[str]:
     # And the home's files that run code: hermes writes under --yolo, outside the
     # repository too, and a write to ~/.bashrc is no less a reviewer's for that. Files
     # named, not the directories (~/.config/**) the merge agent is kept out of whole.
-    for home in _homes():
-        for pattern in _MERGE_WRITE_DENIED:
+    for home in paths.homes():
+        for pattern in MERGE_WRITE_DENIED:
             if pattern.endswith("/**") or any(c in pattern for c in "*?["):
                 continue
             startup = home / pattern[2:]
@@ -210,6 +231,29 @@ def _control_lines(repo: Path) -> list[str]:
         for bin_dir in (".local/bin", "bin", ".cargo/bin"):
             for program in _files(home / bin_dir):
                 lines.append(f"home {_shown(program)} {_fingerprint(program, True)}")
+        # And the directories whose files run unasked (_HOME_RUN_DIRS).
+        for run_dir in [
+            *(home / name for name in _HOME_RUN_DIRS),
+            *(xdg / name for name in _XDG_RUN_DIRS),
+        ]:
+            for runs in _files(run_dir):
+                lines.append(f"home {_shown(runs)} {_fingerprint(runs, True)}")
+    # And what runs next by name: each program the loop runs, where PATH finds it and
+    # what it resolves to (_PROGRAMS); and what is in each directory on PATH this user
+    # can write, where one planted under any of their names would be found first.
+    for name in _PROGRAMS:
+        found = shutil.which(name)
+        if found:
+            for program in dict.fromkeys((Path(found), Path(found).resolve())):
+                lines.append(f"exe {_shown(program)} {_fingerprint(program, True)}")
+    for entry in dict.fromkeys(os.environ.get("PATH", "").split(os.pathsep)):
+        where = Path(entry or ".")
+        if where.is_absolute() and where.is_dir() and os.access(where, os.W_OK):
+            with contextlib.suppress(OSError):
+                for program in sorted(where.iterdir()):
+                    lines.append(
+                        f"path {_shown(program)} {_fingerprint(program, True)}"
+                    )
     return sorted(set(lines))
 
 
@@ -233,9 +277,11 @@ def _files(path: Path) -> list[Path]:
 def _fingerprint(path: Path, cheap: bool) -> str:
     """What is in ``path``: its content's hash, a link's target, or -- ``cheap``, for
     the many files under an ignored path -- its size and mtime. With its mode: a hook
-    made executable runs at the next commit, and its bytes are the same."""
+    made executable runs at the next commit, and its bytes are the same. One lstat a
+    file: it is called for every file under every ignored path, twice a round."""
     try:
-        if path.is_symlink():
+        info = os.lstat(path)
+        if stat.S_ISLNK(info.st_mode):
             # And what it leads to: a write through an existing link to a startup file
             # or a hook changes the target, and the link alone looked the same.
             try:
@@ -245,21 +291,18 @@ def _fingerprint(path: Path, cheap: bool) -> str:
             through = _fingerprint(target, cheap) if target.is_file() else "dangling"
             # Escaped as a name is: a reviewer chooses a link's target as freely.
             return f"link:{_shown(os.readlink(path))}:{through}"
-        info = path.stat()
         mode = f"{info.st_mode:o}"
         if (info.st_dev, info.st_ino) in _OWN_OUTPUTS:
             # The loop's own output, redirected into the tree (> data/reviews/run.log):
             # it grows with every line printed, and is no reviewer's doing.
             return "the loop's output"
-        if path.is_dir():
+        if stat.S_ISDIR(info.st_mode):
             # What is under it: a submodule, or a repository inside the tree, is one
             # entry in git's listing however many of its files a reviewer changed.
-            inside = [
-                (str(child.relative_to(path)), _fingerprint(child, True))
-                for child in _files(path)
-            ]
-            digest = hashlib.sha256(json.dumps(inside).encode()).hexdigest()
-            return f"dir:{mode}:{digest}"
+            digest = hashlib.sha256()
+            for record in _tree(path):
+                digest.update(record.encode("utf-8", "surrogateescape") + b"\0")
+            return f"dir:{mode}:{digest.hexdigest()}"
         if not stat.S_ISREG(info.st_mode):
             # A FIFO or a device, which is not read: opening the one waits for a writer,
             # and reading the other may never end.
@@ -269,6 +312,40 @@ def _fingerprint(path: Path, cheap: bool) -> str:
         return f"{mode}:{_content_hash(path)}"
     except OSError as exc:
         return f"unreadable:{exc.errno}"
+
+
+def _tree(top: Path) -> list[str]:
+    """A record for each entry under ``top`` -- its path, mode, size and mtime, or a
+    link's target -- from one scandir walk, links not followed: sorted, so that the
+    same tree gives the same records."""
+    records = []
+    pending = [top]
+    while pending:
+        here = pending.pop()
+        try:
+            entries = list(os.scandir(here))
+        except OSError as exc:
+            records.append(f"{_shown(here.relative_to(top))} unreadable:{exc.errno}")
+            continue
+        for entry in entries:
+            name = _shown(Path(entry.path).relative_to(top))
+            try:
+                info = entry.stat(follow_symlinks=False)
+                if (info.st_dev, info.st_ino) in _OWN_OUTPUTS:
+                    continue
+                if stat.S_ISLNK(info.st_mode):
+                    records.append(f"{name} link:{_shown(os.readlink(entry.path))}")
+                    continue
+                records.append(
+                    f"{name} {info.st_mode:o}:{info.st_size}:{info.st_mtime_ns}"
+                    if not stat.S_ISDIR(info.st_mode)
+                    else f"{name} dir:{info.st_mode:o}"
+                )
+                if stat.S_ISDIR(info.st_mode):
+                    pending.append(Path(entry.path))
+            except OSError as exc:
+                records.append(f"{name} unreadable:{exc.errno}")
+    return sorted(records)
 
 
 def _content_hash(path: Path) -> str:

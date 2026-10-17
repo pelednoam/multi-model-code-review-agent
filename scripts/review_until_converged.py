@@ -8,7 +8,7 @@ Stops when:
   - Tests fail after fixes (regression -- stops without rollback)
   - Max rounds reached
   - A reviewer changed the working tree (exit 12; --report-only reports it and
-    goes on, to 10 when something is blocking and to 12 when nothing is)
+    goes on, to 10 when something is blocking and to 12 otherwise)
 
 Usage:
     python scripts/review_until_converged.py \\
@@ -188,7 +188,9 @@ def _run_one_round(
             "fixes, running the gate or committing. Inspect the files listed above."
         )
         return 12, previous_fp
-    if not any(results):
+    # A tampered round is said as one under --report-only too, with no result or none
+    # blocking (below): a script keyed on 12 is not told 7 instead.
+    if not any(results) and not touched:
         print(
             "\nERROR: no reviewer results could be parsed; cannot determine convergence."
         )

@@ -118,8 +118,9 @@ _SLUG = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")
 
 
 def _picked_agy_model(also_hide: tuple[Path, ...] = ()) -> tuple[str | None, str]:
-    """The best model ``agy models`` lists, and how it was picked; once per run
-    (``_PICK``): the sandbox check and every round run the same model."""
+    """The best model ``agy models`` lists, and how it was picked. Kept for the run by
+    ``agy_model_choice`` (``_PICK``), whatever ``also_hide`` a later call names: the
+    sandbox check and every round run the same model."""
     slugs = agy_models(also_hide)
     if not slugs:
         return None, (

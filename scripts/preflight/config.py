@@ -63,13 +63,21 @@ def _overrides() -> dict[str, object]:
     return loaded
 
 
+#: What ``_complain`` said, for the audit: on stderr alone it reached no reviewer, and
+#: a contract check the config named and this skipped looked like none configured.
+CONFIG_WARNINGS: list[str] = []
+
+
 def _complain(
     problem: str,
     outcome: str = "using the agent's defaults, which probably do not cover this "
     "project's layout",
 ) -> None:
-    """Say on stderr that the host config is being ignored, and why."""
-    print(f"WARNING: {HOST_CONFIG.name} {problem}; {outcome}.", file=sys.stderr)
+    """Say on stderr, and in the audit, that the host config is being ignored, and
+    why."""
+    message = f"WARNING: {HOST_CONFIG.name} {problem}; {outcome}."
+    CONFIG_WARNINGS.append(message)
+    print(message, file=sys.stderr)
 
 
 def _dirs(name: str, fallback: list[str]) -> list[str]:

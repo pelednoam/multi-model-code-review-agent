@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-import os
 import subprocess
 import tempfile
 import uuid
@@ -16,8 +15,8 @@ from .claude_tools import (
     claude_tool_names,
     rule_safe,
 )
-from .config import GIT, MERGE_TIMEOUT, REPO_ROOT
-from .proc import run
+from . import paths
+from .config import MERGE_TIMEOUT, REPO_ROOT
 
 #: What the merge agent may use: it edits files, and nothing more.
 _MERGE_TOOLS = "Read Edit Write Grep Glob"
@@ -30,7 +29,7 @@ _MERGE_TOOLS = "Read Edit Write Grep Glob"
 #: Nor does this make fix mode safe to run on code you would not run -- the gate runs
 #: the tests the agent may have just edited, and the commit the project's own hooks,
 #: which are left on: they are the project's checks (README, "The convergence loop").
-_MERGE_WRITE_DENIED = (
+MERGE_WRITE_DENIED = (
     "~/.bashrc", "~/.bash_profile", "~/.bash_login", "~/.bash_logout", "~/.profile",
     "~/.zshrc", "~/.zshenv", "~/.zprofile", "~/.zlogin", "~/.zlogout",
     "~/.bash_aliases", "~/.bashrc.d/**", "~/.oh-my-zsh/**", "~/.vimrc",
@@ -68,63 +67,8 @@ _MERGE_REPO_DENIED = (
 )  # fmt: skip
 
 
-def _git_dirs(repo: Path) -> list[Path]:
-    """The repository's git directories: its .git, and where git says they are -- in
-    a linked worktree .git is a file naming one elsewhere, with the shared hooks and
-    config in another."""
-    dirs = [repo / ".git", repo.resolve() / ".git"]
-    # And the hooks directory git runs from, which core.hooksPath can put anywhere.
-    found = run(
-        [GIT, "rev-parse", "--absolute-git-dir", "--git-common-dir",
-         "--git-path", "hooks"],
-        cwd=repo,
-    )  # fmt: skip
-    named = [(repo / line).resolve() for line in found.stdout.split("\n") if line]
-    if found.returncode == 0 and named:
-        # --git-common-dir and --git-path may be relative, to where git ran.
-        *found_dirs, hooks = named
-        dirs += found_dirs
-        # A hooks directory that holds the checkout (core.hooksPath=.) is not denied or
-        # watched whole, which would be the whole repository: its hooks are, by name.
-        if repo.resolve().is_relative_to(hooks):
-            dirs += [hooks / name for name in GIT_HOOK_NAMES]
-        else:
-            dirs.append(hooks)
-    return list(dict.fromkeys(dirs))
-
-
-#: The hooks git runs, by the names it runs them by (githooks(5)).
-GIT_HOOK_NAMES = (
-    "applypatch-msg", "pre-applypatch", "post-applypatch", "pre-commit",
-    "pre-merge-commit", "prepare-commit-msg", "commit-msg", "post-commit",
-    "pre-rebase", "post-checkout", "post-merge", "pre-push", "pre-receive", "update",
-    "proc-receive", "post-receive", "post-update", "reference-transaction",
-    "push-to-checkout", "pre-auto-gc", "post-rewrite", "sendemail-validate",
-    "fsmonitor-watchman", "p4-changelist", "p4-prepare-changelist",
-    "p4-post-changelist", "p4-pre-submit", "post-index-change",
-)  # fmt: skip
-
-
-def _homes() -> set[Path]:
-    """$HOME and the account's own home, which differ where HOME is pointed elsewhere.
-
-    Either may be missing -- a container's user with no HOME and no passwd entry --
-    and then there is none of it: the repository's checks stand without.
-    """
-    homes = set()
-    with contextlib.suppress(OSError, RuntimeError):
-        homes.add(Path.home().resolve())
-    try:
-        import pwd
-
-        homes.add(Path(pwd.getpwuid(os.getuid()).pw_dir).resolve())
-    except (ImportError, KeyError, OSError, RuntimeError):
-        pass
-    return homes
-
-
 def _home_denies(repo: Path) -> tuple[list[str], list[Path]]:
-    """The homes' write denies for the merge agent: rules for ``_MERGE_WRITE_DENIED``
+    """The homes' write denies for the merge agent: rules for ``MERGE_WRITE_DENIED``
     and ``_HOME_DOT_DENIED`` under each home, and paths for those that hold ``repo``.
 
     A directory-wide one that holds the repository (~/.local/src/project,
@@ -134,31 +78,31 @@ def _home_denies(repo: Path) -> tuple[list[str], list[Path]]:
     """
     target = repo.resolve()
     rules: list[tuple[str, str]] = []  # each rule, and its ~/ form to fall back on
-    paths: list[Path] = []
-    for home in _homes():
+    held: list[Path] = []
+    for home in paths.homes():
         inside = target.relative_to(home) if target.is_relative_to(home) else None
         top = inside.parts[0] if inside and inside.parts else None
         in_dot = top is not None and top.startswith(".")
-        for pattern in _MERGE_WRITE_DENIED:
+        for pattern in MERGE_WRITE_DENIED:
             base = home / pattern[2:].removesuffix("/**")
             if (
                 inside is not None
                 and pattern.endswith("/**")
                 and target.is_relative_to(base)
             ):
-                paths += around(base, target)
+                held += around(base, target)
             else:
                 rules.append((f"/{home}/{pattern[2:]}", pattern))
         if in_dot:
             # The home's other dot entries one by one, and around the way down within
             # the one that holds the repository.
             with contextlib.suppress(OSError):
-                paths += [
+                held += [
                     entry
                     for entry in home.iterdir()
                     if entry.name.startswith(".") and entry.name != top
                 ]
-            paths += around(home / str(top), target)
+            held += around(home / str(top), target)
         else:
             rules += [
                 (f"/{home}/{pattern[2:]}", pattern) for pattern in _HOME_DOT_DENIED
@@ -174,7 +118,7 @@ def _home_denies(repo: Path) -> tuple[list[str], list[Path]]:
                 f"  WARNING: the merge agent's deny {rule!r} cannot be written as it is"
             )
             out.append(tilde)
-    return out, paths
+    return out, held
 
 
 def _trusted_checkout(repo: Path) -> list[Path]:
@@ -194,10 +138,10 @@ def _merge_denied(repo: Path) -> list[str]:
     """The merge agent's --disallowedTools: the reviewers' list for its tools, and
     writes to the repository's git directories, ``_MERGE_REPO_DENIED``, and the home's
     files that run code (``_home_denies``)."""
-    paths = ["//**/.git", "//**/.git/**"]  # every repository's hooks and config
+    denied = ["//**/.git", "//**/.git/**"]  # every repository's hooks and config
     home_rules, home_paths = _home_denies(repo)
     protected = [
-        *_git_dirs(repo),
+        *paths.git_dirs(repo),
         *(repo.resolve() / name for name in _MERGE_REPO_DENIED),
         *_trusted_checkout(repo),
         *home_paths,
@@ -209,9 +153,9 @@ def _merge_denied(repo: Path) -> list[str]:
             # change what it says (claude_tools.rule_safe).
             print(f"  WARNING: the merge agent is not denied {root!r}: its name")
         else:
-            paths += [f"/{root}", f"/{root}/**"]
-    paths += home_rules
-    writes = [f"{tool}({path})" for path in paths for tool in ("Edit", "Write")]
+            denied += [f"/{root}", f"/{root}/**"]
+    denied += home_rules
+    writes = [f"{tool}({path})" for path in denied for tool in ("Edit", "Write")]
     return [*claude_disallowed(_MERGE_TOOLS, repo), *writes]
 
 

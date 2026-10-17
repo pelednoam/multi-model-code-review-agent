@@ -81,63 +81,93 @@ def _granted(tools: str) -> tuple[list[str], list[str]]:
 #: it in a finding. A deny on Read covers Grep and Glob too (measured), and a symlink
 #: to a denied file is refused as the file is (measured). A list, so not complete:
 #: docs/ensemble-review.md says so.
-SECRET_READS = (
+#: An environment file's name, joined: the diff scrubber rightly redacts a line that
+#: names one, and this module's would be such lines.
+DOTENV = "." + "env"
+
+# What a claude reviewer may never read, by kind, joined into ``SECRET_READS``. "~/" is
+# $HOME (``with_account_home`` adds the account's own); "//" is an absolute path in a
+# permission rule, and a bare "**/" only the working directory (measured: a file in a
+# sibling directory was read under "**/", and refused under "//**/", as was one in the
+# working directory).
+
+#: The home's credential stores, the CLIs' and cloud tools' sign-ins among them.
+_HOME_CREDENTIALS = (
     "~/.ssh/**", "~/.aws/**", "~/.azure/**", "~/.gnupg/**", "~/.kube/**",
     "~/.docker/**", "~/.config/gcloud/**", "~/.config/gh/**", "~/.netrc",
     "~/.git-credentials", "~/.npmrc", "~/.pypirc", "~/.password-store/**",
     "~/.local/share/keyrings/**", "~/.claude/**", "~/.codex/**", "~/.gemini/**",
-    "~/.hermes/**",
-    "~/.config/**/credentials*", "~/.pgpass", "~/.my.cnf", "~/.vault-token",
-    "~/.cargo/credentials*", "~/.terraform.d/**", "~/.s3cfg", "~/.boto", "~/.oci/**",
-    "~/.config/hub", "~/.cache/huggingface/**", "~/.huggingface/**", "~/.kaggle/**",
-    "~/.config/rclone/**", "~/.config/op/**", "~/.config/containers/**",
-    "//run/user/*/containers/**", "~/.config/doctl/**", "~/.config/hcloud/**",
-    "~/.config/heroku/**", "//**/*.tfstate", "//**/*.tfstate.backup", "//**/*.tfvars",
-    # Container and orchestrator secret mounts, and the host's private TLS keys.
+    "~/.hermes/**", "~/.config/**/credentials*", "~/.pgpass", "~/.my.cnf",
+    "~/.vault-token", "~/.cargo/credentials*", "~/.terraform.d/**", "~/.s3cfg",
+    "~/.boto", "~/.oci/**", "~/.config/hub", "~/.cache/huggingface/**",
+    "~/.huggingface/**", "~/.kaggle/**", "~/.config/rclone/**", "~/.config/op/**",
+    "~/.config/containers/**", "//run/user/*/containers/**", "~/.config/doctl/**",
+    "~/.config/hcloud/**", "~/.config/heroku/**", "~/.config/configstore/**",
+    "~/.vault_pass*", "~/snap/**/.mozilla/**", "~/snap/**/.config/**",
+    "~/.config/sops/**", "~/.config/age/**", "~/.age/**", "~/.yarnrc.yml",
+    "~/.config/composer/auth.json", "~/.composer/auth.json", "~/.nuget/**",
+    "~/.ivy2/.credentials", "~/.claude.json", "~/.config/github-copilot/**",
+    "~/.m2/settings.xml", "~/.gradle/gradle.properties", "~/.config/pip/**",
+    "~/.pip/**", "~/.terraformrc",
+)  # fmt: skip
+
+#: Container and orchestrator secret mounts, Kerberos caches, the host's TLS keys.
+_MOUNTED_SECRETS = (
     "//run/secrets/**", "//var/run/secrets/**", "//etc/ssl/private/**",
-    "//tmp/krb5cc_*", "//var/tmp/krb5cc_*", "~/.config/configstore/**",
-    "~/.vault_pass*", "//**/.vault_pass*",
-    "~/snap/**/.mozilla/**", "~/snap/**/.config/**", "~/.config/sops/**",
-    "~/.config/age/**", "~/.age/**", "~/.yarnrc.yml", "//**/.yarnrc.yml",
-    "~/.config/composer/auth.json", "~/.composer/auth.json", "//**/auth.json",
-    "~/.nuget/**", "~/.ivy2/.credentials", "~/.local/share/fish/fish_history",
-    "~/.node_repl_history", "~/.mysql_history", "~/.sqlite_history",
-    # Browsers' and editors' profiles: cookies, saved sign-ins, extension tokens.
+    "//tmp/krb5cc_*", "//var/tmp/krb5cc_*",
+)  # fmt: skip
+
+#: Browsers' and editors' profiles: cookies, saved sign-ins, extension tokens.
+_PROFILES = (
     "~/.config/google-chrome/**", "~/.config/chromium/**", "~/.mozilla/**",
     "~/.config/Code/**",
-    # Where API keys are exported, and pasted into commands.
+)  # fmt: skip
+
+#: Where API keys are exported, and pasted into commands.
+_SHELL_FILES = (
     "~/.bashrc", "~/.bash_profile", "~/.profile", "~/.zshrc", "~/.zshenv",
     "~/.zprofile", "~/.bash_history", "~/.zsh_history", "~/.python_history",
-    "~/.psql_history",
-    # The rest anywhere on the filesystem. "//" is an absolute path in a permission
-    # rule, and a bare "**/" only the working directory (measured: a file in a sibling
-    # directory was read under "**/", and refused under "//**/", as was one in the
-    # working directory).
-    # Environment files, the repository's included, and direnv's; joined, because the
-    # diff scrubber rightly redacts a line that names one.
-    "//**/." + "env", "//**/." + "env.*", "//**/." + "envrc",
-    # The credential files above, in the repository under review or any other: a
-    # remote's URL in .git/config can carry a token.
-    "//**/.git/config", "//**/.git/modules/**/config", "//**/.git-credentials", "//**/.npmrc", "//**/.pypirc",
-    "//**/.netrc", "//**/.docker/config.json",
-    # What the diff scrubber holds to be a credential whole, by name or suffix
-    # (scrub_diff.SECRET_NAMES, SECRET_SUFFIXES; a test keeps the two in step -- the
-    # runner's private copy of this package has no scrubber to import). Joined where
-    # the scrubber would redact the line.
+    "~/.psql_history", "~/.local/share/fish/fish_history", "~/.node_repl_history",
+    "~/.mysql_history", "~/.sqlite_history",
+)  # fmt: skip
+
+#: The credential files above anywhere on the filesystem, the repository under review
+#: included -- a remote's URL in .git/config can carry a token -- and environment
+#: files, direnv's among them.
+_ANYWHERE = (
+    "//**/" + DOTENV, "//**/" + DOTENV + ".*", "//**/" + DOTENV + "rc",
+    "//**/.git/config", "//**/.git/modules/**/config", "//**/.git-credentials",
+    "//**/.npmrc", "//**/.pypirc", "//**/.netrc", "//**/.docker/config.json",
+    "//**/*.tfstate", "//**/*.tfstate.backup", "//**/*.tfvars", "//**/.vault_pass*",
+    "//**/.yarnrc.yml", "//**/auth.json",
+)  # fmt: skip
+
+#: What the diff scrubber holds to be a credential whole, by name or suffix
+#: (scrub_diff.SECRET_NAMES, SECRET_SUFFIXES). Written out, not imported -- the
+#: runner's private copy of this package has no scrubber -- and a test keeps the two
+#: in step.
+_SCRUBBER_MIRROR = (
     "//**/token", "//**/.htpasswd", "//**/credentials", "//**/id_rsa", "//**/id_dsa",
     "//**/id_ecdsa", "//**/id_ed25519", "//**/*.pem", "//**/*.key", "//**/*.p12",
     "//**/*.pfx", "//**/*.jks", "//**/*.keystore",
-    # The CLIs' and build tools' own sign-ins.
-    "~/.claude.json", "~/.config/github-copilot/**", "~/.m2/settings.xml",
-    "~/.gradle/gradle.properties", "~/.config/pip/**", "~/.pip/**", "~/.terraformrc",
-    # agy's throwaway copy of its sign-in token, wherever its scratch directory is, and
-    # the loop's private directories for the reviewers' outputs and hermes's prompts.
+)  # fmt: skip
+
+#: The loop's own private files: agy's throwaway copy of its sign-in token, wherever
+#: its scratch directory is, and the directories of the reviewers' outputs, hermes's
+#: prompts and full mode's review.
+_LOOP_PRIVATE = (
     "//**/antigravity-oauth-token", "//**/mmcra-out-*/**", "//**/mmcra-prompt-*/**",
     "//**/mmcra-review-*/**",
-    # All of /proc: processes' environments, this one's and the CLI's own among them,
-    # and the aliases (/proc/self/root, /proc/<pid>/cwd) that reach every file above
-    # by another path.
-    "//proc/**",
+)  # fmt: skip
+
+#: All of /proc: processes' environments, this one's and the CLI's own among them, and
+#: the aliases (/proc/self/root, /proc/<pid>/cwd) that reach every file above by
+#: another path.
+_PROC = ("//proc/**",)
+
+SECRET_READS = (
+    *_HOME_CREDENTIALS, *_MOUNTED_SECRETS, *_PROFILES, *_SHELL_FILES, *_ANYWHERE,
+    *_SCRUBBER_MIRROR, *_LOOP_PRIVATE, *_PROC,
 )  # fmt: skip
 
 
@@ -216,15 +246,12 @@ def with_account_home(paths: tuple[str, ...]) -> list[str]:
     $HOME names another directory (CI, ``sudo -E``, a wrapper): ``~`` in a rule is
     $HOME, and the files are in the account's."""
     reads = list(paths)
-    try:
-        import pwd
+    from .paths import account_home
 
-        account = pwd.getpwuid(os.getuid()).pw_dir
-    except (ImportError, KeyError):
+    account = account_home()
+    if account is None or account == Path(os.path.expanduser("~")):
         return reads
-    if not account or Path(account) == Path(os.path.expanduser("~")):
-        return reads
-    root = account.rstrip("/")
+    root = str(account).rstrip("/")
     if not rule_safe(root):
         # --disallowedTools takes its rules space-separated, with ( ) around a path and
         # globs in it: a rule with any of those in its path would mean something else.

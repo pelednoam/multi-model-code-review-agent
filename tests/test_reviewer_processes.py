@@ -175,10 +175,10 @@ class TestReviewerProcesses(AgyCase):
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("PATH", "/nonexistent")
-        monkeypatch.setattr(reviewers, "_NO_PS", [])
+        monkeypatch.setattr(reviewers, "_NO_PS", False)
         assert reviewers._is_zombie(os.getpid()) is None
         # Not looked for again, every poll of every reviewer.
-        assert reviewers._NO_PS == [True]
+        assert reviewers._NO_PS is True
 
     def test_a_second_signal_waits_for_the_cleanup(self, tmp_path: Path) -> None:
         # A second Ctrl-C or SIGTERM raised in the middle of the cleanup the first had

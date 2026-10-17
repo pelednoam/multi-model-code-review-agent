@@ -261,7 +261,7 @@ key past a scrubber.
 | 9 | **Scrubber failed** | `scrub_diff.py` aborted part-way through. The patch on disk is truncated and its tail was never scrubbed, so it is not shown to a reviewer. Nothing needs rotating; fix the input or the environment and re-run |
 | 10 | **Report only** | `--report-only` was set and there are blocking findings. Nothing was changed; read them and fix them yourself |
 | 11 | **Incomplete** | No blocking findings among the reviewers that answered, but at least one produced nothing (a revoked key, a network drop, a timeout). Its findings are unknown, so this is not convergence: fix what stopped it -- `stderr-N.txt` says -- and re-run. Every round with a missing reviewer also prints `INCOMPLETE:` naming it, whatever else happens |
-| 12 | **Tampered** | A reviewer changed the working tree (the tamper check lists what). Fix mode stops before the merge agent, the gate and any commit, rather than build on files nobody wrote; `--report-only` reports it, and returns 12 rather than 0 (or 11) for a round with nothing blocking |
+| 12 | **Tampered** | A reviewer changed the working tree (the tamper check lists what). Fix mode stops before the merge agent, the gate and any commit, rather than build on files nobody wrote; `--report-only` reports it, and returns 12 rather than 0, 7 or 11 for a round with nothing blocking |
 
 **Watching a round.** Four models on a large diff is fifteen minutes, and the
 loop used to say nothing during it. It now prints a line every 30 seconds
@@ -663,6 +663,7 @@ The author added a new function but no test file.
     }
   ],
   "coverage_warnings": [],
+  "configuration_warnings": [],
   "n_warnings": 1
 }
 ```
@@ -773,7 +774,7 @@ have detected it via fingerprint matching and exited with code 2
 | `scripts/review_loop/` | The convergence loop's package; also the full-mode runner's checks and extraction, through `runner_entry.py` |
 | `docs/agy-sandbox.md` | What agy's bubblewrap sandbox closes, what it does not, and its switches |
 | `docs/codex-sandbox.md` | Why codex's sandbox is verified before use, and how to fix a host where it is not read-only |
-| `tests/` | Test suite: `test_review_scripts.py`, `test_agy_*.py`, `test_reviewer_processes.py`, `test_runner_cli.py`; shared: `helpers.py` (takes the full-mode runner out of the agent doc), `agy_case.py`, `conftest.py` (switches agy off for every test unless it switches it on) |
+| `tests/` | Test suite: `test_review_scripts.py` (the scrubber, preflight, loop and gate), `test_tamper.py`, `test_merge_agent.py`, `test_runner_script.py` (the full-mode runner), `test_agy_*.py`, `test_reviewer_processes.py`, `test_runner_cli.py`; shared: `helpers.py` (takes the full-mode runner out of the agent doc), `agy_case.py`, `conftest.py` (switches agy off for every test unless it switches it on) |
 
 ## Key design decisions
 
@@ -820,8 +821,10 @@ For sensitive/FDA-path code where data-at-rest guarantees matter, use
 Hermes+Bedrock for all reviewers. Its writes are not prevented, so prefer
 the convergence loop, whose tamper check reports them -- in tracked and
 untracked files (by content), ignored files (by size and modification
-time), the repository's git hooks and config, and the home's startup
-files; it does not see other writes outside the repository, and full mode
+time), the repository's git hooks and config, the home's startup files and
+the directories whose files run unasked (`~/.bashrc.d`, autostart, systemd user
+units), the programs the loop runs by name, and the directories on `PATH` you
+can write; it does not see other writes outside the repository, and full mode
 does not check. The loop's own output redirected into the repository is no
 reviewer's write; one copied there through `tee` needs `--log-file PATH`.
 

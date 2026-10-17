@@ -220,11 +220,11 @@ def _codex_mcp_off(cwd: str = ".") -> int:
 
 def _audit_requote(raw: str, repo: str) -> int:
     """Re-read each line the raw audit ``raw`` quotes from its source in ``repo``, and
-    redact those that hold a credential (``diff._requote_from_source``) -- as the loop
+    redact those that hold a credential (``diff.requote_from_source``) -- as the loop
     does before it scrubs the audit: an older installed preflight cuts its quotes."""
-    from .diff import _requote_from_source
+    from .diff import requote_from_source
 
-    _requote_from_source(Path(raw), Path(repo))
+    requote_from_source(Path(raw), Path(repo))
     return 0
 
 

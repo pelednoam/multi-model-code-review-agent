@@ -21,10 +21,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
-try:
-    import pwd
-except ImportError:  # not a Unix: agy's sandbox is Linux-only, the loop is not
-    pwd = None  # type: ignore[assignment]
+from . import paths
 
 
 # -- the sandbox ---------------------------------------------------------------
@@ -107,15 +104,8 @@ def user_homes() -> list[Path]:
     passwd entry (a container under a bare numeric UID), whose home is unknown; or a
     home of ``/``, which cannot be replaced without replacing everything.
     """
-    if pwd is None:
-        raise OSError("no passwd database on this platform; agy's sandbox needs Linux")
-    try:
-        account = Path(pwd.getpwuid(os.getuid()).pw_dir)
-    except KeyError as exc:
-        raise OSError(
-            f"uid {os.getuid()} has no passwd entry; its home is unknown"
-        ) from exc
-    homes = {Path.home().resolve(), account.resolve()}
+    account = paths.account_home(strict=True)
+    homes = {Path.home().resolve(), account}
     if Path("/") in homes:
         raise OSError("a home directory of / cannot be hidden from agy")
     return sorted(homes, key=lambda h: len(h.parts))

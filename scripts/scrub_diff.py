@@ -38,6 +38,7 @@ Exit codes:
 
 from __future__ import annotations
 
+import argparse
 import functools
 import json
 import re
@@ -163,8 +164,9 @@ _QUOTE_GOES_ON = r"(?![.,\])};:+><=&|!?\s])"
 #: The user: like the password (``_URL_PASSWORD_CHAR``), not past a quote that closes
 #: a string -- or it ran from one into the next: ['https://example.com','mailto:a@b'].
 #: Without an @ in it (``_URL_USER_NO_AT``) or with one (``_URL_USER_WITH_AT``), whose
-#: password may hold no "/". Inside double quotes, where a ' ends nothing, any '
-#: (``_URL_USER_DOUBLE_QUOTED``, ``_URL_USER_DOUBLE_QUOTED_NO_AT``).
+#: password may hold no "/". Inside double quotes, where a ' ends nothing, the user may
+#: hold any ', with an @ (``_URL_USER_DOUBLE_QUOTED``) or without
+#: (``_URL_USER_DOUBLE_QUOTED_NO_AT``).
 _URL_USER_DOUBLE_QUOTED = r"//[^\s/:\"?#\[\]]{0,256}:"
 _URL_USER_DOUBLE_QUOTED_NO_AT = r"//[^\s/:\"?#\[\]@]{0,256}:"
 #: The user without an @ in it, and with one.
@@ -218,6 +220,19 @@ _URL_PASSWORD = (
 # is concerned -- a comment calling it a fixture is exactly what somebody would
 # write to smuggle one past, and a fixture that really is shaped like a key
 # should be redacted from a review diff anyway.
+#: The URL patterns whose password may be a port (``_URL_NOT_A_PASSWORD``), and so
+#: whose web URL's port and query ``_hits`` sets aside: marked where each is made,
+#: rather than told by what its source text holds.
+_PORT_RULED: list[re.Pattern[str]] = []
+
+
+def _port_ruled(source: str) -> re.Pattern[str]:
+    """``source`` compiled, and kept among ``_PORT_RULED``."""
+    pattern = re.compile(source)
+    _PORT_RULED.append(pattern)
+    return pattern
+
+
 SHAPE_PATTERNS = [
     _PEM_BEGIN,
     re.compile(r"(?i)(^|[\s'\"/])\.env(\.[a-z]+)?([\s'\"/]|$)"),
@@ -245,13 +260,13 @@ SHAPE_PATTERNS = [
     # proxy URL -- unless it is no password (``_URL_NOT_A_PASSWORD``): documentation
     # and connection-string code are full of those, and a redaction aborts the
     # review. Written in parts, so that this line is not one.
-    re.compile(
+    _port_ruled(
         _URL_SCHEME + _URL_USER_NO_AT + _URL_NOT_A_PASSWORD + _URL_PASSWORD + r"@"
     ),
     # A user holding an @ (Azure's user@server) with a password that has no "/": with
     # one, it is an scp-style git address with a revision -- a "/" path, then "@v1" --
     # not a password (git+ssh://git@github.com:org/repo.git@v1).
-    re.compile(
+    _port_ruled(
         _URL_SCHEME
         + _URL_USER_WITH_AT
         + _URL_NOT_A_PASSWORD
@@ -262,14 +277,14 @@ SHAPE_PATTERNS = [
     # Inside single quotes or backticks, a password whose quote of the other kind is
     # followed by punctuation (a " then ")" in a single-quoted DSN): there that quote ends
     # nothing either.
-    re.compile(
+    _port_ruled(
         r"'"
         + _URL_SCHEME
         + r"//[^\s/:'?#\[\]@]{0,256}:"
         + _URL_NOT_A_PASSWORD
         + r"[^'\s@/]{1,256}@"
     ),
-    re.compile(
+    _port_ruled(
         r"`"
         + _URL_SCHEME
         + r"//[^\s/:`?#\[\]@]{0,256}:"
@@ -278,7 +293,7 @@ SHAPE_PATTERNS = [
     ),
     # Inside double quotes, where a ' is no string's end and ends nothing: the password
     # runs to the "@" (K7a');s9 is one).
-    re.compile(
+    _port_ruled(
         r'"'
         + _URL_SCHEME
         + _URL_USER_DOUBLE_QUOTED_NO_AT
@@ -286,7 +301,7 @@ SHAPE_PATTERNS = [
         + r'[^"\s@]{1,256}@'
     ),
     # And with an @ in the user, a password with no "/", as outside quotes.
-    re.compile(
+    _port_ruled(
         r'"'
         + _URL_SCHEME
         + _URL_USER_DOUBLE_QUOTED
@@ -296,7 +311,7 @@ SHAPE_PATTERNS = [
     # A URL no quote opens (YAML, an .ini, prose): a quote in it ends no string, so
     # its password may hold one (a YAML dsn whose password has a ' and a comma). Slash-free,
     # so a path with an @ further on is no password.
-    re.compile(
+    _port_ruled(
         r"(?<![A-Za-z0-9+.\-'\"`])"
         + _SCHEME_NAME
         + _URL_USER_NO_AT
@@ -339,7 +354,7 @@ _WEB_PORT_AND_QUERY = re.compile(
 def _hits(pattern: re.Pattern[str], body: str) -> bool:
     """Whether ``pattern`` finds a credential in ``body``, a URL pattern's match that
     is a web URL's port and query aside (``_WEB_PORT_AND_QUERY``)."""
-    if _URL_NOT_A_PASSWORD not in pattern.pattern:
+    if pattern not in _PORT_RULED:
         return pattern.search(body) is not None
     return any(
         not _WEB_PORT_AND_QUERY.match(match.group(0))
@@ -659,6 +674,14 @@ def redacts(text: str) -> bool:
     return False
 
 
+#: A key that names a credential by how it ends (GITHUB_TOKEN, db.password, api-key):
+#: in a JSON document's keys, where redacting one too many costs nothing.
+_SECRET_KEY = re.compile(
+    r"(?i)(?:^|[_.-])(?:token|secret|pass(?:w(?:or)?d)?|pwd|api[_-]?key"
+    r"|private[_-]?key|credentials?)$"
+)
+
+
 @functools.lru_cache(maxsize=1024)
 def _secret_field(key: str) -> bool:
     """Whether ``key`` names a credential: whether the scrubber would redact it
@@ -666,6 +689,8 @@ def _secret_field(key: str) -> bool:
     holding a quote or a newline changed what the line said, and passed. OAuth's own
     names are named outright: the line patterns do not read access_token as one."""
     if re.fullmatch(r"(?:access|refresh|id|auth|bearer)[_-]?token", key, re.IGNORECASE):
+        return True
+    if _SECRET_KEY.search(key):
         return True
     return any(
         redacts(probe)
@@ -740,22 +765,35 @@ def scrub_json() -> int:
     return redacted
 
 
+def _parse_args(argv: list[str]) -> argparse.Namespace:
+    """The mode, one of the module docstring's. Anything else is exit 2, not diff mode
+    by default: a line there without a +, - or space passes unscrubbed, and a caller
+    that asked for another mode would get exit 0."""
+    # No -h either: its help on stdout with exit 0 reads as a clean, empty diff.
+    parser = argparse.ArgumentParser(
+        prog="scrub_diff.py", allow_abbrev=False, add_help=False
+    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--text", dest="mode", action="store_const", const="text")
+    mode.add_argument("--json", dest="mode", action="store_const", const="json")
+    # The diff is this agent's own, whose scrubber and tests hold the patterns as
+    # fixtures. Only then are those files passed as such: a host project's file of the
+    # same name is the host's, and its keys are keys.
+    mode.add_argument(
+        "--agent-repo", dest="mode", action="store_const", const="agent-repo"
+    )
+    return parser.parse_args(argv)
+
+
 def main() -> None:
     """Read stdin, scrub, write to stdout. Exit 1 if any redactions."""
     _force_utf8(sys.stdin)
     _force_utf8(sys.stdout)
 
-    # --agent-repo: the diff is this agent's own, whose scrubber and tests hold the
-    # patterns as fixtures. Only then are those files passed as such: a host project's
-    # file of the same name is the host's, and its keys are keys.
-    agent_repo = sys.argv[1:] == ["--agent-repo"]
-    if sys.argv[1:] and not agent_repo and sys.argv[1:] not in (["--text"], ["--json"]):
-        # Not diff mode by default: a line there without a +, - or space passes
-        # unscrubbed, and a caller that asked for another mode would get exit 0.
-        print(f"# scrub_diff.py: unknown arguments {sys.argv[1:]!r}", file=sys.stderr)
-        sys.exit(2)
-    if sys.argv[1:] in (["--text"], ["--json"]):
-        text = sys.argv[1] == "--text"
+    args = _parse_args(sys.argv[1:])
+    agent_repo = args.mode == "agent-repo"
+    if args.mode in ("text", "json"):
+        text = args.mode == "text"
         n_text = scrub_text() if text else scrub_json()
         if n_text:
             what = "line(s)" if text else "string(s)"

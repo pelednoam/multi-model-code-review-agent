@@ -344,14 +344,14 @@ def run_preflight(round_dir: Path, repo: Path) -> Path:
                 f"preflight failed (no audit JSON, exit {result.returncode}): "
                 f"{result.stderr}"
             )
-        _requote_from_source(raw, repo)
+        requote_from_source(raw, repo)
         _scrub_audit(raw, audit_path)
     finally:
         raw.unlink(missing_ok=True)
     return audit_path
 
 
-def _requote_from_source(raw: Path, repo: Path) -> None:
+def requote_from_source(raw: Path, repo: Path) -> None:
     """Redact, in the raw audit, each quoted line whose whole source line holds a
     credential. An installed preflight older than this checkout quotes lines cut to
     120 characters, and a credential cut at the boundary was only partly there for

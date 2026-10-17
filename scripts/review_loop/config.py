@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -102,8 +103,6 @@ def is_agent_repo(repo: Path) -> bool:
 
 def _common_dir(repo: Path) -> Path | None:
     """The repository ``repo`` is a worktree of, by its git common directory."""
-    import subprocess
-
     try:
         found = subprocess.run(
             [GIT, "rev-parse", "--path-format=absolute", "--git-common-dir"],

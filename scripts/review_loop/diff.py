@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import bisect
+import contextlib
+import json
+import os
+import signal
 import subprocess
 import sys
 from typing import TYPE_CHECKING
 
-from .backends import _run
-from .config import SCRIPTS_DIR, diff_pathspec, is_agent_repo
+from .config import GIT, SCRIPTS_DIR, VENDORED_PATHS, diff_pathspec, is_agent_repo
+from .proc import run, signals_held, signals_unwind
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -42,7 +47,69 @@ class SecretsDetectedError(RuntimeError):
 DEFAULT_BASE = "origin/main"
 
 
-def collect_diff(round_dir: Path, repo: Path, base: str = DEFAULT_BASE) -> tuple[Path, int]:
+def _warn_of_vendored_changes(repo: Path, diff_range: list[str]) -> None:
+    """Name the vendored review files this change touches, which are not reviewed.
+
+    They are left out of a host project's diff (``diff_pathspec``) so that a fresh
+    install is not spent reviewing the reviewer. But full mode runs the project's own
+    copy -- its sandbox builder among them -- so a change that weakens it would run
+    with no reviewer having seen it. Re-vendoring changes them too, so this warns
+    rather than refuses. And it is itself part of that copy: a change that removes it
+    removes the warning too. The protection is the one docs/agy-sandbox.md gives --
+    run the loop from a trusted checkout of this agent, with --repo naming the
+    project; this only makes the untrusted case visible where it is not doctored.
+    ``diff_range`` is the range the diff was taken over, its fallbacks included, and
+    new files count as they do there.
+    """
+    if is_agent_repo(repo):
+        return
+    changed = run(
+        [GIT, "diff", *diff_range, "--name-only", "--", *VENDORED_PATHS], cwd=repo
+    )
+    added = run(
+        [GIT, "ls-files", "--others", "--exclude-standard", "--", *VENDORED_PATHS],
+        cwd=repo,
+    )
+    if changed.returncode != 0 or added.returncode != 0:
+        print(
+            "  WARNING: could not tell whether this change touches the reviewer's own"
+            " vendored files, which are not reviewed"
+        )
+        return
+    names = (changed.stdout or "").split() + (added.stdout or "").split()
+    if names:
+        shown = ", ".join(names[:5]) + (", ..." if len(names) > 5 else "")
+        print(
+            f"  WARNING: this change touches the reviewer's own vendored files"
+            f" ({shown}), which are not reviewed; full mode runs them. If they did"
+            " not come from re-running install.sh, check them by hand."
+        )
+
+
+#: A diff the scrubber can read, whatever the user's git config says: color.diff=always
+#: put an escape before every +, and the scrubber, seeing no +, passed each line; an
+#: external diff tool or a textconv filter changes the lines altogether.
+_PLAIN = ("--no-color", "--no-ext-diff", "--no-textconv")
+
+
+def _git_diff(cmd: list[str], repo: Path) -> subprocess.CompletedProcess[str]:
+    """A git diff's output, decoded but not translated: read as text, a lone "\r" in
+    a changed line became a line break, and what followed it reached the scrubber as
+    a line with no +, - or space -- metadata to it, and passed unscrubbed."""
+    done = subprocess.run(
+        cmd, cwd=repo, capture_output=True, stdin=subprocess.DEVNULL, check=False
+    )
+    return subprocess.CompletedProcess(
+        cmd,
+        done.returncode,
+        done.stdout.decode("utf-8", errors="replace"),
+        done.stderr.decode("utf-8", errors="replace"),
+    )
+
+
+def collect_diff(
+    round_dir: Path, repo: Path, base: str = DEFAULT_BASE
+) -> tuple[Path, int]:
     """Collect the scrubbed diff between ``base`` and the working tree.
 
     The working tree includes files git does not track yet (``_untracked``):
@@ -64,7 +131,9 @@ def collect_diff(round_dir: Path, repo: Path, base: str = DEFAULT_BASE) -> tuple
             was reviewed that never was.
     """
     if base != DEFAULT_BASE:
-        named = _run(["git", "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"], cwd=repo)
+        named = run(
+            [GIT, "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"], cwd=repo
+        )
         if named.returncode != 0:
             msg = f"--base {base!r} does not name a commit in this repository"
             raise RuntimeError(msg)
@@ -74,9 +143,11 @@ def collect_diff(round_dir: Path, repo: Path, base: str = DEFAULT_BASE) -> tuple
     # budget -- 60% of the diff on a fresh install -- reviewing the reviewer.
     pathspec = diff_pathspec(repo)
     untracked = _untracked(repo, pathspec)
-    git = _run(["git", "diff", "--merge-base", base, "--", *pathspec], cwd=repo)
+    diff_range = ["--merge-base", base]
+    git = _git_diff([GIT, "diff", *_PLAIN, *diff_range, "--", *pathspec], repo)
     if git.returncode != 0:
-        fallback = _run(["git", "diff", "HEAD~1", "--", *pathspec], cwd=repo)
+        diff_range = ["HEAD~1"]
+        fallback = _git_diff([GIT, "diff", *_PLAIN, *diff_range, "--", *pathspec], repo)
         if fallback.returncode != 0:
             raise RuntimeError(
                 f"failed to collect diff: {git.stderr}\n{fallback.stderr}"
@@ -88,7 +159,9 @@ def collect_diff(round_dir: Path, repo: Path, base: str = DEFAULT_BASE) -> tuple
         # something else. And not when there are new files: those *are* the
         # change, and reviewing the last commit instead would review the
         # wrong thing without saying so.
-        git = _run(["git", "diff", "HEAD~1", "--", *pathspec], cwd=repo)
+        diff_range = ["HEAD~1"]
+        git = _git_diff([GIT, "diff", *_PLAIN, *diff_range, "--", *pathspec], repo)
+    _warn_of_vendored_changes(repo, diff_range)
     diff_input = (git.stdout or "") + untracked
     # Every hop is pinned to UTF-8 with replacement. scrub_diff.py pins its own
     # streams because CI runs under LC_ALL=C, but that was the only hop that
@@ -97,7 +170,12 @@ def collect_diff(round_dir: Path, repo: Path, base: str = DEFAULT_BASE) -> tuple
     # raised -- and this repository's own sources are full of en dashes.
     with open(diff_path, "w", encoding="utf-8", errors="replace") as out_f:
         scrubber = subprocess.Popen(
-            [sys.executable, str(SCRIPTS_DIR / "scrub_diff.py")],
+            [
+                sys.executable,
+                str(SCRIPTS_DIR / "scrub_diff.py"),
+                # Its own fixtures passed as such in this agent's repository only.
+                *(["--agent-repo"] if is_agent_repo(repo) else []),
+            ],
             stdin=subprocess.PIPE,
             stdout=out_f,
             stderr=subprocess.PIPE,
@@ -146,15 +224,17 @@ def _untracked(repo: Path, pathspec: list[str]) -> str:
             one of them. A review that silently dropped a file is the failure
             this exists to end, so it does not get to happen quietly here.
     """
-    listed = _run(
-        ["git", "ls-files", "--others", "--exclude-standard", "-z", "--", *pathspec],
+    listed = run(
+        [GIT, "ls-files", "--others", "--exclude-standard", "-z", "--", *pathspec],
         cwd=repo,
     )
     if listed.returncode != 0:
         raise RuntimeError(f"failed to list untracked files: {listed.stderr}")
     parts: list[str] = []
     for name in (one for one in listed.stdout.split("\0") if one):
-        added = _run(["git", "diff", "--no-index", "--", "/dev/null", name], cwd=repo)
+        added = _git_diff(
+            [GIT, "diff", *_PLAIN, "--no-index", "--", "/dev/null", name], repo
+        )
         # --no-index exits 1 when the two sides differ, which a new file
         # against /dev/null always does; anything else is git failing.
         if added.returncode not in (0, 1):
@@ -182,6 +262,61 @@ def _preflight_script(repo: Path) -> Path:
     return SCRIPTS_DIR / "review_preflight.py"
 
 
+#: How long the preflight may take: its coverage step runs the project's test suite.
+_PREFLIGHT_TIMEOUT = 1800
+
+
+def _run_tree(
+    cmd: list[str], cwd: Path, timeout: float
+) -> subprocess.CompletedProcess[str]:
+    """Run ``cmd`` in a session of its own, and at ``timeout`` kill all of it: the
+    preflight runs the project's test suite, and killing the preflight alone left
+    the tests it started running on."""
+    proc: subprocess.Popen[str] | None = None
+    try:
+        # A SIGTERM or SIGHUP raises in here rather than ending Python with the session
+        # it started still running, and the handlers below kill it. Held while it
+        # starts, so that one arriving then is raised once there is a process to kill.
+        with signals_unwind():
+            with signals_held():
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=cwd,
+                    # The repository to audit, whichever copy of the preflight runs.
+                    env={**os.environ, "MMCRA_PREFLIGHT_REPO": str(cwd.resolve())},
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    start_new_session=True,
+                )
+            out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        _kill_tree(proc)
+        raise RuntimeError(f"preflight did not finish in {timeout:.0f}s") from exc
+    except BaseException:
+        _kill_tree(proc)
+        raise
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
+def _kill_tree(proc: subprocess.Popen[str] | None) -> None:
+    """Kill ``proc``'s session, if it started, and reap it -- without waiting for its
+    pipes to close: a test that started a session of its own holds them open past the
+    kill, for as long as it runs, and the output is not wanted."""
+    if proc is None:
+        return
+    with contextlib.suppress(OSError):
+        os.killpg(proc.pid, signal.SIGKILL)
+    for stream in (proc.stdout, proc.stderr):
+        if stream is not None:
+            stream.close()
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        proc.wait(timeout=10)
+
+
 def run_preflight(round_dir: Path, repo: Path) -> Path:
     """Run preflight audit, return path to audit JSON.
 
@@ -193,20 +328,112 @@ def run_preflight(round_dir: Path, repo: Path) -> Path:
     JSON wasn't produced at all.
     """
     audit_path = round_dir / "audit.json"
-    result = _run(
-        [
-            sys.executable,
-            str(_preflight_script(repo)),
-            "--output",
-            str(audit_path),
-        ],
-        cwd=repo,
-    )
-    if not audit_path.exists():
-        raise RuntimeError(
-            f"preflight failed (no audit JSON, exit {result.returncode}): {result.stderr}"
+    # Written raw beside it, scrubbed into it, and removed whatever happens: the round
+    # directory is kept, and a raw audit there would be what the scrub keeps out.
+    raw = round_dir / ".audit.raw.json"
+    try:
+        result = _run_tree(
+            [sys.executable, str(_preflight_script(repo)), "--output", str(raw)],
+            repo,
+            # Generous -- it runs the project's tests for coverage -- but not none: the
+            # branch's own tests decide how long they take.
+            _PREFLIGHT_TIMEOUT,
         )
+        if not raw.exists():
+            raise RuntimeError(
+                f"preflight failed (no audit JSON, exit {result.returncode}): "
+                f"{result.stderr}"
+            )
+        requote_from_source(raw, repo)
+        _scrub_audit(raw, audit_path)
+    finally:
+        raw.unlink(missing_ok=True)
     return audit_path
+
+
+def requote_from_source(raw: Path, repo: Path) -> None:
+    """Redact, in the raw audit, each quoted line whose whole source line holds a
+    credential. An installed preflight older than this checkout quotes lines cut to
+    120 characters, and a credential cut at the boundary was only partly there for
+    the scrub after it to see; the file and line it names are read whole here."""
+    # Here, not at the top: the full-mode runner's private copy of this package has no
+    # scrub_diff beside it, and imports this module (the package's __init__ does).
+    from scripts.scrub_diff import REDACTED_TEXT, redacts
+
+    try:
+        audit = json.loads(raw.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError):
+        return  # the scrub after this refuses it
+    hits = audit.get("suspicious_patterns") if isinstance(audit, dict) else None
+    if not isinstance(hits, list):
+        return
+    root = repo.resolve()
+    changed = False
+    # Each file read and numbered once, however many hits it has.
+    read: dict[Path, tuple[list[str], list[str]]] = {}
+    for hit in hits:
+        file = hit.get("file") if isinstance(hit, dict) else None
+        number = hit.get("line") if isinstance(hit, dict) else None
+        if not isinstance(file, str) or not isinstance(number, int) or number < 1:
+            continue
+        path = (root / file).resolve()
+        if not path.is_relative_to(root):
+            # Not re-read, so not shown to be clean: redacted, as a quote that cannot
+            # be checked whole is one that might be cut through a credential.
+            hit["text"] = REDACTED_TEXT
+            changed = True
+            continue
+        if path not in read:
+            try:
+                text = path.read_bytes().decode("utf-8", errors="replace")
+            except OSError:
+                read[path] = ([], [])  # unreadable: no line, so its quotes are redacted
+            else:
+                read[path] = _both_numberings(text)
+        candidates = [lines[number - 1] for lines in read[path] if number <= len(lines)]
+        # A line that is not there -- the file unreadable, or shorter -- cannot be
+        # shown clean either.
+        if not candidates or any(redacts(line) for line in candidates):
+            hit["text"] = REDACTED_TEXT
+            changed = True
+    if changed:
+        raw.write_text(json.dumps(audit), encoding="utf-8")
+
+
+def _both_numberings(text: str) -> tuple[list[str], list[str]]:
+    """``text``'s lines by this checkout's numbering ("\n" alone, as git's) and by an
+    older preflight's (str.splitlines, which also breaks at "\r", form feeds and
+    Unicode's separators) -- each of the latter widened to the whole physical line it
+    is part of: half of one split at a "\r" held a credential's name or value, not
+    both, and looked clean. Not knowing which wrote the audit, either one redacts."""
+    physical = text.split("\n")
+    starts = [0]
+    for line in physical[:-1]:
+        starts.append(starts[-1] + len(line) + 1)
+    legacy = []
+    offset = 0
+    for piece in text.splitlines(keepends=True):
+        legacy.append(physical[bisect.bisect_right(starts, offset) - 1])
+        offset += len(piece)
+    return physical, legacy
+
+
+def _scrub_audit(raw: Path, audit_path: Path) -> None:
+    """Scrub the audit in ``raw`` with this checkout's scrubber into ``audit_path``.
+
+    The audit quotes the files under review, and goes into every prompt. The
+    preflight that wrote it may be the project's own installed copy
+    (``_preflight_script``), too old to scrub its quotes, so they are scrubbed here
+    whichever wrote them. A redaction is not an abort, as it is for the diff: the
+    quote is replaced, and the review goes on. One that cannot be done is.
+    """
+    with raw.open(encoding="utf-8", errors="replace") as source:
+        done = run(
+            [sys.executable, str(SCRIPTS_DIR / "scrub_diff.py"), "--json"], stdin=source
+        )
+    if done.returncode not in (0, 1):
+        raise RuntimeError(f"could not scrub the audit: {done.stderr.strip()[-500:]}")
+    audit_path.write_text(done.stdout, encoding="utf-8")
 
 
 #: A single file bigger than this share of the diff is worth mentioning...

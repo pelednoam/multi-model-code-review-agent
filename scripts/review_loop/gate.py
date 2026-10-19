@@ -5,8 +5,8 @@ from __future__ import annotations
 import subprocess
 from typing import TYPE_CHECKING
 
-from .backends import _run
 from .config import TEST_TIMEOUT, interpreter, project_gate
+from .proc import run
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -37,7 +37,7 @@ def run_gate(repo: Path) -> tuple[bool, str]:
     for label, cmd in gate_steps:
         output_parts.append(f"\n=== {label} ===\n")
         try:
-            result = _run(cmd, cwd=repo, timeout=TEST_TIMEOUT)
+            result = run(cmd, cwd=repo, timeout=TEST_TIMEOUT)
         except subprocess.TimeoutExpired:
             output_parts.append(f"{label} TIMED OUT after {TEST_TIMEOUT}s")
             return False, "".join(output_parts)

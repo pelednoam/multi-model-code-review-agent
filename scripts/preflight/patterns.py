@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .config import (
+    MAX_ARTIFACT_BYTES,
     REPO_ROOT,
     SELF_SKIP_PREFIXES,
     SOURCE_DIRS,
@@ -10,6 +11,27 @@ from .config import (
     TEST_DIRS,
 )
 from .git_state import is_safe_relpath
+
+try:  # run as scripts/review_preflight.py, with scripts/ on the path
+    from scrub_diff import REDACTED_TEXT, redacts
+except ImportError:  # imported as the scripts package
+    from scripts.scrub_diff import REDACTED_TEXT, redacts
+
+#: What a quoted line becomes when it looks like it holds a credential: the diff's own
+#: marker, without the "# " that keeps a redacted diff line a comment.
+REDACTED = REDACTED_TEXT
+
+
+def _quoted(line: str) -> str:
+    """A source line as the audit quotes it: trimmed, and scrubbed as the diff is.
+
+    The audit goes into every reviewer's prompt -- to Google too, with agy on -- and
+    these lines come from whole changed files, not only the changed lines the diff
+    holds, so the diff's scrubbing never saw them.
+    """
+    if redacts(line.rstrip("\n")):  # read as an added line of the diff is
+        return REDACTED
+    return line.strip()[:120]
 
 
 def _should_skip(file: str) -> bool:
@@ -25,10 +47,21 @@ def scan_suspicious_patterns(
         if _should_skip(f) or not is_safe_relpath(f):
             continue
         path = REPO_ROOT / f
-        if not path.exists() or path.suffix != ".py":
+        if path.suffix != ".py":
+            continue
+        # A regular file in the repository, and not too big: a committed symlink was
+        # followed to whatever it named -- a host file, quoted into the audit, or a
+        # device that never ends -- and read whole.
+        if path.is_symlink() or not path.is_file():
+            continue
+        if path.stat().st_size > MAX_ARTIFACT_BYTES:
             continue
         try:
-            lines = path.read_text().splitlines()
+            # Numbered at "\n" alone, as git and the loop's re-quote number them, and
+            # read as UTF-8, which a non-ASCII file under LC_ALL=C raised on. As bytes:
+            # read as text, a "\r" became a line break anyway, between a credential's
+            # name and its value, and neither half was a credential to the scrub.
+            lines = path.read_bytes().decode("utf-8", errors="replace").split("\n")
         except OSError:
             continue
 
@@ -40,7 +73,7 @@ def scan_suspicious_patterns(
                             "file": f,
                             "line": i,
                             "pattern": description,
-                            "text": line.strip()[:120],
+                            "text": _quoted(line),
                         }
                     )
                     break

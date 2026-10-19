@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from .artifacts import collect_changed_artifacts
-from .config import COVERAGE_TARGET
+from .config import CONFIG_WARNINGS, COVERAGE_TARGET
 from .coverage import measure_test_coverage
 from .git_state import collect_git_state
 from .manifests import audit_signed_manifests
@@ -31,6 +31,8 @@ def run_preflight() -> dict[str, Any]:
         "coverage_gaps": measure_test_coverage(all_changed, coverage_warnings),
         "coverage_warnings": coverage_warnings,
         "coverage_target_pct": COVERAGE_TARGET,
+        # What review-config.json asked for and did not get (config._complain).
+        "configuration_warnings": list(dict.fromkeys(CONFIG_WARNINGS)),
     }
 
     audit["n_warnings"] = (
@@ -40,6 +42,7 @@ def run_preflight() -> dict[str, Any]:
         + len(audit["git_command_warnings"])
         + len(audit["coverage_warnings"])
         + len(audit["coverage_gaps"])
+        + len(audit["configuration_warnings"])
     )
 
     return audit

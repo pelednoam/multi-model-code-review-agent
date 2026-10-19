@@ -7,6 +7,8 @@ Stops when:
   - Same blocking findings appear twice in a row (stuck)
   - Tests fail after fixes (regression -- stops without rollback)
   - Max rounds reached
+  - A reviewer changed the working tree (exit 12; --report-only reports it and
+    goes on, to 10 when something is blocking and to 12 otherwise)
 
 Usage:
     python scripts/review_until_converged.py \\
@@ -45,7 +47,6 @@ from scripts.review_loop import (  # noqa: E402
     FindingKey,
     ScrubberFailedError,
     SecretsDetectedError,
-    _run,
     apply_fixes,
     build_reviewer_prompt,
     collect_blocking_findings,
@@ -65,6 +66,9 @@ from scripts.review_loop import (  # noqa: E402
     tamper,
     validate_result,
 )
+# As _run: the name this shim has always exported, which importers of it still use.
+from scripts.review_loop.config import GIT  # noqa: E402
+from scripts.review_loop.proc import run as _run  # noqa: E402
 
 __all__ = [
     "MERGE_TIMEOUT",
@@ -160,18 +164,33 @@ def _run_one_round(
     # Reviewers read and report. Some backends are only *asked* to -- hermes
     # runs --yolo with the file toolset -- so the outcome is checked rather
     # than the permissions, which covers a backend added tomorrow too.
-    untouched = tamper.snapshot(repo)
-    launch_reviewers(round_dir, diff_text, audit_text, context, backends, prefer_hermes)
+    untouched = tamper.snapshot(repo, round_dir)
+    answered_by = launch_reviewers(
+        round_dir, diff_text, audit_text, context, backends, prefer_hermes, repo
+    )
     print(f"Reviewers finished in {time.time() - t0:.0f}s")
-    tamper.report(repo, untouched)
+    touched = tamper.report(repo, untouched, round_dir)
 
-    results = extract_results(round_dir)
+    results = extract_results(round_dir, answered_by)
     print(_describe_results(results, n_lines))
     # Say where the findings are, every round, whatever the outcome -- the
     # round directory is not self-explanatory and `raw-N.txt` is a trap.
     write_artifacts_key(round_dir)
-    print(describe_outputs(round_dir))
-    if not any(results):
+    print(describe_outputs(round_dir, answered_by))
+    if touched and not report_only:
+        # Before anything else ends the round -- converged, incomplete, stuck -- as well
+        # as before the fixes: a round in which a reviewer wrote to the tree is not a
+        # clean bill, and the merge agent, the gate and --auto-commit's `git add -A`
+        # would have built on, run and pushed what it wrote. Its findings and outputs
+        # are written all the same, above.
+        print(
+            "\nABORT: the reviewers changed the working tree; not converging, applying "
+            "fixes, running the gate or committing. Inspect the files listed above."
+        )
+        return 12, previous_fp
+    # A tampered round is said as one under --report-only too, with no result or none
+    # blocking (below): a script keyed on 12 is not told 7 instead.
+    if not any(results) and not touched:
         print(
             "\nERROR: no reviewer results could be parsed; cannot determine convergence."
         )
@@ -192,6 +211,14 @@ def _run_one_round(
     blocking = collect_blocking_findings(results)
     print(f"Blocking findings: {len(blocking)} (blocking=true or critical)")
     if not blocking:
+        if touched:
+            # --report-only goes on past a write, to report; but a round a reviewer
+            # wrote in is no clean bill, whatever it found -- nor one merely partial.
+            print(
+                "\nNOT CONVERGED: nothing blocking, but the reviewers changed the "
+                "working tree. Inspect the files listed above."
+            )
+            return 12, previous_fp
         if missing:
             print(
                 "\nNOT CONVERGED: nothing blocking among the reviewers that answered, "
@@ -273,7 +300,23 @@ def main() -> int:
         help=(
             "Run the reviewers and write their findings, then stop. Does not "
             "run the merge agent and does not touch the working tree. Exits "
-            "10 when there are blocking findings, 0 when there are none."
+            "10 when there are blocking findings (whether or not every reviewer "
+            "answered), 0 when every reviewer answered and none is blocking, 11 "
+            "when nothing is blocking but one produced nothing, 12 when nothing is "
+            "but a reviewer changed the working tree, 7 when none did; 8 "
+            "or 9 when the diff could not be scrubbed safely, as without the flag."
+        ),
+    )
+    parser.add_argument(
+        "--log-file",
+        type=Path,
+        action="append",
+        default=[],
+        metavar="PATH",
+        help=(
+            "A file this run's output is copied into inside the repository "
+            "(`| tee data/reviews/run.log`): not a reviewer's write. Output "
+            "redirected into one with > is told apart without it."
         ),
     )
     parser.add_argument(
@@ -281,30 +324,49 @@ def main() -> int:
         action="store_true",
         help=(
             "Route Anthropic reviewers through Hermes/Bedrock (paid API) "
-            "instead of the local claude CLI. Also triggered automatically "
+            "instead of the local claude CLI, and send nothing to OpenAI (codex) "
+            "or Google (agy, gemini) unless asked for by name: REVIEW_USE_CODEX=1, "
+            "REVIEW_USE_AGY=1, REVIEW_USE_GEMINI=1. Also triggered automatically "
             "when .use-hermes exists in the project root."
         ),
     )
     args = parser.parse_args()
 
     repo = args.repo.resolve()
+    tamper.LOG_FILES.update(path.resolve() for path in args.log_file)
     review_dir = (
         args.review_dir if args.review_dir is not None else repo / "data" / "reviews"
     )
 
-    backends = detect_backends()
+    # Bedrock opt-in: explicit flag OR project-pinned via .use-hermes
+    # at repo root. (Marker lives outside .claude/ so it can be committed
+    # even when .claude/ is gitignored.) Default is the free local CLI
+    # path so casual users aren't surprised by Bedrock charges. Decided
+    # before detection: a project pinned to Bedrock does not run agy.
+    # From the base as well as the tree under review: a branch that deletes the pin
+    # would otherwise send its own code to OpenAI and Google by default. Every base the
+    # diff may be taken against -- the one named, its merge-base, and HEAD~1, which the
+    # diff falls back on -- and HEAD: any of them pinned is pinned.
+    merge_base = _run([GIT, "merge-base", args.base, "HEAD"], cwd=repo).stdout.strip()
+    pinned_in_base = any(
+        _run([GIT, "cat-file", "-e", f"{ref}:.use-hermes"], cwd=repo).returncode == 0
+        for ref in (args.base, merge_base, "HEAD~1", "HEAD")
+        if ref
+    )
+    prefer_hermes = (
+        args.prefer_hermes or pinned_in_base or (repo / ".use-hermes").exists()
+    )
+    if prefer_hermes:
+        print(
+            "Bedrock opt-in: routing Anthropic reviewers via Hermes; OpenAI and"
+            " Google only if asked for by name"
+        )
+
+    backends = detect_backends(prefer_hermes=prefer_hermes, repo=repo)
     print(f"Backends: {backends}")
     if not backends["claude"] and not backends["hermes"]:
         print("ERROR: need claude or hermes for Anthropic reviewers")
         return 1
-
-    # Bedrock opt-in: explicit flag OR project-pinned via .use-hermes
-    # at repo root. (Marker lives outside .claude/ so it can be committed
-    # even when .claude/ is gitignored.) Default is the free local CLI
-    # path so casual users aren't surprised by Bedrock charges.
-    prefer_hermes = args.prefer_hermes or (repo / ".use-hermes").exists()
-    if prefer_hermes:
-        print("Bedrock opt-in: routing Anthropic reviewers via Hermes")
 
     session_id = datetime.now(tz=UTC).strftime("%Y%m%d_%H%M%S")
     session_dir = review_dir / f"loop_{session_id}"

@@ -18,14 +18,17 @@ class FindingKey:
         return cls(file=f.get("file", ""), issue=f.get("issue", ""))
 
 
+#: What a review must have to be read as one.
+REVIEW_KEYS = frozenset({"reviewer", "model", "findings", "overall_assessment"})
+
+
 def validate_result(
     d: object, i: int, expected_reviewers: dict[int, str]
 ) -> dict[str, Any] | None:
     """Validate result dict has required keys and a findings list. Pin reviewer ID."""
     if not isinstance(d, dict):
         return None
-    required = {"reviewer", "model", "findings", "overall_assessment"}
-    if not required.issubset(d.keys()):
+    if not REVIEW_KEYS.issubset(d.keys()):
         return None
     d["reviewer"] = expected_reviewers[i]
     if not isinstance(d["findings"], list):

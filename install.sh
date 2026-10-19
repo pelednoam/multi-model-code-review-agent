@@ -39,13 +39,17 @@ if command -v rsync >/dev/null 2>&1; then
   rsync -a --exclude __pycache__ "$REPO_ROOT/scripts/preflight/"   "$TARGET/scripts/preflight/"
   rsync -a --exclude __pycache__ "$REPO_ROOT/scripts/review_loop/" "$TARGET/scripts/review_loop/"
 else
-  cp -R "$REPO_ROOT/scripts/preflight"   "$TARGET/scripts/preflight"
-  cp -R "$REPO_ROOT/scripts/review_loop" "$TARGET/scripts/review_loop"
+  # Into the directories, not onto them: where one exists from an earlier install,
+  # `cp -R dir target/dir` puts the new copy inside the old one.
+  mkdir -p "$TARGET/scripts/preflight" "$TARGET/scripts/review_loop"
+  cp -R "$REPO_ROOT/scripts/preflight/."   "$TARGET/scripts/preflight/"
+  cp -R "$REPO_ROOT/scripts/review_loop/." "$TARGET/scripts/review_loop/"
   find "$TARGET/scripts/preflight" "$TARGET/scripts/review_loop" \
     -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 fi
 
 cp "$REPO_ROOT/docs/codex-sandbox.md"                    "$TARGET/docs/" 2>/dev/null || true
+cp "$REPO_ROOT/docs/agy-sandbox.md"                      "$TARGET/docs/" 2>/dev/null || true
 
 # Codex is the one reviewer whose read-only-ness depends on the HOST rather than on a flag
 # we pass, so check it at install time instead of letting a review silently run with a
@@ -56,7 +60,9 @@ if command -v codex >/dev/null 2>&1; then
   echo "Checking that the codex sandbox is genuinely read-only on this host..."
   _d=$(mktemp -d); echo original > "$_d/canary.txt"
   _ran=$(codex sandbox -- sh -c "echo SANDBOX_OK" 2>&1 || true)
-  codex sandbox -- sh -c "echo changed > $_d/canary.txt" >/dev/null 2>&1 || true
+  # The path as an argument, not spliced into the script: a TMPDIR with a space or a shell
+  # character in it would split the path or run.
+  codex sandbox -- sh -c 'echo changed > "$1"' codex-check "$_d/canary.txt" >/dev/null 2>&1 || true
   _after=$(cat "$_d/canary.txt" 2>/dev/null || echo "")
   if ! printf '%s' "$_ran" | grep -q SANDBOX_OK; then
     echo "  WARNING: codex's sandbox does not start on this host."
@@ -92,15 +98,17 @@ Files written:
   scripts/review_until_converged.py
   scripts/validate_review_results.py
   scripts/preflight/        (helpers for the preflight audit)
-  scripts/review_loop/      (helpers for the convergence loop)
+  scripts/review_loop/      (the convergence loop, and the full-mode runner's checks)
   docs/ensemble_review_result_schema.json
   docs/codex-sandbox.md      (why codex needs a host check, and how to fix it)
+  docs/agy-sandbox.md        (what agy's sandbox closes, what it does not, its switches)
 
 Next step: open Claude Code in that project and say one of:
   "review this"           -- quick mode (2 subagents, ~30s, free)
   "full review"           -- full ensemble (4 reviewers, ~3 min)
   "run until converged"   -- convergence loop with mandatory CI gate
 
-If your project has project-specific signed manifests, edit
-scripts/review_preflight.py to set SIGNED_MANIFESTS before first run.
+Put your layout and audit settings (source_dirs, test_dirs,
+signed_manifests, artifact_dirs) in review-config.json at the project
+root, which install.sh leaves alone.
 EOF

@@ -1,8 +1,9 @@
 # Multi-Model Ensemble Code Review
 
-A review-only pipeline that runs four frontier LLMs in parallel through
-Hermes Agent, each with a different review lens, preceded by a
-deterministic preflight audit. Synthesizes findings with per-reviewer
+A review-only pipeline that runs four frontier LLMs in parallel -- local
+CLIs (claude, codex, agy) by default, Hermes Agent on Bedrock when opted
+in -- each with a different review lens, preceded by a deterministic
+preflight audit. Synthesizes findings with per-reviewer
 attribution and evidence-based convergence scoring.
 
 ## Why
@@ -26,7 +27,7 @@ manifest). This pipeline addresses three gaps:
 ```
 Claude Code (dev pipeline)
   |
-  |  "run an ensemble review"
+  |  "full review" (full mode; "review this" / "ensemble review" run quick mode)
   v
 ensemble-review agent (docs/ensemble-review.md)
   |
@@ -35,11 +36,16 @@ ensemble-review agent (docs/ensemble-review.md)
   |  3. run scripts/review_preflight.py --> runtime-audit.json
   |  4. build repo-aware context bundle (docs, manifests, specs)
   |
-  |-- hermes opus (Bedrock) OR claude -p opus           --> result-1.json (security)
-  |-- codex exec (GPT-5.5) OR hermes haiku              --> result-2.json (correctness)
-  |-- gemini -p (Gemini) OR hermes sonnet OR claude -p  --> result-3.json (readability)
-  |-- hermes opus (Bedrock) OR claude -p opus           --> result-4.json (spec-contract)
-  |   (all four run IN PARALLEL, 10min timeout each)
+  |-- claude -p opus OR hermes opus                     --> result-1.json (security)
+  |-- codex exec (GPT-5.5) OR claude -p haiku OR hermes haiku
+  |                                                     --> result-2.json (correctness)
+  |-- agy (Gemini, sandboxed) OR gemini (opt-in) OR claude -p sonnet OR hermes sonnet
+  |                                                     --> result-3.json (readability)
+  |-- claude -p opus OR hermes opus                     --> result-4.json (spec-contract)
+  |   (pinned to Bedrock -- .use-hermes, --prefer-hermes, or a "hermes/bedrock/isolated
+  |    review" request: hermes first in every slot where it is installed)
+  |   (all four run IN PARALLEL; the loop's deadline scales with the diff, full mode's
+  |    is REVIEWER_TIMEOUT, 600s by default, with the watchdog at +90s)
   |
   |  5. validate results against JSON schema
   |  6. persist review packet to data/reviews/<timestamp>_<branch>/
@@ -52,10 +58,10 @@ User sees: preflight audit, blocking findings, grouped criticals/warnings, conve
 
 | Reviewer | Routing chain | Focus |
 |---|---|---|
-| Security & robustness | Opus via Hermes/Bedrock (preferred) OR Claude CLI | Injection, auth, unsafe deserialization, secrets, race conditions, swallowed exceptions |
-| Correctness & edge cases | GPT-5.5 via Codex CLI (preferred) OR Haiku via Hermes/Claude CLI | Off-by-one, null paths, shape mismatches, contract violations, logic errors, missing coverage |
-| Readability & performance | Gemini CLI (preferred) OR Sonnet via Hermes/Claude CLI | Naming, function length, abstraction leaks, dead code, N+1 I/O, memory growth |
-| Spec-contract compliance | Opus via Hermes/Bedrock (preferred) OR Claude CLI | Code vs signed artifacts, manifest drift, feature count mismatches, fallback/zero-fill that changes cohorts |
+| Security & robustness | Opus via Claude CLI OR Hermes/Bedrock (first when pinned to Bedrock) | Injection, auth, unsafe deserialization, secrets, race conditions, swallowed exceptions |
+| Correctness & edge cases | GPT-5.5 via Codex CLI (preferred) OR Haiku via Claude CLI OR Hermes/Bedrock; a project pinned to Bedrock runs Haiku via Hermes first, and OpenAI only with `REVIEW_USE_CODEX=1` | Off-by-one, null paths, shape mismatches, contract violations, logic errors, missing coverage |
+| Readability & performance | agy -- Antigravity CLI, best Gemini model listed, under a verified bwrap sandbox (preferred) OR Gemini CLI (only with `REVIEW_USE_GEMINI=1`) OR Sonnet via Claude CLI/Hermes; a project pinned to Bedrock runs Sonnet via Hermes first, and Google only if asked | Naming, function length, abstraction leaks, dead code, N+1 I/O, memory growth |
+| Spec-contract compliance | Opus via Claude CLI OR Hermes/Bedrock (first when pinned to Bedrock) | Code vs signed artifacts, manifest drift, feature count mismatches, fallback/zero-fill that changes cohorts |
 
 ## Runtime audit inputs
 
@@ -64,9 +70,9 @@ LLM review. It collects:
 
 - **Git state**: branch, commit, status, untracked files, cached changes
 - **Signed manifest metadata**: SHA, top-level fields for each
-  configured manifest (configure `SIGNED_MANIFESTS` for your project)
+  configured manifest (`signed_manifests` in `review-config.json` at the repo root)
 - **Changed artifact fields**: key fields from any modified JSON under
-  configured `ARTIFACT_DIRS`
+  `artifact_dirs` (in `review-config.json`; `data/` and `docs/` by default)
 - **Suspicious patterns**: fill_value=0, bare except, hardcoded paths
 - **Test/implementation alignment**: implementation changes without test
   changes and vice versa
@@ -125,20 +131,35 @@ Review evidence is persisted to `data/reviews/<timestamp>_<branch>/`:
 - `context.md` -- repo-aware context bundle
 - `runtime-audit.json` -- preflight audit output
 - `prompt-{1,2,3,4}.txt` -- reviewer prompts
-- `result-{1,2,3,4}.json` -- raw reviewer output
+- `result-{1,2,3,4}.json` -- each reviewer's review, extracted from its
+  output and checked (a placeholder with `"reviewer": "unknown"` for a slot
+  that produced none)
+- `stdout-N.txt` / `claude-raw-N.json` / `codex-out-N.txt` -- each reviewer's
+  raw answer (`backend-N.txt` says which CLI ran it)
+- `stderr-N.txt`, `extract-result-N.err` -- why a slot produced no result
+- `round.log` -- the runner's console output
 - `report.md` -- synthesized convergence report
 
 ## Cost
 
-Four frontier model API calls per review (2x Opus, 1x GPT-5.5, 1x
-Sonnet). For a typical feature branch (200-1000 lines), expect ~$5-12
-total. For a large branch (5000+ lines), expect ~$15-40.
+With the local CLIs (the default), a review costs nothing beyond the
+subscriptions they sign in with. On Hermes/Bedrock (opt-in), it is four
+API calls (2x Opus, 1x Haiku, 1x Sonnet): for a typical feature branch
+(200-1000 lines) expect ~$5-12, for a large one (5000+ lines) ~$15-40.
 
 ## Privacy
 
-- Bedrock calls stay within your AWS account boundary
-- Codex OAuth calls go through ChatGPT's backend API
-- For sensitive code, drop GPT-5.5 and run 3 Bedrock-only models
+- The diff, the audit and the context bundle are scrubbed of
+  credential-shaped lines first. A redaction in the diff stops the review;
+  in the audit's quoted lines and in the context bundle the line is
+  replaced and the review goes on
+- agy, on by default wherever it is installed, sends them to Google;
+  `REVIEW_USE_AGY=0` switches it off
+- Codex calls go through ChatGPT's backend API, and codex can read your
+  home directory
+- Bedrock calls stay within your AWS account boundary; a project pinned
+  to Bedrock (`.use-hermes`) sends nothing to OpenAI or Google unless
+  asked by name
 
 ## Files
 
@@ -149,7 +170,11 @@ total. For a large branch (5000+ lines), expect ~$15-40.
 | `scripts/scrub_diff.py` | Stdin credential scrubber |
 | `scripts/validate_review_results.py` | JSON schema validator |
 | `docs/ensemble_review_result_schema.json` | Strict reviewer output schema |
-| `tests/test_review_scripts.py` | Test suite |
+| `scripts/review_until_converged.py` | Convergence loop |
+| `scripts/review_loop/` | The loop's package; also the full-mode runner's checks, extraction and agy's sandbox |
+| `docs/agy-sandbox.md` | What agy's bubblewrap sandbox closes, what it does not, and its switches |
+| `docs/codex-sandbox.md` | Why codex's sandbox is verified before use, and how to fix a host where it is not read-only |
+| `tests/` | Test suite |
 | `data/reviews/` | Persisted review packets (gitignored) |
 
 ### Agent definition setup

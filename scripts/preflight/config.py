@@ -1,8 +1,9 @@
 """Configuration constants for the preflight audit.
 
-Edit ``SIGNED_MANIFESTS`` and ``ARTIFACT_DIRS`` to point at your
-project's signed JSON artifacts and the directories whose changed JSON
-files should be parsed.
+``SIGNED_MANIFESTS`` and ``ARTIFACT_DIRS`` -- the project's signed JSON
+artifacts and the directories whose changed JSON files are parsed -- come from
+``review-config.json`` (``signed_manifests``, ``artifact_dirs``), as the layout
+does.
 
 **A host project should not edit this file.** ``install.sh`` copies it into
 every host, so an edit here is overwritten the next time the agent is
@@ -17,11 +18,16 @@ changes it was reporting on.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+#: The repository audited: where this preflight is installed, unless the loop names
+#: another -- run from a trusted checkout with --repo, this copy audited and tested
+#: the checkout instead of the branch under review.
+_INSTALLED_IN = Path(__file__).resolve().parent.parent.parent
+REPO_ROOT = Path(os.environ.get("MMCRA_PREFLIGHT_REPO") or _INSTALLED_IN).resolve()
 
 #: A host project's overrides, read from the repo root. Optional, and every
 #: key in it is optional: what is not there keeps the default below.
@@ -57,13 +63,21 @@ def _overrides() -> dict[str, object]:
     return loaded
 
 
-def _complain(problem: str) -> None:
-    """Say on stderr that the host config is being ignored, and why."""
-    print(
-        f"WARNING: {HOST_CONFIG.name} {problem}; using the agent's defaults, "
-        "which probably do not cover this project's layout.",
-        file=sys.stderr,
-    )
+#: What ``_complain`` said, for the audit: on stderr alone it reached no reviewer, and
+#: a contract check the config named and this skipped looked like none configured.
+CONFIG_WARNINGS: list[str] = []
+
+
+def _complain(
+    problem: str,
+    outcome: str = "using the agent's defaults, which probably do not cover this "
+    "project's layout",
+) -> None:
+    """Say on stderr, and in the audit, that the host config is being ignored, and
+    why."""
+    message = f"WARNING: {HOST_CONFIG.name} {problem}; {outcome}."
+    CONFIG_WARNINGS.append(message)
+    print(message, file=sys.stderr)
 
 
 def _dirs(name: str, fallback: list[str]) -> list[str]:
@@ -83,29 +97,60 @@ def _dirs(name: str, fallback: list[str]) -> list[str]:
         return fallback
     return kept
 
-# Map logical names to repo-relative paths of JSON artifacts whose
-# contents should be audited.
-SIGNED_MANIFESTS: dict[str, str] = {
-    # "column_manifest": "path/to/manifest.json",
-}
 
-# Directories containing JSON artifacts. Changed files under these
-# directories are parsed and key fields extracted. Uses os.sep-aware
-# prefix matching.
-ARTIFACT_DIRS: list[str] = [
-    "data/",
-    "docs/",
-]
+#: For a per-entry complaint, where the rest of the setting stands.
+_SKIPPED = "that entry is skipped; the others are kept"
 
-# Directories that hold source code in this project. Drives the
-# coverage gap detector and the test/impl alignment check. Override
-# this for monorepos or non-standard layouts (e.g. ["backend/",
-# "frontend/src/", "lib/"]). The defaults match the conventional
-# "src layout" plus a research workspace; for a Django/FastAPI/Next
-# project you almost certainly need to override.
+
+def _manifests(name: str) -> dict[str, str]:
+    """A name-to-path mapping setting, from the host config, or none."""
+    found = _overrides().get(name)
+    if found is None:
+        return {}
+    if not isinstance(found, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in found.items()
+    ):
+        _complain(f"has a {name!r} that is not an object of names to paths")
+        return {}
+    # Inside the repository only: the file is the branch's to write, and a path out of
+    # it (absolute, or with "..") would read a host's JSON into the audit, which goes
+    # to every reviewer.
+    root = REPO_ROOT.resolve()
+    kept = {}
+    for key, value in found.items():
+        try:
+            target = (root / value).resolve()
+        except (OSError, RuntimeError, ValueError):  # a NUL, a link loop
+            _complain(f"has an unusable {name!r} path: {value!r}", _SKIPPED)
+            continue
+        if Path(value).is_absolute() or not target.is_relative_to(root):
+            _complain(f"has a {name!r} entry outside the repository: {value!r}",
+                      _SKIPPED)  # fmt: skip
+            continue
+        kept[key] = value
+    return kept
+
+
+# Map logical names to repo-relative paths of JSON artifacts whose contents should
+# be audited: "signed_manifests" in review-config.json, e.g.
+# {"column_manifest": "path/to/manifest.json"}. Not set here, which install.sh
+# overwrites.
+SIGNED_MANIFESTS: dict[str, str] = _manifests("signed_manifests")
+
+# Directories containing JSON artifacts. Changed files under these directories are
+# parsed and key fields extracted ("artifact_dirs" in review-config.json). Uses
+# os.sep-aware prefix matching.
+ARTIFACT_DIRS: list[str] = _dirs("artifact_dirs", ["data/", "docs/"])
+
+# Directories that hold source code in this project. Drives the coverage gap
+# detector and the test/impl alignment check. Set "source_dirs" in
+# review-config.json for monorepos or non-src layouts (e.g. ["backend/",
+# "frontend/src/", "lib/"]); this file is overwritten by install.sh. The defaults
+# match the conventional "src layout" plus a research workspace.
 SOURCE_DIRS: list[str] = _dirs("source_dirs", ["src/", "research/"])
 
-# Directories that hold tests. Used by the test/impl alignment warning.
+# Directories that hold tests. The coverage gate runs pytest on these (those that exist
+# inside the repository), and the test/impl alignment warning reads them.
 TEST_DIRS: list[str] = _dirs("test_dirs", ["tests/"])
 
 SUSPICIOUS_COMPILED: list[tuple[re.Pattern[str], str]] = [

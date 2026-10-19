@@ -3,11 +3,27 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
 from typing import Any
 
-from .config import COVERAGE_TARGET, REPO_ROOT, SOURCE_DIRS
+from .config import COVERAGE_TARGET, REPO_ROOT, SOURCE_DIRS, TEST_DIRS
+from .git_state import is_safe_relpath
+
+
+def _inside(path: str) -> bool:
+    """Whether a directory named in review-config.json is a relative path inside the
+    repository: an absolute one ("/" among them) or one with ".." would measure, or
+    collect tests from, somewhere else."""
+    return not Path(path).is_absolute() and is_safe_relpath(path)
+
+
+def _test_dirs() -> list[str]:
+    """``TEST_DIRS`` that are directories inside the repository."""
+    return [d for d in TEST_DIRS if _inside(d) and (REPO_ROOT / d).is_dir()]
 
 
 def _changed_impl_files(changed_files: list[str]) -> list[str]:
@@ -38,7 +54,14 @@ def _run_pytest_with_coverage(warnings: list[str]) -> dict[str, Any] | None:
 
     Returns None on failure. Sources are the configured directories rather than
     the changed files: coverage.py cannot use a .py path as a source.
+
+    Not from inside a test run (PYTEST_CURRENT_TEST, which pytest sets and every
+    process it starts inherits): a project whose tests run the preflight -- this
+    one's do -- would have it run the suite, which runs the preflight again.
     """
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        warnings.append("coverage gate skipped: the preflight is running inside a test")
+        return None
     cov_json = REPO_ROOT / ".coverage.json"
     cov_json.unlink(missing_ok=True)
     # coverage.py resolves a --cov value as an importable package name or a
@@ -51,34 +74,57 @@ def _run_pytest_with_coverage(warnings: list[str]) -> dict[str, Any] | None:
     # still filtered down to the changed files below, so the audit output is
     # unchanged -- it just has data in it now.
     cov_sources = [
-        "--cov=" + d.rstrip("/") for d in SOURCE_DIRS if (REPO_ROOT / d).exists()
+        "--cov=" + d.rstrip("/")
+        for d in SOURCE_DIRS
+        if _inside(d) and (REPO_ROOT / d).exists()
     ]
+    outside = [d for d in SOURCE_DIRS if not _inside(d)]
+    if outside:
+        warnings.append(f"source_dirs ignored (outside the repo): {outside}")
     if not cov_sources:
         warnings.append(
-            f"coverage gate inoperative: no SOURCE_DIRS exist on disk: {SOURCE_DIRS}"
+            "coverage gate inoperative: no usable SOURCE_DIRS (missing or outside"
+            f" the repo): {SOURCE_DIRS}"
         )
         return None
-    try:
-        result = subprocess.run(
-            [
-                _interpreter(),
-                "-m",
-                "pytest",
-                "tests/",
-                *cov_sources,
-                "--cov-report=json:" + str(cov_json),
-                "--cov-branch",
-                "-q",
-                "--no-header",
-            ],
-            cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-        warnings.append(f"coverage measurement failed: {e}")
+    test_dirs = _test_dirs()
+    dropped = [d for d in TEST_DIRS if d not in test_dirs]
+    if dropped:
+        # Said, not fallen back on in silence: a config.py promise.
+        warnings.append(f"test_dirs ignored (missing or outside the repo): {dropped}")
+    if not test_dirs:
+        warnings.append(f"no usable test_dirs in {TEST_DIRS}; coverage gate skipped")
         return None
+    # coverage's own data file in a directory of its own, not the repository's root:
+    # left there, it was an untracked file the next review's diff took in.
+    with tempfile.TemporaryDirectory() as data_dir:
+        env = {**os.environ, "COVERAGE_FILE": str(Path(data_dir) / ".coverage")}
+        try:
+            result = subprocess.run(
+                [
+                    _interpreter(),
+                    "-m",
+                    "pytest",
+                    *cov_sources,
+                    "--cov-report=json:" + str(cov_json),
+                    "--cov-branch",
+                    "-q",
+                    "--no-header",
+                    # The project's own test directories (review-config.json), those that
+                    # exist and stay inside it -- tests/ was hard-coded, whatever the
+                    # project declared -- after "--", so none is taken for an option.
+                    "--",
+                    *test_dirs,
+                ],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                timeout=300,
+                env=env,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            warnings.append(f"coverage measurement failed: {e}")
+            return None
     if not cov_json.exists():
         if result.returncode != 0:
             warnings.append(
@@ -109,8 +155,8 @@ def measure_test_coverage(
     Emits a warning when the diff contains Python files but none of
     them match the configured SOURCE_DIRS -- that's a signal the
     coverage gate is silently inoperative for this repo and the user
-    should override SOURCE_DIRS for their layout (e.g. add "backend/",
-    "app/", "lib/").
+    should set "source_dirs" in review-config.json at the repo root for their
+    layout (e.g. ["backend/", "app/", "lib/"]).
     """
     impl_files = _changed_impl_files(changed_files)
     if not impl_files:
@@ -119,8 +165,8 @@ def measure_test_coverage(
             warnings.append(
                 "coverage gate inoperative: "
                 f"{len(changed_python)} Python file(s) changed but none "
-                f"matched SOURCE_DIRS={SOURCE_DIRS}. Override SOURCE_DIRS "
-                "in scripts/preflight/config.py for this repo's layout."
+                f'matched SOURCE_DIRS={SOURCE_DIRS}. Set "source_dirs" in '
+                "review-config.json at the repo root for this repo's layout."
             )
         return []
     cov_data = _run_pytest_with_coverage(warnings)

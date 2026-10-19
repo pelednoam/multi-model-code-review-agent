@@ -55,11 +55,12 @@ def sha256_file(path: Path) -> str:
 
 
 def is_safe_relpath(relpath: str) -> bool:
-    """Check that a git-reported path stays inside the repo root."""
-    resolved = (REPO_ROOT / relpath).resolve()
+    """Check that a git-reported path stays inside the repo root. One that cannot be
+    resolved (a NUL in it, a loop of links) does not."""
     try:
+        resolved = (REPO_ROOT / relpath).resolve()
         resolved.relative_to(REPO_ROOT.resolve())
-    except ValueError:
+    except (OSError, RuntimeError, ValueError):
         return False
     return True
 

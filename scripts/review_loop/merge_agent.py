@@ -2,14 +2,161 @@
 
 from __future__ import annotations
 
+import contextlib
 import subprocess
+import tempfile
 import uuid
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import IO, Any
 
-from .config import MERGE_TIMEOUT
+from .claude_tools import (
+    around,
+    claude_disallowed,
+    claude_tool_names,
+    rule_safe,
+)
+from . import paths
+from .config import MERGE_TIMEOUT, REPO_ROOT
 
-if TYPE_CHECKING:
-    from pathlib import Path
+#: What the merge agent may use: it edits files, and nothing more.
+_MERGE_TOOLS = "Read Edit Write Grep Glob"
+
+#: Where the merge agent may not write, whatever it is told: what runs code on its own
+#: -- the repository's git hooks and config, and the shells' startup files. A scope on
+#: Edit does not confine it (measured: granted Edit(<repo>/**), it edited a file
+#: outside); a deny does, through a symlink too (measured: a Write to link/planted,
+#: link -> .git, was refused). Not everywhere outside the repository: no rule says that.
+#: Nor does this make fix mode safe to run on code you would not run -- the gate runs
+#: the tests the agent may have just edited, and the commit the project's own hooks,
+#: which are left on: they are the project's checks (README, "The convergence loop").
+MERGE_WRITE_DENIED = (
+    "~/.bashrc", "~/.bash_profile", "~/.bash_login", "~/.bash_logout", "~/.profile",
+    "~/.zshrc", "~/.zshenv", "~/.zprofile", "~/.zlogin", "~/.zlogout",
+    "~/.bash_aliases", "~/.bashrc.d/**", "~/.oh-my-zsh/**", "~/.vimrc",
+    "~/.gitconfig", "~/.npmrc", "~/.pythonrc*", "~/bin/**", "~/.cargo/**",
+    "~/.pip/**", "~/.config/**", "~/.local/**", "~/.ssh/**", "~/.claude/**",
+    # The CLIs' and tools' own configs, each of which can name a command to run.
+    "~/.codex/**", "~/.gemini/**", "~/.hermes/**", "~/.aws/**", "~/.docker/**",
+    "~/.kube/**", "~/.gnupg/**", "~/Library/LaunchAgents/**",
+    # Session autostart and login files: denied by name too, so that they stay denied
+    # where a directory around them is opened up for a repository inside it.
+    "~/.xprofile", "~/.xsessionrc", "~/.pam_environment", "~/.config/autostart/**",
+    "~/.config/systemd/**", "~/.config/environment.d/**",
+)  # fmt: skip
+
+#: And every other dotfile and dot-directory in the home -- the list above cannot keep
+#: up with what reads one and runs a command -- unless the repository is in one
+#: (~/.worktrees/project), whose files the agent is there to fix.
+_HOME_DOT_DENIED = ("~/.*", "~/.*/**")
+
+#: In the repository, what runs code outside a review: the editor's and Claude Code's
+#: settings (their hooks run in the user's next session), virtualenvs and direnv, and
+#: hook managers' directories.
+_MERGE_REPO_DENIED = (
+    ".claude", ".vscode", ".idea", ".venv", "venv", ".direnv", ".husky", ".githooks",
+    ".pre-commit-config.yaml", ".mcp.json", ".envrc",
+    # Other tools' project settings, each able to run a command in your next session.
+    ".codex", ".gemini", ".cursor", ".devcontainer", ".hermes", ".zed", ".continue",
+    "lefthook.yml", ".lefthook.yml", "lefthook.yaml", ".lefthook", ".overcommit.yml",
+    # CI definitions, and what they include: --auto-commit pushes what the agent
+    # writes, and CI runs them.
+    ".github", ".gitlab", ".gitlab-ci.yml", ".circleci", ".buildkite",
+    "azure-pipelines.yml", ".azure-pipelines", "Jenkinsfile", ".travis.yml",
+    "bitbucket-pipelines.yml", ".drone.yml", ".woodpecker.yml", ".woodpecker",
+    "cloudbuild.yaml", ".tekton",
+)  # fmt: skip
+
+
+def _home_denies(repo: Path) -> tuple[list[str], list[Path]]:
+    """The homes' write denies for the merge agent: rules for ``MERGE_WRITE_DENIED``
+    and ``_HOME_DOT_DENIED`` under each home, and paths for those that hold ``repo``.
+
+    A directory-wide one that holds the repository (~/.local/src/project,
+    ~/.worktrees/project) would deny the files the agent is there to fix: it is
+    replaced by what is around the way down to it (``claude_tools.around``) -- in that
+    home only. Decided once for both, the exception in one took the other's denies.
+    """
+    target = repo.resolve()
+    rules: list[tuple[str, str]] = []  # each rule, and its ~/ form to fall back on
+    held: list[Path] = []
+    for home in paths.homes():
+        inside = target.relative_to(home) if target.is_relative_to(home) else None
+        top = inside.parts[0] if inside and inside.parts else None
+        in_dot = top is not None and top.startswith(".")
+        for pattern in MERGE_WRITE_DENIED:
+            base = home / pattern[2:].removesuffix("/**")
+            if (
+                inside is not None
+                and pattern.endswith("/**")
+                and target.is_relative_to(base)
+            ):
+                held += around(base, target)
+            else:
+                rules.append((f"/{home}/{pattern[2:]}", pattern))
+        if in_dot:
+            # The home's other dot entries one by one, and around the way down within
+            # the one that holds the repository.
+            with contextlib.suppress(OSError):
+                held += [
+                    entry
+                    for entry in home.iterdir()
+                    if entry.name.startswith(".") and entry.name != top
+                ]
+            held += around(home / str(top), target)
+        else:
+            rules += [
+                (f"/{home}/{pattern[2:]}", pattern) for pattern in _HOME_DOT_DENIED
+            ]
+    out = []
+    for rule, tilde in rules:
+        if rule_safe(rule.replace("*", "")):
+            out.append(rule)
+        elif tilde not in out:
+            # A home a rule cannot name: its ~/ form at least, which claude reads as
+            # $HOME, and said, not dropped in silence.
+            print(
+                f"  WARNING: the merge agent's deny {rule!r} cannot be written as it is"
+            )
+            out.append(tilde)
+    return out, held
+
+
+def _trusted_checkout(repo: Path) -> list[Path]:
+    """This agent's own checkout, when it is not the one being fixed: the loop runs its
+    code, and a trusted checkout is the point of running from one. Where the target is
+    inside it (a worktree under .claude/worktrees), its code and docs, not all of it."""
+    trusted, target = REPO_ROOT.resolve(), repo.resolve()
+    if trusted == target:
+        return []
+    if not target.is_relative_to(trusted):
+        return [trusted]
+    parts = [trusted / "scripts", trusted / "docs", trusted / "install.sh"]
+    return [part for part in parts if not target.is_relative_to(part)]
+
+
+def _merge_denied(repo: Path) -> list[str]:
+    """The merge agent's --disallowedTools: the reviewers' list for its tools, and
+    writes to the repository's git directories, ``_MERGE_REPO_DENIED``, and the home's
+    files that run code (``_home_denies``)."""
+    denied = ["//**/.git", "//**/.git/**"]  # every repository's hooks and config
+    home_rules, home_paths = _home_denies(repo)
+    protected = [
+        *paths.git_dirs(repo),
+        *(repo.resolve() / name for name in _MERGE_REPO_DENIED),
+        *_trusted_checkout(repo),
+        *home_paths,
+    ]
+    for path in protected:
+        root = str(path).rstrip("/")
+        if not rule_safe(root):
+            # A space would split the rule in two; ( ) , or a glob character would
+            # change what it says (claude_tools.rule_safe).
+            print(f"  WARNING: the merge agent is not denied {root!r}: its name")
+        else:
+            denied += [f"/{root}", f"/{root}/**"]
+    denied += home_rules
+    writes = [f"{tool}({path})" for path in denied for tool in ("Edit", "Write")]
+    return [*claude_disallowed(_MERGE_TOOLS, repo), *writes]
 
 
 def _format_fixes(findings: list[dict[str, Any]]) -> str:
@@ -70,7 +217,14 @@ def apply_fixes(
     err_f = open(
         round_dir / "merge-stderr.txt", "w", encoding="utf-8", errors="replace"
     )  # noqa: SIM115
+    # The prompt from a file, not a pipe, as the reviewers' (reviewers._feed): a pipe
+    # holds 64 KB, and a large prompt blocked here until the agent read it -- with no
+    # timeout yet running -- or raised BrokenPipeError if it exited unread.
+    feed: IO[str] | None = None
     try:
+        feed = tempfile.TemporaryFile("w+", encoding="utf-8")  # noqa: SIM115
+        feed.write(prompt)
+        feed.seek(0)
         proc = subprocess.Popen(
             [
                 "claude",
@@ -81,22 +235,32 @@ def apply_fixes(
                 # text derived from the diff under review -- so the one tool
                 # that turns a prompt injection into arbitrary execution is the
                 # one it has no need of. The gate runs separately, afterwards.
+                "--tools",
+                claude_tool_names(_MERGE_TOOLS),
                 "--allowedTools",
-                "Read Edit Write Grep Glob",
+                _MERGE_TOOLS,
+                # As the reviewers' (reviewers._claude_cmd): --allowedTools does not
+                # confine, so the rest is denied, credentials' reads among it; and
+                # the user's settings only, with no MCP servers -- the project's
+                # settings can hold hooks that run commands no deny list covers.
+                "--disallowedTools",
+                " ".join(_merge_denied(repo)),
+                "--strict-mcp-config",
+                "--setting-sources",
+                "user",
+                "--permission-mode",
+                "dontAsk",
                 "--output-format",
                 "json",
             ],
             cwd=repo,
-            stdin=subprocess.PIPE,
+            stdin=feed,
             stdout=out_f,
             stderr=err_f,
             text=True,
             encoding="utf-8",
             errors="replace",
         )
-        assert proc.stdin is not None  # PIPE guaranteed above
-        proc.stdin.write(prompt)
-        proc.stdin.close()
         try:
             proc.wait(timeout=MERGE_TIMEOUT)
         except subprocess.TimeoutExpired:
@@ -104,6 +268,8 @@ def apply_fixes(
             print(f"  Merge agent TIMEOUT after {MERGE_TIMEOUT}s")
             return False
     finally:
+        if feed is not None:
+            feed.close()
         out_f.close()
         err_f.close()
     return proc.returncode == 0

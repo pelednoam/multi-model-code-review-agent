@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 REPO_ROOT = SCRIPTS_DIR.parent
+
+#: git, by the path it has when the loop starts: a reviewer that can write files can
+#: plant one under its name early on PATH (~/.local/bin/git), for the loop's own checks
+#: of what the reviewers wrote to run.
+GIT = os.path.abspath(_found) if (_found := shutil.which("git")) else "git"
 
 #: Seconds a reviewer gets on a *small* diff. Scaled by size below, because a
 #: flat budget kills exactly the reviewer worth waiting for: the slowest one is
@@ -37,6 +44,23 @@ POLL_INTERVAL = 2
 MERGE_TIMEOUT = 900
 TEST_TIMEOUT = 300
 
+#: The reviewer schema, handed to agy's ``--json-schema`` so the shape of its
+#: answer is enforced by the CLI rather than only asked for in the prompt.
+RESULT_SCHEMA = REPO_ROOT / "docs" / "ensemble_review_result_schema.json"
+
+#: ``agy models`` is a listing, not a model call, but it goes over the network.
+AGY_MODELS_TIMEOUT = 60
+
+
+def env_flag(name: str) -> bool:
+    """Whether the environment variable ``name`` is set to yes: 1, true, yes or on.
+
+    One reading for every switch that turns a safety check off. Anything else --
+    unset, empty, ``0``, ``false``, ``no``, a typo -- leaves the check on.
+    """
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
 #: Everything install.sh copies into a host project. Excluded from the review
 #: diff so that a host project's first review is not spent on the reviewer's
 #: own source. Kept in sync with install.sh by a test.
@@ -47,6 +71,7 @@ VENDORED_PATHS: tuple[str, ...] = (
     # changed, and is 100 lines of budget spent on the agent's own manual.
     # The drift test caught it the moment the installer learned to copy it.
     "docs/codex-sandbox.md",
+    "docs/agy-sandbox.md",
     "docs/ensemble_review_result_schema.json",
     "scripts/scrub_diff.py",
     "scripts/review_preflight.py",
@@ -63,10 +88,32 @@ def is_agent_repo(repo: Path) -> bool:
     install.sh is not among the files it copies, so its presence next to the
     loop package is what distinguishes the source repository from an installed
     copy. Developing the agent must still review the agent.
+
+    And only the checkout this loop runs from, or a worktree of its repository: a
+    host project reviewed with --repo from the agent's checkout may have an install.sh
+    of its own. (A host running its vendored copy on itself, with one, is not told
+    apart: the files are all the branch's.)
     """
-    return (repo / "install.sh").is_file() and (
-        repo / "scripts" / "review_loop"
-    ).is_dir()
+    if not (
+        (repo / "install.sh").is_file() and (repo / "scripts" / "review_loop").is_dir()
+    ):
+        return False
+    return _common_dir(repo) == _common_dir(REPO_ROOT)
+
+
+def _common_dir(repo: Path) -> Path | None:
+    """The repository ``repo`` is a worktree of, by its git common directory."""
+    try:
+        found = subprocess.run(
+            [GIT, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=repo, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+            check=False,
+        )  # fmt: skip
+    except OSError:
+        return None
+    if found.returncode != 0 or not found.stdout.strip():
+        return repo.resolve()
+    return Path(found.stdout.strip()).resolve()
 
 
 def diff_pathspec(repo: Path) -> list[str]:

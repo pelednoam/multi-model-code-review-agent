@@ -9,10 +9,11 @@ preflight audit. Three modes:
 - **Quick mode** (free): 2 Claude Code subagents with clean context.
   ~30 seconds. Use for every commit. Subagents run via the `Agent()`
   tool and use the parent Claude Code session's API allocation -- not
-  the local `claude`/`codex`/`gemini` CLIs.
+  the local `claude`/`codex`/`agy`/`gemini` CLIs.
 - **Full mode** (free or paid): 4 parallel reviewer subprocesses
   across providers using the locally installed CLIs by default. Free
-  when `claude` + `codex` + `gemini` are installed. Hermes/Bedrock
+  beyond your existing subscriptions when `claude` + `codex` + `agy` (or
+  `gemini`, with `REVIEW_USE_GEMINI=1`) are installed. Hermes/Bedrock
   available as an opt-in for codebases that need data-at-rest.
   ~3-5 minutes. Use for pre-merge gates.
 - **Convergence loop** (free or paid): runs full mode repeatedly,
@@ -67,17 +68,18 @@ review missed.
 | Artifact/manifest audit | no | yes | yes | yes |
 | Coverage-gap detection | no | yes | yes | yes |
 | Per-reviewer attribution | no | 2 lenses | 4 lenses | 4 lenses |
-| Write isolation | no | no | `--allowedTools` | `-t file` |
+| Write isolation | no | no | `--disallowedTools`; codex and agy sandboxed; gemini (opt-in) policy-only | none for hermes (see the backends table) |
 | Structured JSON schema | no | no | yes | yes |
 | Review packet persistence | no | no | yes | yes |
-| Cross-provider models | no | no | with Codex+Gemini | any provider |
+| Cross-provider models | no | no | with Codex + agy/Gemini | no: Anthropic on Bedrock; where Hermes is absent, OpenAI/Google only by name (`REVIEW_USE_CODEX` / `REVIEW_USE_AGY` / `REVIEW_USE_GEMINI`) |
 | Mandatory CI gate before commit | no | no | yes | yes |
-| Cost | free | free | free | ~$5-40 |
+| Cost | free | free | free beyond subscriptions | ~$5-40 |
 | Latency | instant | ~30s | ~3 min | ~5 min |
 
 **When to use which:**
 - **Quick mode**: every commit, rapid iteration (free, 30s)
-- **Full mode with CLIs**: pre-merge gates when cost matters (free, 3min)
+- **Full mode with CLIs**: pre-merge gates when cost matters (free beyond your CLI
+  subscriptions, 3min)
 - **Full mode with Hermes**: high-stakes changes where Bedrock's
   data-at-rest guarantees matter
 
@@ -101,11 +103,12 @@ ensemble-review agent (docs/ensemble-review.md)
   |  3. build context bundle      (docs, manifests, specs)              |
   |                                                                    |
   |  QUICK MODE:                         FULL MODE:                    |
-  |  Agent(opus, spec-contract)          R1: hermes opus  OR  claude -p |
+  |  Agent(opus, spec-contract)          R1: claude -p    OR  hermes    |
   |  Agent(sonnet, correctness)          R2: codex exec   (GPT-5.5)    |
-  |  (2 subagents, free)                 R3: gemini       OR  claude -p |
-  |                                      R4: hermes opus  OR  claude -p |
+  |  (2 subagents, free)                 R3: agy/gemini* OR claude -p  |
+  |                                      R4: claude -p    OR  hermes    |
   |                                      (4 sessions, free or paid)    |
+  |                                      (* gemini only by opt-in)     |
   |                                                                    |
   |  4. synthesize convergence report                                  |
   |  5. [loop only] merge agent applies suggested_fix's (clean ctx)    |
@@ -130,7 +133,7 @@ Default precedence (no Bedrock opt-in):
 |---|---|---|---|
 | Security (Opus) | Claude CLI opus (free) | Hermes Opus (Bedrock, paid) | -- |
 | Correctness | Codex CLI GPT-5.5 (free) | Claude CLI haiku (free) | Hermes Haiku (Bedrock) |
-| Readability | Gemini CLI (free) | Claude CLI sonnet (free) | Hermes Sonnet (Bedrock) |
+| Readability | agy (sandboxed), else Gemini CLI with `REVIEW_USE_GEMINI=1` | Claude CLI sonnet (free) | Hermes Sonnet (Bedrock) |
 | Spec-contract (Opus) | Claude CLI opus (free) | Hermes Opus (Bedrock, paid) | -- |
 
 ### Bedrock opt-in (when you actually want Hermes)
@@ -145,7 +148,9 @@ guarantee matters. Opt in three ways:
    project root. Every review in that project (CLI or convergence-
    loop) auto-uses Bedrock for Anthropic reviewers. The marker lives
    at repo root (not under `.claude/`) so it survives `.claude/`
-   being gitignored and can be committed to share the policy.
+   being gitignored and can be committed to share the policy. The
+   convergence loop also reads it from the base it diffs against, so a
+   branch that deletes it is still reviewed as pinned.
 3. **CLI flag**: `python scripts/review_until_converged.py
    --prefer-hermes` for the convergence loop.
 
@@ -154,12 +159,19 @@ When opted in, the precedence flips for Anthropic reviewers:
 | Reviewer | 1st choice | 2nd choice | 3rd choice |
 |---|---|---|---|
 | Security (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
-| Correctness | Hermes Haiku (Bedrock) | Codex CLI GPT-5.5 (free) | Claude CLI haiku (free) |
-| Readability | Hermes Sonnet (Bedrock) | Gemini CLI (free) | Claude CLI sonnet (free) |
+| Correctness | Hermes Haiku (Bedrock) | Codex CLI GPT-5.5, only with `REVIEW_USE_CODEX=1` | Claude CLI haiku (free) |
+| Readability | Hermes Sonnet (Bedrock) | agy only with `REVIEW_USE_AGY=1` and only where Hermes is not installed (with Hermes installed, agy is not detected at all), else Gemini CLI only with `REVIEW_USE_GEMINI=1` (a project that pinned Bedrock never falls to Google by default) | Claude CLI sonnet (free) |
 | Spec-contract (Opus) | Hermes Opus (Bedrock) | Claude CLI opus (free) | -- |
 
-**With all CLIs installed** (claude + codex + gemini): the full review
-is free, 3 provider families (Anthropic + OpenAI + Google).
+The pin covers the reviewers, not the fixing: fix mode's merge agent is the
+claude CLI, whichever way the project is pinned, so the code and the findings
+it applies go to Anthropic's API. A project whose code must stay on Bedrock
+should run the loop with `--report-only`, which starts no merge agent.
+
+**With all CLIs installed** (claude + codex + agy, or gemini with `REVIEW_USE_GEMINI=1`): the full review
+costs nothing beyond the subscriptions the CLIs sign in with (Claude, ChatGPT,
+and for agy a Google account's plan; the gemini CLI runs on AI Studio's free
+tier), across 3 provider families (Anthropic + OpenAI + Google).
 
 ## Coverage-gap detection
 
@@ -169,6 +181,12 @@ per-file `coverage_gaps` list with the actual uncovered line numbers
 and branch arcs. The correctness reviewer is instructed to turn each
 gap into a concrete test-case finding with `suggested_fix` containing
 the runnable test code -- not a description.
+
+Coverage is measured in the pytest process only: code your tests run in a
+subprocess (a script invoked through `subprocess.run`, say) shows as a gap
+though it is tested. Configure coverage to follow subprocesses (its
+`patch = ["subprocess"]` setting, coverage 7.10 or later) if your project
+tests that way, or read such gaps knowing this.
 
 The merge agent applies those test cases verbatim, so a single
 convergence round closes the loop: detect uncovered code -> write the
@@ -243,6 +261,7 @@ key past a scrubber.
 | 9 | **Scrubber failed** | `scrub_diff.py` aborted part-way through. The patch on disk is truncated and its tail was never scrubbed, so it is not shown to a reviewer. Nothing needs rotating; fix the input or the environment and re-run |
 | 10 | **Report only** | `--report-only` was set and there are blocking findings. Nothing was changed; read them and fix them yourself |
 | 11 | **Incomplete** | No blocking findings among the reviewers that answered, but at least one produced nothing (a revoked key, a network drop, a timeout). Its findings are unknown, so this is not convergence: fix what stopped it -- `stderr-N.txt` says -- and re-run. Every round with a missing reviewer also prints `INCOMPLETE:` naming it, whatever else happens |
+| 12 | **Tampered** | A reviewer changed the working tree (the tamper check lists what). Fix mode stops before the merge agent, the gate and any commit, rather than build on files nobody wrote; `--report-only` reports it, and returns 12 rather than 0, 7 or 11 for a round with nothing blocking |
 
 **Watching a round.** Four models on a large diff is fifteen minutes, and the
 loop used to say nothing during it. It now prints a line every 30 seconds
@@ -259,9 +278,11 @@ until the very end and it looked hung for its whole run. **CPU time** is there
 for `claude -p --output-format json`, which buffers everything and writes at the
 end: its output is 0 bytes from start to finish, so size cannot tell "thinking"
 from "hung". A slot burning CPU between reports is marked `busy`. If you need to
-check from another terminal, the round directory is the truth: mtimes on
-`raw-N.txt` and `stderr-N.txt` say who is moving. The process table does not,
-because `pgrep claude` finds every other session on the machine.
+check from another terminal: while they run, the reviewers write into a private
+directory (`$TMPDIR/mmcra-out-*`), whose `raw-N.txt` and `stderr-N.txt` say by their
+mtimes who is moving; they are copied into the round directory once all have
+stopped. The process table does not, because `pgrep claude` finds every other
+session on the machine.
 
 **A reviewer that answers in prose has still reviewed something.** The commonest
 way a reviewer fails is not finding nothing -- it is finding something and
@@ -296,8 +317,10 @@ Results: 3/4 reviewers returned output; R3 found nothing on 5234 lines -- treat 
 **Slot 3 and the gemini CLI.** That slot is the one above. Its `stderr` shows
 why: the gemini CLI treats the prompt as a task and goes exploring the
 repository with its own tools, finishing a 200 KB diff in sixty seconds where
-the Claude reviewers take six minutes on the same input. It is opt-in now --
-`REVIEW_USE_GEMINI=1` -- and slot 3 falls through to the backend that works.
+the Claude reviewers take six minutes on the same input. It is opt-in now, in
+both modes -- `REVIEW_USE_GEMINI=1`. Slot 3 goes to agy where it is installed and its
+sandbox verified, else to gemini with `REVIEW_USE_GEMINI=1`, and otherwise falls
+through to Claude.
 
 **A killed reviewer's work is not always dead.** `proc.kill()` kills the process
 the loop started, which is not always the one doing the work: a CLI that shells
@@ -306,7 +329,8 @@ on a real round: a reviewer killed at ten minutes wrote **fifteen findings, four
 of them critical, at nineteen** -- and the loop had collected results nine
 minutes earlier and thrown the whole review away. Reviewers now start in their
 own process group so a timeout can take the tree down, and the loop keeps
-looking for a late `result-N.json` for two minutes before giving up on a slot.
+looking for a late answer from codex -- the one reviewer that writes it to a file
+of its own (`codex-out-N.txt`) -- for two minutes before giving up on its slot.
 
 **The deadline scales with the diff.** A flat 600s killed exactly the reviewer
 worth waiting for -- the slowest slot is consistently the one with the most to
@@ -362,6 +386,19 @@ only:
 It cannot see prior conversation, prior rounds, or the orchestrator's
 notes. Findings either get applied verbatim or not at all -- there's
 no negotiation in the loop.
+
+It has no Bash, and it may not write the repository's git directories
+(except one whose path holds whitespace, a comma, a parenthesis or a glob
+character, which a permission rule cannot express; the loop warns about it) or the
+shells' startup files. That does not make fix mode safe on a branch you
+would not run: the findings it applies come from reviewing that branch,
+the gate then runs the project's tests -- which it may have just
+edited -- and a commit runs the project's hooks; with `--auto-commit` the
+loop pushes whatever the agent wrote. It may not edit CI workflow files,
+but CI runs project files it can edit (a Makefile, tox.ini, package.json,
+conftest.py), so a pushed fix can run in CI with CI's secrets. Run
+fix mode, like the tests, only on code you trust; `--report-only` runs no
+merge agent.
 
 ### Invoking the loop
 
@@ -442,7 +479,11 @@ behavior instead of specified behavior.
 **Quick mode** (free): just Claude Code. No additional setup.
 
 **Full mode**: at least `claude` or `hermes` must be installed for
-Anthropic reviewers. For cross-provider diversity, also install:
+Anthropic reviewers, and bash 4.4 or later for its runner (it checks, and
+exits otherwise). macOS ships bash 3.2 as `/bin/bash`: `brew install bash`, and
+put Homebrew's bash first on PATH -- the runner starts through `#!/usr/bin/env
+bash`, so `command -v bash` should print `/opt/homebrew/bin/bash` (or
+`/usr/local/bin/bash`). For cross-provider diversity, also install:
 - [Codex CLI](https://github.com/openai/codex) for GPT-5.5
   (uses ChatGPT subscription, no API credits). The pipeline uses
   whatever model + reasoning effort your `~/.codex/config.toml` has
@@ -458,13 +499,55 @@ Anthropic reviewers. For cross-provider diversity, also install:
   Persist it in `~/.bashrc` / `~/.zshrc` / a project `.envrc` so
   every review picks it up.
 - [Gemini CLI](https://www.npmjs.com/package/@google/gemini-cli) for
-  Gemini (uses Google AI Studio, free tier available). The pipeline
-  pins `gemini-2.5-flash` by default -- as of 2026-05, the free tier
-  does not include quota for `gemini-2.5-pro` (it returns HTTP 429).
+  Gemini (uses Google AI Studio, free tier available). It is opt-in: set
+  `REVIEW_USE_GEMINI=1` to use it in slot 3 (agy is preferred where
+  installed). The pipeline pins `gemini-2.5-flash` by default -- as of
+  2026-05, the free tier does not include quota for `gemini-2.5-pro` (it
+  returns HTTP 429).
   If you have paid quota and want Pro, set `GEMINI_MODEL=gemini-2.5-pro`
   in your shell before running the agent.
+- [Antigravity CLI](https://antigravity.google/docs/cli/headless/) (`agy`)
+  for Google's frontier models, e.g. Gemini 4 Argon, in the readability
+  slot. On by default wherever it is installed, ahead of the gemini CLI;
+  `REVIEW_USE_AGY` set to anything but `1`/`true`/`yes`/`on` switches it off. A project
+  that pinned Bedrock (`.use-hermes`, `--prefer-hermes`, or a "hermes review" /
+  "bedrock review" / "isolated review" request) gets agy only with
+  `REVIEW_USE_AGY=1`, and only when Hermes is not installed to answer the slot.
+  Setup is install and sign in:
+  ```bash
+  curl -fsSL https://antigravity.google/cli/install.sh | bash
+  agy                                   # once, interactively: Google sign-in
+  ```
+  The model is picked for you each run: the best Gemini model `agy models`
+  lists for your sign-in -- newest version, then Pro/Argon over Flash over
+  Lite, then highest effort -- and the run prints which one. Claude and GPT
+  models are passed over, because slots 1, 2 and 4 already cover those
+  providers. Which models you get depends on your plan (Argon needs Google
+  AI Ultra or an eligible Gemini Enterprise plan); when it gets Argon, the
+  next run uses it. `AGY_MODEL=<slug>` overrides the pick.
+
+  **agy needs [bubblewrap](https://github.com/containers/bubblewrap)
+  (`bwrap`), so Linux only.** agy cannot make itself read-only, so it runs
+  under `bwrap`: the filesystem read-only outside an empty workspace; your
+  home directory, `/tmp`, `/run` and the environment hidden; and nothing
+  reachable that runs code outside (sockets this host lists, a session
+  bus, an X server that admits you without its cookie). The wrapper is proven at startup
+  with no model call and checked again before each launch, and the slot
+  goes to its next backend if it fails. It is not network isolation:
+  localhost services and a cloud metadata endpoint stay reachable.
+  [docs/agy-sandbox.md](docs/agy-sandbox.md) has what it closes, what it
+  does not, and its switches.
+
+  **Default-on means data egress.** Wherever agy is installed and signed
+  in, the scrubbed diff and audit now also go to Google, and every round
+  that sends them says so. Set `REVIEW_USE_AGY=0` where that is not
+  acceptable; a project pinned to Bedrock is exempt unless it opts in.
+  Its answer is asked for in the result schema with `--json-schema` (an
+  answer given as text instead is read as the other reviewers' are), and its
+  prompt tells it to call no tools: headless agy refuses them, and a
+  refused call ends its turn with no answer.
 - [Hermes Agent](https://github.com/NousResearch/hermes-agent) +
-  AWS Bedrock for best isolation (data stays in your AWS account)
+  AWS Bedrock for data isolation (data stays in your AWS account)
 
 ## Quick start
 
@@ -496,26 +579,35 @@ project.
 
 ### 2. Configure for your project (optional)
 
-Edit `scripts/preflight/config.py` to set:
-- `SIGNED_MANIFESTS`: paths to your project's signed JSON artifacts
-- `ARTIFACT_DIRS`: directories containing JSON artifacts to audit
-- `SOURCE_DIRS`: directories that hold source code. Defaults to
-  `["src/", "research/"]`. **Override this for any layout that isn't
-  a "src layout"** -- e.g. `["backend/", "frontend/src/", "lib/"]` for
-  a typical full-stack app. If you skip this, the coverage gate is
-  silently inoperative: the audit will print "coverage gate inoperative"
-  when it detects Python files outside `SOURCE_DIRS`.
-- `TEST_DIRS`: directories that hold tests. Defaults to `["tests/"]`.
+Put the layout in `review-config.json` at the project root, which
+`install.sh` leaves alone (it overwrites `scripts/preflight/config.py`):
+
+```json
+{"source_dirs": ["backend/", "frontend/src/"], "test_dirs": ["tests/"]}
+```
+
+- `source_dirs`: directories that hold source code. Defaults to
+  `["src/", "research/"]`. **Set this for any layout that isn't a "src
+  layout"**. If you skip it, the coverage gate is silently inoperative:
+  the audit will print "coverage gate inoperative" when it detects
+  Python files outside them.
+- `test_dirs`: directories that hold tests. Defaults to `["tests/"]`.
+
+- `signed_manifests`: names to paths of your project's signed JSON
+  artifacts, e.g. `{"column_manifest": "path/to/manifest.json"}`.
+- `artifact_dirs`: directories of JSON artifacts to audit. Defaults to
+  `["data/", "docs/"]`.
 
 Defaults work fine for projects using the conventional `src/` /
 `tests/` layout. The audit will report no signed-manifest results
-rather than failing, but `SOURCE_DIRS` mismatch *is* surfaced as a
+rather than failing, but a `source_dirs` mismatch *is* surfaced as a
 warning so you don't miss it.
 
 ### 3. Run from Claude Code
 
 Say any of:
-- "review this" or "quick review" -- quick mode (free, 2 subagents)
+- "review this", "quick review" or just "ensemble review" -- quick mode (free,
+  2 subagents)
 - "full review" or "full ensemble review" -- full mode (4 reviewers)
 - "run until converged" -- convergence loop, see [The convergence
   loop](#the-convergence-loop-external-loop) for details
@@ -571,6 +663,7 @@ The author added a new function but no test file.
     }
   ],
   "coverage_warnings": [],
+  "configuration_warnings": [],
   "n_warnings": 1
 }
 ```
@@ -586,7 +679,7 @@ gap, and emits a finding with runnable test code:
 ```json
 {
   "reviewer": "correctness",
-  "model": "gpt-5.5-codex",
+  "model": "gpt-5.5",
   "findings": [
     {
       "severity": "warning",
@@ -678,7 +771,10 @@ have detected it via fingerprint matching and exited with code 2
 | `scripts/review_preflight.py` | Deterministic pre-review audit (now includes coverage-gap detection) |
 | `scripts/review_until_converged.py` | Convergence loop: review -> merge -> mandatory gate -> commit, until convergence |
 | `scripts/validate_review_results.py` | JSON schema validator |
-| `tests/test_review_scripts.py` | Test suite |
+| `scripts/review_loop/` | The convergence loop's package; also the full-mode runner's checks and extraction, through `runner_entry.py` |
+| `docs/agy-sandbox.md` | What agy's bubblewrap sandbox closes, what it does not, and its switches |
+| `docs/codex-sandbox.md` | Why codex's sandbox is verified before use, and how to fix a host where it is not read-only |
+| `tests/` | Test suite: `test_review_scripts.py` (the scrubber, preflight, loop and gate), `test_tamper.py`, `test_merge_agent.py`, `test_runner_script.py` (the full-mode runner), `test_agy_*.py`, `test_reviewer_processes.py`, `test_runner_cli.py`; shared: `helpers.py` (takes the full-mode runner out of the agent doc), `agy_case.py`, `conftest.py` (switches agy off for every test unless it switches it on) |
 
 ## Key design decisions
 
@@ -689,26 +785,48 @@ have detected it via fingerprint matching and exited with code 2
   Hermes only when you need Bedrock isolation.
 - **Claude Code orchestrates**: Hermes `delegate_task` cannot route
   children to different models. Claude Code spawns parallel processes.
-- **Secrets never touch disk**: `scrub_diff.py` reads stdin via pipe.
-  Exits non-zero on redaction, blocking the review until secrets are
-  removed and rotated.
+- **Secrets are scrubbed before anything is sent**: the diff on its way in
+  from git, through a pipe (a redaction stops the review). The audit and
+  full mode's context bundle are written once unscrubbed -- in full mode
+  to its private temporary directory, in the loop beside the round's
+  `audit.json` -- scrubbed, and the raw copy removed whatever happens; a
+  failed scrub stops the review.
+  A redaction in the diff exits 1 and blocks the review until the secret
+  is removed and rotated; in the audit or context bundle the line is
+  replaced and the review goes on. The scrub covers what is put in the
+  prompts: reviewers that read the repository themselves (claude's Read
+  and Grep, codex, gemini) see its files as they are, so a credential
+  kept in the tree is readable to them -- the credential read denies
+  cover common locations, not every file. Only agy has the repository
+  hidden.
 - **Evidence-based convergence**: a single finding with artifact
   evidence is high-priority even if only one reviewer flags it.
 - **Strict schema**: `additionalProperties: false` at both levels.
-  Extracted JSON is validated for required keys before writing.
+  Extracted JSON is checked for the required top-level keys and a list of
+  finding objects before it is written; `validate_review_results.py` is the
+  strict check against the full schema.
 - **Private temp directory**: `mktemp -d`, not world-readable `/tmp/`.
 
 ## Privacy and isolation
 
 | Backend | Data path | Isolation | Cost |
 |---|---|---|---|
-| Hermes+Bedrock | Your AWS account | Best (`-t file`) | Bedrock pricing |
-| Claude CLI | Anthropic infrastructure | Good (`--allowedTools`) | Claude subscription |
-| Codex CLI | OpenAI infrastructure | Good (sandbox) | ChatGPT subscription |
-| Gemini CLI | Google infrastructure | Good (`--approval-mode plan`) | AI Studio free tier |
+| Hermes+Bedrock | Your AWS account | Data: best (stays in your AWS account). Tools: the file toolset with `--yolo`, which can write; only the convergence loop's tamper check reports writes (full mode does not check) | Bedrock pricing |
+| Claude CLI | Anthropic infrastructure | Writes: good (`--tools Read,Grep,Glob` + `--disallowedTools`; no MCP, no project settings). Reads: not confined to the repository -- well-known credential paths are denied (`claude_tools.SECRET_READS`), not every file | Claude subscription |
+| Codex CLI | OpenAI infrastructure | Writes: good (`-s read-only`, canary-verified). Reads: not confined -- it can read your home directory, credentials included | ChatGPT subscription |
+| Gemini CLI | Google infrastructure | Weak: read-only by policy (`--approval-mode plan`), not sandboxed; it can read your home directory | AI Studio free tier |
+| Antigravity CLI | Google infrastructure | Good (`bwrap` read-only filesystem; home, `/tmp`, `/run` and env hidden; verified) | Google AI plan |
 
 For sensitive/FDA-path code where data-at-rest guarantees matter, use
-Hermes+Bedrock for all reviewers.
+Hermes+Bedrock for all reviewers. Its writes are not prevented, so prefer
+the convergence loop, whose tamper check reports them -- in tracked and
+untracked files (by content), ignored files (by size and modification
+time), the repository's git hooks and config, the home's startup files and
+the directories whose files run unasked (`~/.bashrc.d`, autostart, systemd user
+units), the programs the loop runs by name, and the directories on `PATH` you
+can write; it does not see other writes outside the repository, and full mode
+does not check. The loop's own output redirected into the repository is no
+reviewer's write; one copied there through `tee` needs `--log-file PATH`.
 
 ## Customization
 

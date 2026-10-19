@@ -7,7 +7,7 @@ Re-exports the public API. The CLI entry point lives at
 from __future__ import annotations
 
 from .artifacts import describe_outputs, write_artifacts_key
-from .backends import _run, detect_backends
+from .backends import detect_backends
 from .config import (
     MERGE_TIMEOUT,
     REPO_ROOT,
@@ -45,7 +45,6 @@ __all__ = [
     "FindingKey",
     "ScrubberFailedError",
     "SecretsDetectedError",
-    "_run",
     "write_artifacts_key",
     "apply_fixes",
     "build_reviewer_prompt",

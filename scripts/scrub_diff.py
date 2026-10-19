@@ -9,11 +9,26 @@ Lines matching credential patterns are replaced with a redaction marker.
 The diff structure (headers, hunks) is preserved so reviewers can still
 see file/line context.
 
+Modes:
+
+* (no argument) -- stdin is a unified diff.
+* ``--text`` -- stdin is plain text, every line content: full mode's context
+  bundle.
+* ``--json`` -- stdin is a JSON document, whose keys and strings are scrubbed
+  and which is written back as JSON: the preflight audit.
+* ``--agent-repo`` -- stdin is a unified diff of this agent's own
+  repository, whose scrubber and tests hold credential-shaped fixtures that a
+  reviewed marker may excuse.
+
+Any other argument is exit 2.
+
 Exit codes:
 
 * ``0`` -- nothing redacted, the diff is clean.
-* ``1`` -- at least one line was redacted. The review pipeline should block
-  until the secrets are removed from the branch and rotated.
+* ``1`` -- at least one line was redacted. For a diff, the review pipeline
+  should block until the secrets are removed from the branch and rotated; for
+  ``--text`` and ``--json``, the redacted output is safe to send and the
+  review goes on.
 * ``2`` -- the scrubber itself failed. The output on stdout is truncated and
   must not be treated as a scrubbed diff. This is deliberately distinct from
   ``1``: a crash halfway through writing ``diff.patch`` leaves a plausible
@@ -23,6 +38,9 @@ Exit codes:
 
 from __future__ import annotations
 
+import argparse
+import functools
+import json
 import re
 import sys
 from pathlib import PurePath
@@ -96,15 +114,105 @@ _PEM_END = re.compile(r"(?i)END\s+[A-Z0-9 ]*PRIVATE\s+KEY")
 # KEYWORD_PATTERNS recognise a credential by the *name* next to it: `token =`,
 # `password:`, `api_key=`. They are the ones that fire on ordinary code in any
 # project where a token is a domain object, so they are the ones a reviewed
-# fixture suppression may excuse.
+# fixture suppression may excuse. The name may be quoted, as a JSON or a dict's key
+# is ("password": "..."): the quote between it and the ":" let one through.
+_KEY_END = r"""["'`]?\s*[:=]\s*"""
 KEYWORD_PATTERNS = [
     re.compile(
-        r"(?i)(api[_-]?key|secret[_-]?key|access[_-]?key)\s*[:=]\s*" + _SECRET_VALUE
+        r"(?i)(api[_-]?key|secret[_-]?key|access[_-]?key)" + _KEY_END + _SECRET_VALUE
     ),
-    re.compile(r"(?i)(password|passwd|pwd)\s*[:=]\s*" + _SECRET_VALUE),
-    re.compile(r"(?i)\b(token|bearer)\s*[:=]\s*" + _SECRET_VALUE),
-    re.compile(r"(?i)client[_-]?secret\s*[:=]\s*" + _SECRET_VALUE),
+    re.compile(r"(?i)(password|passwd|pwd)" + _KEY_END + _SECRET_VALUE),
+    # At the end of a longer name too (GITHUB_TOKEN, api_token, bot-token): the "_"
+    # before it is a word character, and \b alone let them through.
+    re.compile(r"(?i)(?:\b|(?<=[_-]))(token|bearer)" + _KEY_END + _SECRET_VALUE),
+    re.compile(r"(?i)client[_-]?secret" + _KEY_END + _SECRET_VALUE),
 ]
+
+#: A URL password that is no password: a template's field, named as a template names
+#: one -- {password}, {password!r}, {{password}}, {0}, ${DB_PASS}, ${config.password},
+#: %(pw)s, %(pw)d, <password> -- not any text
+#: in braces, which a password can be. A port can be a field too (localhost:{port}/...),
+#: so before a "/" it is no password either. Each part bounded, as the pattern's are,
+#: so that a line of unfinished ones is scanned in linear time.
+_URL_FIELD = (
+    r"(?:\{\{?[A-Za-z_][\w.]{0,63}(?:![sra])?\}?\}|\{\d{0,3}(?:![sra])?\}"
+    + r"|\$\{[A-Za-z_]\w{0,63}(?:\.[A-Za-z_]\w{0,63}){0,8}\}|\$[A-Z_][A-Z0-9_]{0,64}|%\([A-Za-z_]\w{0,63}\)[sd]"
+    + r"|%[sd]|<[A-Za-z_][\w.-]{0,63}>)"
+)
+
+#: Or a placeholder word or mask, but only as the whole password: before a "/" it is
+#: the start of a real one ("pass/W0rd9").
+_URL_PLACEHOLDER = (
+    r"(?:"
+    + _URL_FIELD
+    + r"|\*{1,64}|x{1,64}|X{1,64}|pass(?:w(?:or)?d)?|pwd?|secret"
+    + r"|changeme)"
+)
+
+
+#: The parts of a URL with a password in its userinfo: scheme, "://", user (redis's
+#: may be empty, Azure's holds an @, none holds a bracket, so an IPv6 host's colons
+#: are not taken for one), ":". The scheme is anchored, and bounded like the rest, so
+#: that a long line is scanned in linear time.
+_SCHEME_NAME = r"[a-zA-Z][a-zA-Z0-9+.-]{0,31}:"
+_URL_SCHEME = r"(?<![a-zA-Z0-9+.-])" + _SCHEME_NAME
+#: After a quote -- ', " or a template string's ` -- what says the string goes on: not the end of a string --
+#: followed by , . ) ] } ; : + > or a space (an HTML attribute's end), as in ['http://h:8080','ops@x'] or
+#: 'https://h'.format(...), or an operator (= & | ! ? <: "https://h:443"==="ops@x") -- or the pattern
+#: runs from one string into the next.
+_QUOTE_GOES_ON = r"(?![.,\])};:+><=&|!?\s])"
+#: The user: like the password (``_URL_PASSWORD_CHAR``), not past a quote that closes
+#: a string -- or it ran from one into the next: ['https://example.com','mailto:a@b'].
+#: Without an @ in it (``_URL_USER_NO_AT``) or with one (``_URL_USER_WITH_AT``), whose
+#: password may hold no "/". Inside double quotes, where a ' ends nothing, the user may
+#: hold any ', with an @ (``_URL_USER_DOUBLE_QUOTED``) or without
+#: (``_URL_USER_DOUBLE_QUOTED_NO_AT``).
+_URL_USER_DOUBLE_QUOTED = r"//[^\s/:\"?#\[\]]{0,256}:"
+_URL_USER_DOUBLE_QUOTED_NO_AT = r"//[^\s/:\"?#\[\]@]{0,256}:"
+#: The user without an @ in it, and with one.
+_URL_USER_CHAR = r"(?:\\[^\s@]|[^\s/:\"?#\[\]'`\\@]|['\"`]" + _QUOTE_GOES_ON + ")"
+_URL_USER_NO_AT = r"//" + _URL_USER_CHAR + r"{0,256}:"
+_URL_USER_WITH_AT = (
+    r"//" + _URL_USER_CHAR + r"{0,256}@" + r"(?:" + _URL_USER_CHAR + r"|@){0,256}:"
+)
+#: What follows that ":" is no password when it is a port -- digits, any number of them
+#: and none at all among them (an empty port is a valid one), then the path -- or
+#: digits then a query or fragment that looks like one (a "=" before the "@"): bare,
+#: 2024#Sec9 is a password, and redis://h:6379?x=a@b a query,
+#: query or fragment (http://host:8080/@scope/pkg, redis://cache:6379/0?x=a@b) --
+#: whatever the scheme, as RFC 3986 reads it: a URL's userinfo ends at its first "/",
+#: so a postgres URL with "8080/abc" there has a host and a port, not a password.
+#: Nor when it is a template's field in a port's place -- a shell default among them,
+#: ${PORT:-5432}, which is no password's placeholder: its default can be a real one --
+#: or a placeholder.
+_URL_PORT_FIELD = r"(?:" + _URL_FIELD + r"|\$\{[A-Za-z_]\w{0,64}:?[-=]\d{1,16}\})"
+_URL_NOT_A_PASSWORD = (
+    # The query's "=" looked for in this URL only: past a quote or a "/", the look ran
+    # on through every URL after it on the line, in quadratic time.
+    r"(?!\d{0,16}/|\d{1,16}[?#][^@\s/\"'`]*=)(?!"
+    + _URL_PORT_FIELD
+    + r"[/?#])(?!"
+    + _URL_PLACEHOLDER
+    + r"@)"
+)
+#: A character of the password: it may hold ' (base64 and generated ones do), but
+#: not a quote that closes a string literal -- one followed by , ) ] } ; : + or a
+#: space -- or the pattern ran from one string into the next
+#: (['http://h:8080','ops@x']). A backslash and what follows it are one character, so
+#: an escaped quote (\') closes nothing.
+_URL_PASSWORD_CHAR = r"(?:\\[^\s@]|\\(?=@)|[^\s@\"?#'`\\]|['\"`]" + _QUOTE_GOES_ON + ")"
+#: The password: with no "/" in it, any length -- the scan stops at the next "/", and
+#: every URL after it has one, so it stays linear -- and it may hold ? and #, as
+#: generated ones do; or with a "/", which ends userinfo only by the RFC and is
+#: common in base64, up to 256 characters with no ? or #, which would then be a
+#: query or fragment.
+_URL_PASSWORD = (
+    r"(?:(?:\\[^\s/@]|\\(?=@)|[^\s@\"'`/\\]|['\"`]"
+    + _QUOTE_GOES_ON
+    + ")+|"
+    + _URL_PASSWORD_CHAR
+    + r"{1,256})"
+)
 
 # SHAPE_PATTERNS recognise a credential by its own shape, with no help from a
 # name: `sk-ant-...`, `AKIA...`, a PEM block, a service-account blob. Nothing
@@ -112,6 +220,19 @@ KEYWORD_PATTERNS = [
 # is concerned -- a comment calling it a fixture is exactly what somebody would
 # write to smuggle one past, and a fixture that really is shaped like a key
 # should be redacted from a review diff anyway.
+#: The URL patterns whose password may be a port (``_URL_NOT_A_PASSWORD``), and so
+#: whose web URL's port and query ``_hits`` sets aside: marked where each is made,
+#: rather than told by what its source text holds.
+_PORT_RULED: list[re.Pattern[str]] = []
+
+
+def _port_ruled(source: str) -> re.Pattern[str]:
+    """``source`` compiled, and kept among ``_PORT_RULED``."""
+    pattern = re.compile(source)
+    _PORT_RULED.append(pattern)
+    return pattern
+
+
 SHAPE_PATTERNS = [
     _PEM_BEGIN,
     re.compile(r"(?i)(^|[\s'\"/])\.env(\.[a-z]+)?([\s'\"/]|$)"),
@@ -123,10 +244,123 @@ SHAPE_PATTERNS = [
     re.compile(r"sk-[a-zA-Z0-9_-]{20,192}"),
     re.compile(r"ghp_[a-zA-Z0-9]{36,}"),
     re.compile(r"gho_[a-zA-Z0-9]{36,}"),
+    # GitHub's other token kinds: fine-grained, app, user-to-server, refresh.
+    re.compile(r"github_pat_[0-9A-Za-z_]{40,}"),
+    re.compile(r"gh[sur]_[A-Za-z0-9]{36,}"),
+    # A Google API key: with agy on by default, the diff goes to Google itself.
+    re.compile(r"AIza[0-9A-Za-z_-]{35}"),
+    re.compile(r"(?:sk|rk)_live_[0-9a-zA-Z]{20,}"),
+    re.compile(r"xox[abprs]-[0-9A-Za-z-]{10,}"),
+    # Slack app tokens and incoming webhooks, Discord webhooks, SendGrid keys.
+    re.compile(r"xapp-\d-[A-Za-z0-9-]{20,}"),
+    re.compile(r"hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]{20,}"),
+    re.compile(r"discord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9_-]{50,}"),
+    re.compile(r"SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}"),
+    # A password in a URL's userinfo (``_URL_USER_NO_AT``), "@" -- in a postgres, redis or
+    # proxy URL -- unless it is no password (``_URL_NOT_A_PASSWORD``): documentation
+    # and connection-string code are full of those, and a redaction aborts the
+    # review. Written in parts, so that this line is not one.
+    _port_ruled(
+        _URL_SCHEME + _URL_USER_NO_AT + _URL_NOT_A_PASSWORD + _URL_PASSWORD + r"@"
+    ),
+    # A user holding an @ (Azure's user@server) with a password that has no "/": with
+    # one, it is an scp-style git address with a revision -- a "/" path, then "@v1" --
+    # not a password (git+ssh://git@github.com:org/repo.git@v1).
+    _port_ruled(
+        _URL_SCHEME
+        + _URL_USER_WITH_AT
+        + _URL_NOT_A_PASSWORD
+        + r"(?:\\[^\s/@]|\\(?=@)|[^\s@\"'`/\\]|['\"`]"
+        + _QUOTE_GOES_ON
+        + r")+@"
+    ),
+    # Inside single quotes or backticks, a password whose quote of the other kind is
+    # followed by punctuation (a " then ")" in a single-quoted DSN): there that quote ends
+    # nothing either.
+    _port_ruled(
+        r"'"
+        + _URL_SCHEME
+        + r"//[^\s/:'?#\[\]@]{0,256}:"
+        + _URL_NOT_A_PASSWORD
+        + r"[^'\s@/]{1,256}@"
+    ),
+    _port_ruled(
+        r"`"
+        + _URL_SCHEME
+        + r"//[^\s/:`?#\[\]@]{0,256}:"
+        + _URL_NOT_A_PASSWORD
+        + r"[^`\s@/]{1,256}@"
+    ),
+    # Inside double quotes, where a ' is no string's end and ends nothing: the password
+    # runs to the "@" (K7a');s9 is one).
+    _port_ruled(
+        r'"'
+        + _URL_SCHEME
+        + _URL_USER_DOUBLE_QUOTED_NO_AT
+        + _URL_NOT_A_PASSWORD
+        + r'[^"\s@]{1,256}@'
+    ),
+    # And with an @ in the user, a password with no "/", as outside quotes.
+    _port_ruled(
+        r'"'
+        + _URL_SCHEME
+        + _URL_USER_DOUBLE_QUOTED
+        + _URL_NOT_A_PASSWORD
+        + r'[^"\s@/]{1,256}@'
+    ),
+    # A URL no quote opens (YAML, an .ini, prose): a quote in it ends no string, so
+    # its password may hold one (a YAML dsn whose password has a ' and a comma). Slash-free,
+    # so a path with an @ further on is no password.
+    _port_ruled(
+        r"(?<![A-Za-z0-9+.\-'\"`])"
+        + _SCHEME_NAME
+        + _URL_USER_NO_AT
+        + _URL_NOT_A_PASSWORD
+        + r"[^\s@/]{1,256}@"
+    ),
+    # And with no user name, where nothing before the ":" is a host, so nothing after
+    # it is a port.
+    re.compile(
+        _URL_SCHEME
+        + r"//:(?!"
+        + _URL_PLACEHOLDER
+        + r"@)"
+        + _URL_PASSWORD_CHAR
+        + r"{1,256}@"
+    ),
+    # Google's OAuth access and refresh tokens and client secrets, and the package
+    # registries' tokens.
+    re.compile(r"ya29\.[0-9A-Za-z_-]{20,}"),
+    re.compile(r"1//0[0-9A-Za-z_-]{30,}"),
+    re.compile(r"GOCSPX-[0-9A-Za-z_-]{20,}"),
+    re.compile(r"hf_[A-Za-z0-9]{30,}"),
+    re.compile(r"npm_[A-Za-z0-9]{36}"),
+    re.compile(r"pypi-AgE[0-9A-Za-z_-]{50,}"),
     re.compile(r"glpat-[a-zA-Z0-9\-]{20,}"),
     re.compile(r"(?i)DefaultEndpointsProtocol=https;AccountName="),
     re.compile(r'"type"\s*:\s*"service_account"'),
 ]
+
+#: A web URL's port and then its query or fragment, which the URL patterns'
+#: own port rule (``_URL_NOT_A_PASSWORD``) leaves to a "=" to tell: on a web scheme
+#: it is always that (http://h:8080#frag@x), on any other it may be a password that
+#: starts with digits and then a "#". Told here, after the match: the scheme is too
+#: far back for a look-behind.
+_WEB_PORT_AND_QUERY = re.compile(
+    r"""["'`]?(?i:https?|wss?)://[^\s/:]{0,256}:\d{1,16}[?#]"""
+)
+
+
+def _hits(pattern: re.Pattern[str], body: str) -> bool:
+    """Whether ``pattern`` finds a credential in ``body``, a URL pattern's match that
+    is a web URL's port and query aside (``_WEB_PORT_AND_QUERY``)."""
+    if pattern not in _PORT_RULED:
+        return pattern.search(body) is not None
+    return any(
+        not _WEB_PORT_AND_QUERY.match(match.group(0))
+        for match in pattern.finditer(body)
+    )
+
 
 #: Every pattern, for callers and tests that do not care about the split.
 CREDENTIAL_PATTERNS = [*KEYWORD_PATTERNS, *SHAPE_PATTERNS]
@@ -156,19 +390,13 @@ _SCRUBBER_SAFE_FILES = frozenset(
 def _is_safe_file(diff_header: str) -> bool:
     """Check if a diff --git header names a safe file.
 
-    Parses both the a/ and b/ paths from the header and checks
-    that BOTH (stripped of the a/ or b/ prefix) are in the
-    safe-file set. This prevents rename-based bypass where one
-    side is a safe file but the other is attacker-controlled.
+    The header must be exactly a safe file's, both sides the same path: not a rename
+    of one, where the other side is attacker-controlled, and not a name whose spaces
+    make its tokens look like one (``scripts/scrub_diff.py b/scripts/scrub_diff.py``,
+    as a file name, gave a header of nothing but safe-looking tokens).
     """
-    parts = diff_header.split()
-    ab_paths = []
-    for part in parts:
-        if part.startswith("a/") or part.startswith("b/"):
-            ab_paths.append(part[2:])
-    if not ab_paths:
-        return False
-    return all(p in _SCRUBBER_SAFE_FILES for p in ab_paths)
+    header = diff_header.rstrip("\n")
+    return any(header == f"diff --git a/{p} b/{p}" for p in _SCRUBBER_SAFE_FILES)
 
 
 def _is_secret_file(diff_header: str) -> bool:
@@ -328,7 +556,7 @@ def scrub_line(
     # prose was redacted.
     body = _body(line, in_hunk=in_hunk)
     for pattern in SHAPE_PATTERNS:
-        if pattern.search(body):
+        if _hits(pattern, body):
             return _redact_preserving_prefix(line)
     # A linter already asked the keyword question and a person already answered
     # it. `S105`/`S106`/`S107` are ruff's "possible hardcoded password", so a
@@ -348,6 +576,10 @@ def scrub_line(
     return line
 
 
+#: A terminal colour or style escape, as git writes one.
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
 def _force_utf8(stream: object) -> None:
     """Pin a standard stream to UTF-8 with replacement.
 
@@ -357,10 +589,200 @@ def _force_utf8(stream: object) -> None:
     mid-stream, and the exception escapes after an unknown number of lines have
     already been written: a truncated patch whose tail was never scrubbed.
     Replacement characters in a reviewer's diff are a far better outcome.
+
+    And lines split at "\n" alone, as git splits them: read with universal newlines,
+    a lone "\r" ended a line, and what followed it was a line of its own with no
+    +, - or space -- taken for metadata, and passed unscrubbed.
     """
     reconfigure = getattr(stream, "reconfigure", None)
     if reconfigure is not None:  # pragma: no branch - always a TextIOWrapper
-        reconfigure(encoding="utf-8", errors="replace")
+        reconfigure(encoding="utf-8", errors="replace", newline="\n")
+
+
+def _key_open_after(line: str, before: bool) -> bool:
+    """Whether a private key's body continues past ``line``: what its last BEGIN or END
+    marker says, or ``before`` if it has neither. The last, not the first: a line can
+    end one key and begin another (END ... BEGIN), whose body is on the lines after."""
+    marks = [(m.start(), True) for m in _PEM_BEGIN.finditer(line)]
+    marks += [(m.start(), False) for m in _PEM_END.finditer(line)]
+    return max(marks)[1] if marks else before
+
+
+def _opens_key(line: str) -> bool:
+    """Whether ``line`` begins a private key whose body is on the lines after it."""
+    return _key_open_after(line, False)
+
+
+def scrub_text() -> int:
+    """``--text``: scrub stdin as plain text rather than a diff -- every line is
+    content, as an added line is -- writing it to stdout. Returns the number of
+    lines redacted. For what goes into a prompt beside the diff: full mode's context
+    bundle quotes project files, and is sent wherever the diff is."""
+    n_redacted = 0
+    in_key = False
+    for line in sys.stdin:
+        if in_key:
+            # A private key's body, after its redacted BEGIN line, to its END line.
+            clean = _redact_preserving_prefix("+" + line)[1:]
+            in_key = _key_open_after(line, True)
+        else:
+            # Read as the audit's quotes are (``redacts``), the literal URL check among
+            # it: text is not source, and a quote in it ends no string.
+            content = line.rstrip("\n")
+            clean = (
+                _redact_preserving_prefix("+" + line)[1:] if redacts(content) else line
+            )
+            # A key on one line -- JSON- or \n-escaped -- opens no block: its END is on
+            # that line too, and everything after it was redacted as its body.
+            in_key = clean != line and _opens_key(line)
+        sys.stdout.write(clean)
+        if REDACTED in clean and clean != line:
+            n_redacted += 1
+    return n_redacted
+
+
+#: What a redacted string becomes, outside a diff: the marker without the "# " that
+#: keeps a redacted diff line a comment.
+REDACTED_TEXT = REDACTED.removeprefix("# ")
+
+
+#: A URL's password in text that is not source: a decoded JSON value, a quoted line.
+#: There a quote ends no string literal, so the source patterns' rules for quotes do
+#: not apply (alice:p4ss',x@db is a password). Not in the diff's own scrub, where a
+#: wrong match aborts the review; here it only replaces a value.
+_LITERAL_URL_PASSWORD = re.compile(
+    _URL_SCHEME
+    + r"//[^\s/:?#\[\]]{0,256}:"
+    # No port to mistake, either: a wrong match here only replaces a value, so digits
+    # then ? or # (2024#Sec9) are read as the password they may be.
+    + r"(?!"
+    + _URL_PLACEHOLDER
+    + r"@)[^\s@/]{1,256}@"
+)
+
+
+def redacts(text: str) -> bool:
+    """Whether the scrubber would redact any line of ``text`` read as an added line of
+    a diff, or it holds a URL password read literally (``_LITERAL_URL_PASSWORD``) --
+    the one test the audit's quotes and a JSON document's strings share."""
+    # At "\n" alone: splitlines() also broke at "\r" and Unicode's separators, and a
+    # credential's name and value on either side of one went through apart.
+    for part in text.split("\n"):
+        added = "+" + part + "\n"
+        if scrub_line(added, False) != added or _LITERAL_URL_PASSWORD.search(part):
+            return True
+    return False
+
+
+#: A key that names a credential by how it ends (GITHUB_TOKEN, db.password, api-key):
+#: in a JSON document's keys, where redacting one too many costs nothing.
+_SECRET_KEY = re.compile(
+    r"(?i)(?:^|[_.-])(?:token|secret|pass(?:w(?:or)?d)?|pwd|api[_-]?key"
+    r"|private[_-]?key|credentials?)$"
+)
+
+
+@functools.lru_cache(maxsize=1024)
+def _secret_field(key: str) -> bool:
+    """Whether ``key`` names a credential: whether the scrubber would redact it
+    assigned an ordinary-looking value. The value is not put in the probe -- one
+    holding a quote or a newline changed what the line said, and passed. OAuth's own
+    names are named outright: the line patterns do not read access_token as one."""
+    if re.fullmatch(r"(?:access|refresh|id|auth|bearer)[_-]?token", key, re.IGNORECASE):
+        return True
+    if _SECRET_KEY.search(key):
+        return True
+    return any(
+        redacts(probe)
+        for probe in (f'{key} = "Zq7xK9mP2w4t"', f'"{key}": "Zq7xK9mP2w4t"')
+    )
+
+
+def _holds_value(value: object) -> bool:
+    """Whether a field's value could be a credential: a string or number with some
+    length to it, not an empty one or a flag -- or a list or object that is not empty,
+    under a key that names a credential ({"token": ["..."]}), whose leaves would lose
+    that key's context once walked into."""
+    if isinstance(value, (list, dict)):
+        return bool(value)
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        return False
+    return len(str(value)) >= 4
+
+
+def scrub_json() -> int:
+    """``--json``: scrub a JSON document's strings -- every line of each is content, as
+    an added line is -- and write it back out, still JSON. Returns the number of
+    strings redacted. For the preflight audit, which quotes the files under review: a
+    project's own installed copy of the preflight may be too old to scrub its quotes.
+
+    Keys too, and a value with its key: a password field's value says, beside its key,
+    what it does not alone -- as the same assignment does in a diff.
+    """
+    redacted = 0
+
+    def walk(node: object) -> object:
+        nonlocal redacted
+        if isinstance(node, str):
+            if redacts(node):
+                redacted += 1
+                return REDACTED_TEXT
+            return node
+        if isinstance(node, list):
+            # A private key kept as a list of lines: its body lines say nothing alone,
+            # so from a BEGIN to its END every string is redacted.
+            cleaned: list[object] = []
+            in_key = False
+            for item in node:
+                if isinstance(item, str) and (in_key or _opens_key(item)):
+                    in_key = _key_open_after(item, in_key)
+                    redacted += 1
+                    cleaned.append(REDACTED_TEXT)
+                else:
+                    cleaned.append(walk(item))
+            return cleaned
+        if isinstance(node, dict):
+            out: dict[str, object] = {}
+            for index, (key, value) in enumerate(node.items()):
+                name = walk(key)
+                if name != key:
+                    # Distinct from every other key, the document's own included: a
+                    # collision dropped one of the two values.
+                    name = f"{REDACTED_TEXT} {index}"
+                    while name in node or name in out:
+                        name += "_"
+                if _secret_field(key) and _holds_value(value):
+                    redacted += 1
+                    out[str(name)] = REDACTED_TEXT
+                    continue
+                out[str(name)] = walk(value)
+            return out
+        return node
+
+    document = walk(json.load(sys.stdin))
+    json.dump(document, sys.stdout, indent=2)
+    sys.stdout.write("\n")
+    return redacted
+
+
+def _parse_args(argv: list[str]) -> argparse.Namespace:
+    """The mode, one of the module docstring's. Anything else is exit 2, not diff mode
+    by default: a line there without a +, - or space passes unscrubbed, and a caller
+    that asked for another mode would get exit 0."""
+    # No -h either: its help on stdout with exit 0 reads as a clean, empty diff.
+    parser = argparse.ArgumentParser(
+        prog="scrub_diff.py", allow_abbrev=False, add_help=False
+    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--text", dest="mode", action="store_const", const="text")
+    mode.add_argument("--json", dest="mode", action="store_const", const="json")
+    # The diff is this agent's own, whose scrubber and tests hold the patterns as
+    # fixtures. Only then are those files passed as such: a host project's file of the
+    # same name is the host's, and its keys are keys.
+    mode.add_argument(
+        "--agent-repo", dest="mode", action="store_const", const="agent-repo"
+    )
+    return parser.parse_args(argv)
 
 
 def main() -> None:
@@ -368,20 +790,37 @@ def main() -> None:
     _force_utf8(sys.stdin)
     _force_utf8(sys.stdout)
 
+    args = _parse_args(sys.argv[1:])
+    agent_repo = args.mode == "agent-repo"
+    if args.mode in ("text", "json"):
+        text = args.mode == "text"
+        n_text = scrub_text() if text else scrub_json()
+        if n_text:
+            what = "line(s)" if text else "string(s)"
+            print(f"# scrub_diff.py: {n_text} {what} redacted", file=sys.stderr)
+            sys.exit(1)
+        return
+
     n_redacted = 0
     in_safe = False
     in_secret = False
     in_key = False
     in_hunk = False
 
-    for line in sys.stdin:
+    for raw_line in sys.stdin:
+        # Colour codes off for reading: a diff in colour (color.diff=always) has an
+        # escape before every "+", and read as it came, no line was content. Written
+        # out as it came unless redacted -- a file's own escapes are its content.
+        line = _ANSI.sub("", raw_line)
         # Fail closed on every header form, not just `diff --git`. `in_safe`
         # used to latch: a `diff --cc` section from a merge commit following a
         # safe file inherited its bypass, and any line in it containing
         # `re.compile(` -- which is to say any Python file defining a regex --
         # passed through unscrubbed.
         if line.startswith("diff "):
-            in_safe = line.startswith("diff --git ") and _is_safe_file(line)
+            in_safe = (
+                agent_repo and line.startswith("diff --git ") and _is_safe_file(line)
+            )
             # Every header form, unlike `in_safe`: a `diff --cc` section
             # naming the token file is still the token file. See
             # `_is_secret_file`.
@@ -395,17 +834,18 @@ def main() -> None:
 
         if in_key:
             clean = _redact_preserving_prefix(line)
-            if _PEM_END.search(line):
-                in_key = False
+            in_key = _key_open_after(line, True)
         else:
             clean = scrub_line(line, in_safe, in_hunk=in_hunk, in_secret_file=in_secret)
             # Only a *redacted* BEGIN line opens a block. In a safe file the
             # banner is an intentional fixture and passes through, and the
-            # fixture's body must not then be swallowed.
-            if clean != line and _PEM_BEGIN.search(line):
+            # fixture's body must not then be swallowed. Nor does a key whose END
+            # is on the same line (JSON- or \n-escaped), or the rest of the hunk
+            # was redacted as its body.
+            if clean != line and _opens_key(line):
                 in_key = True
 
-        sys.stdout.write(clean)
+        sys.stdout.write(raw_line if clean == line else clean)
         if clean != line and REDACTED in clean:
             n_redacted += 1
 

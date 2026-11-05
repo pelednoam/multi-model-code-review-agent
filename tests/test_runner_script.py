@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -728,6 +729,19 @@ class TestRunnerScript:
         )  # fmt: skip
         assert done.returncode == 2, done.stdout + done.stderr
         assert not (tmp_path / "cwd").exists()
+
+    def test_the_runner_runs_the_loops_bedrock_models(self) -> None:
+        # Both named us.anthropic.claude-sonnet-4-6-v1, an ID Bedrock does not have:
+        # hermes exited 0 with no answer, and the slot came back empty.
+        runner = runner_script()
+        ids = {
+            reviewers_mod._OPUS_BEDROCK,
+            reviewers_mod._SONNET_BEDROCK,
+            reviewers_mod._HAIKU_BEDROCK,
+        }
+        launched = set(re.findall(r"launch_hermes \d (\S+) ", runner))
+        assert launched == ids
+        assert reviewers_mod._SONNET_BEDROCK == "us.anthropic.claude-sonnet-4-6"
 
     def test_a_failed_slot_still_produces_a_result_with_a_true_reason(self) -> None:
         runner = runner_script()

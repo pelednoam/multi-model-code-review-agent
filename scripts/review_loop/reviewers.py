@@ -49,7 +49,7 @@ _LENSES = [
         "security and robustness",
         "injection, regex, scrubber correctness, stdin handling",
         "security",
-        "claude-opus-4.6",
+        "claude-opus-5.5",
     ),
     (
         "correctness and edge cases",
@@ -61,13 +61,13 @@ _LENSES = [
         "readability and performance",
         "naming, dead code, function structure, doc consistency",
         "readability_performance",
-        "claude-sonnet-4.6",
+        "claude-sonnet-5.5",
     ),
     (
         "spec-contract compliance",
         "schema vs code, model table vs routing, doc alignment",
         "spec_contract",
-        "claude-opus-4.6",
+        "claude-opus-5.5",
     ),
 ]
 
@@ -202,7 +202,7 @@ def _claude_cmd(slot: int, repo: Path | None = None) -> list[str]:
 
 _OPUS_BEDROCK = "us.anthropic.claude-opus-4-6-v1"
 _HAIKU_BEDROCK = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
-_SONNET_BEDROCK = "us.anthropic.claude-sonnet-4-6-v1"
+_SONNET_BEDROCK = "us.anthropic.claude-sonnet-4-6"
 
 # Gemini's free tier currently grants quota for gemini-2.5-flash only;
 # gemini-2.5-pro returns HTTP 429 on first request. Default to Flash so

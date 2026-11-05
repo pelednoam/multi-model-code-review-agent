@@ -684,7 +684,7 @@ fi
 # providers it chose must not fall to Google by default when Hermes is unavailable.
 # `${HAS_AGY:-false}`, not `$HAS_AGY`: an unset variable expands to an empty command, which
 # succeeds, and would route the slot to a backend nobody verified.
-if $PREFER_HERMES && $HAS_HERMES && launch_hermes 3 us.anthropic.claude-sonnet-4-6-v1 "$PROMPT_DIR/prompt-3.txt"; then
+if $PREFER_HERMES && $HAS_HERMES && launch_hermes 3 us.anthropic.claude-sonnet-4-6 "$PROMPT_DIR/prompt-3.txt"; then
   :  # launched; if hermes could not be set up, the next backend runs
 elif ${HAS_AGY:-false} && [ -n "${AGY_SELECTED_MODEL:-}" ] \
     && { ! $PREFER_HERMES || review_helper flag REVIEW_USE_AGY; } \
@@ -696,7 +696,7 @@ elif $HAS_GEMINI && review_helper flag REVIEW_USE_GEMINI \
 elif $HAS_CLAUDE && launch_cli 3 claude-sonnet "$PROMPT_DIR/prompt-3.txt"; then
   :  # launched; if claude could not be set up, Hermes is next
 elif $HAS_HERMES; then
-  launch_hermes 3 us.anthropic.claude-sonnet-4-6-v1 "$PROMPT_DIR/prompt-3.txt"
+  launch_hermes 3 us.anthropic.claude-sonnet-4-6 "$PROMPT_DIR/prompt-3.txt"
 fi
 
 # R4: Spec-contract (Opus) -- local CLI by default (free), Hermes only when opted in

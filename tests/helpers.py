@@ -10,17 +10,12 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_PATH = REPO_ROOT / "docs" / "ensemble_review_result_schema.json"
 AGENT_DOC = REPO_ROOT / "docs" / "ensemble-review.md"
+RUNNER_SCRIPT = REPO_ROOT / "scripts" / "run_full_review.sh"
 
 
 def runner_script() -> str:
-    """The full-mode runner: the run-reviewers.sh heredoc in docs/ensemble-review.md."""
-    m = re.search(
-        r"cat > \"\$REVIEW_TMP/run-reviewers\.sh\" <<'RUNNER'\n(.*?)\nRUNNER\n",
-        AGENT_DOC.read_text(),
-        re.S,
-    )
-    assert m, "section 6 no longer defines a run-reviewers.sh heredoc"
-    return m.group(1)
+    """The full-mode runner, scripts/run_full_review.sh."""
+    return RUNNER_SCRIPT.read_text(encoding="utf-8")
 
 
 def shell_function(script: str, name: str) -> str:

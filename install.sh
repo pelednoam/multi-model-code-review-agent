@@ -29,6 +29,7 @@ cp "$REPO_ROOT/scripts/scrub_diff.py"                    "$TARGET/scripts/"
 cp "$REPO_ROOT/scripts/review_preflight.py"              "$TARGET/scripts/"
 cp "$REPO_ROOT/scripts/review_until_converged.py"        "$TARGET/scripts/"
 cp "$REPO_ROOT/scripts/validate_review_results.py"       "$TARGET/scripts/"
+cp "$REPO_ROOT/scripts/run_full_review.sh"               "$TARGET/scripts/"
 cp "$REPO_ROOT/docs/ensemble_review_result_schema.json"  "$TARGET/docs/"
 
 # Sub-packages: helpers split out of the two entry points so each file

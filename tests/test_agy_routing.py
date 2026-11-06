@@ -103,8 +103,8 @@ class TestAgyRouting(AgyCase):
         choice = _choose_command(3, tmp_path / "p.txt", tmp_path, self.BACKENDS)
         assert choice is not None
         cmd, label = choice
-        assert cmd[cmd.index("--model") + 1] == "gemini-3.8-flash-high"
-        assert label == "gemini-3.8-flash-high"
+        assert cmd[cmd.index("--model") + 1] == "gemini-3.8-flash-medium"
+        assert label == "gemini-3.8-flash-medium"
 
     def test_an_explicit_model_wins_without_asking_agy(
         self, monkeypatch: pytest.MonkeyPatch
@@ -128,15 +128,29 @@ class TestAgyRouting(AgyCase):
         assert (
             agy.agy_model_choice((Path("/srv/repo"),))[0]
             == agy.agy_model_choice()[0]
-            == "gemini-3.8-flash-high"
+            == "gemini-3.8-flash-medium"
         )
         assert len(calls) == 1
 
     @pytest.mark.parametrize(
         ("listed", "best"),
         [
-            # This machine today.
-            (AgyCase.LISTED, "gemini-3.8-flash-high"),
+            # This machine on 2026-10-14: medium effort, not high.
+            (AgyCase.LISTED, "gemini-3.8-flash-medium"),
+            # And on 2026-11-06, with Argon. Its high effort waited minutes before
+            # answering at all, and timed out on a real review.
+            (
+                [
+                    "gemini-4-argon-medium",
+                    "gemini-4-argon-high",
+                    "gemini-4-argon-low",
+                    *AgyCase.LISTED,
+                    "claude-opus-5-5-high",
+                ],
+                "gemini-4-argon-medium",
+            ),
+            # With no medium listed, high is still above low.
+            (["gemini-4-argon-low", "gemini-4-argon-high"], "gemini-4-argon-high"),
             # The day the plan includes Argon: a newer version beats a higher effort.
             ([*AgyCase.LISTED, "gemini-4-argon"], "gemini-4-argon"),
             # Same version: Pro above Flash above Lite, whatever the effort.

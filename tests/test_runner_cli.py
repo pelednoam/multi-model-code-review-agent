@@ -32,10 +32,9 @@ class TestRunnerCli:
         )  # fmt: skip
 
     def test_the_runner_calls_it_the_same_way(self) -> None:
-        # One short line in each place, the detection snippet's and the runner's.
-        doc = AGENT_DOC.read_text()
-        assert doc.count('python3 -I "$PWD/' + self.ENTRY + '" "$@"') == 1
-        # The runner's from a private copy taken before any reviewer starts.
+        # One short line, the runner's: detection is the runner's too, not the doc's.
+        assert "review_helper() {" not in AGENT_DOC.read_text()
+        # From a private copy taken before any reviewer starts.
         assert 'python3 -I "$HELPER_ROOT/' + self.ENTRY + '" "$@"' in runner_script()
         assert 'cp -RL "$REVIEW_ROOT/scripts/review_loop" "$HELPER_ROOT/scripts/"' in (
             runner_script()

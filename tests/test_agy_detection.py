@@ -173,7 +173,7 @@ class TestAgyRunner(AgyCase):
         assert '&& [ -n "$dir" ] || return 1' in shell_function(runner, "make_scratch")
         assert 'rm -rf "$AGY_WS" "$AGY_STATE"' in runner
         # Absolute, or the job's cd into the workspace sends its output there.
-        assert 'REVIEW_TMP="$(cd "$REVIEW_TMP" && pwd -P)" || exit 1' in runner
+        assert 'REVIEW_TMP="$(cd "$REVIEW_TMP" && pwd -P)" ||' in runner
 
     def test_a_bedrock_project_gets_agy_only_by_name_in_the_runner(self) -> None:
         runner = runner_script()

@@ -1,8 +1,11 @@
-"""Tests for the full-mode runner, the run-reviewers.sh heredoc in docs/ensemble-review.md."""
+"""Tests for the full-mode runner, scripts/run_full_review.sh."""
 
 from __future__ import annotations
 
+import contextlib
+import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -16,6 +19,7 @@ from helpers import (
     AGENT_DOC,
     GROUP_CHECKS,
     REPO_ROOT,
+    RUNNER_SCRIPT,
     liveness,
     runner_script,
     shell_function,
@@ -24,14 +28,16 @@ from helpers import (
 from scripts.review_loop import backends, claude_tools
 from scripts.review_loop import reviewers as reviewers_mod
 from scripts.review_loop.claude_tools import SECRET_READS, claude_denied
+from scripts.review_loop.results import EXPECTED_REVIEWERS
 
 
 class TestRunnerScript:
-    """The runner in docs/ensemble-review.md section 6.
+    """The runner, scripts/run_full_review.sh, which docs/ensemble-review.md section 6 runs.
 
-    THE DOC IS THE PROGRAM for full mode: the orchestrating agent reads that markdown and executes
-    the bash out of it, so a regression there is a regression in the product with nothing to catch
-    it. These tests extract the runner heredoc and check the properties that failed in the field.
+    It was a heredoc in that doc, for the orchestrating agent to write out and run -- and one
+    wrote a launcher of its own instead, which sent slot 3 to the gemini CLI with none of the
+    checks. As a script, it is run as it stands. These tests check the properties that failed
+    in the field.
 
     The failure they exist for: launch-with-& followed by `wait` used to sit in one foreground Bash
     tool call. That call is killed at its 120 second timeout while the reviewers, wrapped in
@@ -110,16 +116,17 @@ class TestRunnerScript:
         runner = runner_script()
         assert runner.index("unset CDPATH") < runner.index('(cd "')
 
-    def test_runner_is_valid_bash(self, tmp_path: Path) -> None:
-        script = tmp_path / "run-reviewers.sh"
-        script.write_text(runner_script() + "\n")
+    def test_runner_is_valid_bash(self) -> None:
         result = subprocess.run(
-            ["bash", "-n", str(script)], capture_output=True, text=True, timeout=10
+            ["bash", "-n", str(RUNNER_SCRIPT)],
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         assert result.returncode == 0, f"runner does not parse: {result.stderr}"
 
     def test_launch_and_wait_live_in_the_same_script(self) -> None:
-        # Both halves in one heredoc is the whole fix: `wait` and `kill -0` only work on children
+        # Both halves in one script is the whole fix: `wait` and `kill -0` only work on children
         # of the shell that started them, and shell state does not survive between tool calls.
         runner = runner_script()
         assert "launch_cli" in runner and "launch_hermes" in runner
@@ -131,6 +138,11 @@ class TestRunnerScript:
         assert "run_in_background: true" in doc
         # And says why, so the next person to touch it does not "simplify" it back.
         assert "120 second timeout" in doc
+        # The script itself, not a launcher of the agent's own.
+        assert "bash scripts/run_full_review.sh /tmp/mmcra-review-XXXXXXXX" in doc
+        assert "Do not write a launcher of your own" in doc
+        assert "Do not detect,\nchoose or name backends yourself" in doc
+        assert "<<'RUNNER'" not in doc
 
     def test_waiting_is_bounded(self) -> None:
         # A bare `wait` has no deadline of its own, so one wedged reviewer holds the round open
@@ -382,12 +394,13 @@ class TestRunnerScript:
         wrapper = runner[start : runner.index("\nfi\n", start) + 4]
         script = tmp_path / "t.sh"
         script.write_text(
-            wrapper
+            f"REVIEW_TMP={shlex.quote(str(tmp_path))}\nSELF=$0\nINNER_ARGS=()\n"
+            + wrapper
             # The trap before the line the test waits for: after it, a TERM sent on
             # reading the line could come first, and end the shell with no word said.
             + "trap 'echo got-TERM; exit 143' TERM\n"
             + 'echo "leader=$([ "$(ps -o sid= -p $$ | tr -d " ")" = "$$" ] && echo yes)"\n'
-            + "sleep 20 >/dev/null & wait $!\n"
+            + "sleep 20 >/dev/null 2>&1 & wait $!\n"
         )
         proc = subprocess.Popen(
             ["bash", str(script)], stdout=subprocess.PIPE, text=True
@@ -397,6 +410,9 @@ class TestRunnerScript:
         proc.terminate()  # to the outer runner, which forwards it
         rest, _ = proc.communicate(timeout=20)
         assert "got-TERM" in rest and proc.returncode == 143
+        # What the real runner printed, and how it ended, for the poll to read.
+        assert (tmp_path / "round.log").read_text() == "leader=yes\ngot-TERM\n"
+        assert (tmp_path / "runner-exit").read_text() == "143\n"
 
     def test_the_runner_runs_a_copy_of_its_helpers(self) -> None:
         # A reviewer with a file tool can write the checkout, whose code the runner
@@ -499,13 +515,12 @@ class TestRunnerScript:
         # Nor any other: gemini is opt-in in both modes now.
         gated = "elif $HAS_GEMINI && review_helper flag REVIEW_USE_GEMINI \\\n"
         assert gated in runner
-        # And the switches reach the runner, a separate script that inherits only exports.
-        doc = AGENT_DOC.read_text()
-        export = doc.split("export REVIEW_TMP", 1)[1].split('\n"', 1)[0]
-        assert "REVIEW_USE_AGY" in export and "REVIEW_USE_GEMINI" in export
-        # agy is not even detected for such a project.
-        detection = doc[doc.index("PREFER_HERMES=false") : doc.index("HAS_AGY=true")]
-        assert 'review_helper agy-detect "$PREFER_HERMES"' in detection
+        # agy is not even detected for such a project: the pin is read first.
+        detection = runner[runner.index("# DETECTION") : runner.index("# Pre-check")]
+        pinned = detection.index("[ -f .use-hermes ] && PREFER_HERMES=true")
+        assert pinned < detection.index('review_helper agy-detect "$PREFER_HERMES"')
+        # Nothing the caller sets lowers it: --hermes only raises it.
+        assert "PREFER_HERMES=$HERMES_ASKED\n" in detection
 
     @pytest.mark.parametrize(
         ("tools", "denied", "scoped"),
@@ -643,9 +658,90 @@ class TestRunnerScript:
         codex = runner[runner.index("    codex)") : runner.index("    gemini)")]
         assert "-s read-only -c 'approvals_reviewer=\"user\"'" in codex
         assert "-c project_doc_max_bytes=0" in codex
-        doc = AGENT_DOC.read_text()
-        detection = doc[doc.index("HAS_CODEX=false") : doc.index("HAS_AGY=false")]
+        detection = runner[runner.index("# DETECTION") : runner.index("# Pre-check")]
         assert "review_helper codex-check || HAS_CODEX=false" in detection
+
+    @staticmethod
+    def _path_without_reviewers(tmp_path: Path) -> str:
+        """PATH with a fake claude, and every other command as it is -- but none of the
+        reviewer CLIs, wherever on PATH they are (codex is in /usr/bin on some hosts)."""
+        fake, rest = tmp_path / "fake", tmp_path / "rest"
+        fake.mkdir()
+        rest.mkdir()
+        reviewers = {"claude", "codex", "agy", "gemini", "hermes"}
+        for entry in os.environ.get("PATH", "").split(os.pathsep):
+            with contextlib.suppress(OSError):
+                for found in Path(entry).iterdir():
+                    link = rest / found.name
+                    if found.name in reviewers or link.exists() or not found.is_file():
+                        continue
+                    if os.access(found, os.X_OK):
+                        link.symlink_to(found)
+        answer = json.dumps(
+            {"reviewer": "x", "model": "m", "findings": [], "overall_assessment": "ok"}
+        )
+        claude = fake / "claude"
+        claude.write_text(
+            '#!/bin/sh\ncat >/dev/null\npwd >> "$FAKE_CWD"\n'
+            f"printf '%s\\n' {shlex.quote(json.dumps({'result': answer}))}\n"
+        )
+        claude.chmod(0o755)
+        return f"{fake}{os.pathsep}{rest}"
+
+    def test_a_round_runs_from_the_script_as_it_stands(self, tmp_path: Path) -> None:
+        # The doc's runner was a heredoc for the agent to write out, and one wrote a
+        # launcher of its own instead. Run as the doc says: from anywhere, in the
+        # project's checkout, recording what it printed and how it ended.
+        review = tmp_path / "review"
+        review.mkdir()
+        for num in range(1, 5):
+            (review / f"prompt-{num}.txt").write_text(f"prompt {num}\n")
+        env = {**os.environ, "PATH": self._path_without_reviewers(tmp_path)}
+        env["FAKE_CWD"] = str(tmp_path / "cwd")
+        env.pop("MMCRA_OWN_SESSION", None)
+        done = subprocess.run(
+            ["bash", str(RUNNER_SCRIPT), str(review)],
+            cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120,
+        )  # fmt: skip
+        assert done.returncode == 0, done.stdout + done.stderr
+        assert (review / "runner-exit").read_text() == "0\n"
+        log = (review / "round.log").read_text()
+        assert (
+            log.endswith("ROUND COMPLETE\n")
+            and "Backends: claude=true codex=false" in log
+        )
+        for num, lens in EXPECTED_REVIEWERS.items():
+            result = json.loads((review / f"result-{num}.json").read_text())
+            assert result["reviewer"] == lens and result["overall_assessment"] == "ok"
+        # Every reviewer read the repository: it ran in the checkout, not where it was called.
+        assert set((tmp_path / "cwd").read_text().split()) == {str(REPO_ROOT)}
+
+    @pytest.mark.parametrize("args", [[], ["--yolo"], ["a", "b"], ["missing"]])
+    def test_a_usage_error_launches_nothing(
+        self, tmp_path: Path, args: list[str]
+    ) -> None:
+        env = {**os.environ, "PATH": self._path_without_reviewers(tmp_path)}
+        env["FAKE_CWD"] = str(tmp_path / "cwd")
+        env.pop("MMCRA_OWN_SESSION", None)
+        done = subprocess.run(
+            ["bash", str(RUNNER_SCRIPT), *args],
+            cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60,
+        )  # fmt: skip
+        assert done.returncode == 2, done.stdout + done.stderr
+        assert not (tmp_path / "cwd").exists()
+
+    def test_the_runner_runs_the_loops_bedrock_models(self) -> None:
+        # Both named us.anthropic.claude-sonnet-4-6-v1, an ID Bedrock does not have:
+        # hermes exited 0 with no answer, and the slot came back empty.
+        runner = runner_script()
+        ids = {
+            reviewers_mod._OPUS_BEDROCK,
+            reviewers_mod._SONNET_BEDROCK,
+            reviewers_mod._HAIKU_BEDROCK,
+        }
+        launched = set(re.findall(r"launch_hermes \d (\S+) ", runner))
+        assert launched == ids
+        assert reviewers_mod._SONNET_BEDROCK == "us.anthropic.claude-sonnet-4-6"
 
     def test_a_failed_slot_still_produces_a_result_with_a_true_reason(self) -> None:
         runner = runner_script()

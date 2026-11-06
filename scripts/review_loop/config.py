@@ -77,6 +77,7 @@ VENDORED_PATHS: tuple[str, ...] = (
     "scripts/review_preflight.py",
     "scripts/review_until_converged.py",
     "scripts/validate_review_results.py",
+    "scripts/run_full_review.sh",
     "scripts/preflight",
     "scripts/review_loop",
 )

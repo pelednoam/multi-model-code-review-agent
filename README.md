@@ -481,8 +481,8 @@ behavior instead of specified behavior.
 **Full mode**: at least `claude` or `hermes` must be installed for
 Anthropic reviewers, and bash 4.4 or later for its runner (it checks, and
 exits otherwise). macOS ships bash 3.2 as `/bin/bash`: `brew install bash`, and
-put Homebrew's bash first on PATH -- the runner starts through `#!/usr/bin/env
-bash`, so `command -v bash` should print `/opt/homebrew/bin/bash` (or
+put Homebrew's bash first on PATH -- the runner, `scripts/run_full_review.sh`, is
+started as `bash scripts/run_full_review.sh`, so `command -v bash` should print `/opt/homebrew/bin/bash` (or
 `/usr/local/bin/bash`). For cross-provider diversity, also install:
 - [Codex CLI](https://github.com/openai/codex) for GPT-5.5
   (uses ChatGPT subscription, no API credits). The pipeline uses
@@ -771,10 +771,11 @@ have detected it via fingerprint matching and exited with code 2
 | `scripts/review_preflight.py` | Deterministic pre-review audit (now includes coverage-gap detection) |
 | `scripts/review_until_converged.py` | Convergence loop: review -> merge -> mandatory gate -> commit, until convergence |
 | `scripts/validate_review_results.py` | JSON schema validator |
+| `scripts/run_full_review.sh` | Full mode's runner: detects the backends, launches the four reviewers, waits for them, and checks their output |
 | `scripts/review_loop/` | The convergence loop's package; also the full-mode runner's checks and extraction, through `runner_entry.py` |
 | `docs/agy-sandbox.md` | What agy's bubblewrap sandbox closes, what it does not, and its switches |
 | `docs/codex-sandbox.md` | Why codex's sandbox is verified before use, and how to fix a host where it is not read-only |
-| `tests/` | Test suite: `test_review_scripts.py` (the scrubber, preflight, loop and gate), `test_tamper.py`, `test_merge_agent.py`, `test_runner_script.py` (the full-mode runner), `test_agy_*.py`, `test_reviewer_processes.py`, `test_runner_cli.py`; shared: `helpers.py` (takes the full-mode runner out of the agent doc), `agy_case.py`, `conftest.py` (switches agy off for every test unless it switches it on) |
+| `tests/` | Test suite: `test_review_scripts.py` (the scrubber, preflight, loop and gate), `test_tamper.py`, `test_merge_agent.py`, `test_runner_script.py` (`run_full_review.sh`, the full-mode runner), `test_agy_*.py`, `test_reviewer_processes.py`, `test_runner_cli.py`; shared: `helpers.py` (the full-mode runner's source, and its shell functions), `agy_case.py`, `conftest.py` (switches agy off for every test unless it switches it on) |
 
 ## Key design decisions
 

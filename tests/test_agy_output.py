@@ -57,7 +57,7 @@ class TestAgyOutput(AgyCase):
         result = extract_results(tmp_path, self.AGY)[2]
         assert result is not None and result["overall_assessment"] == "one\u0085two"
 
-    @pytest.mark.parametrize("status", ["ERROR", "CANCELED", "INTERRUPTED", "WAITING"])
+    @pytest.mark.parametrize("status", ["CANCELED", "INTERRUPTED", "WAITING"])
     def test_an_unfinished_turn_is_not_a_review(
         self, tmp_path: Path, status: str
     ) -> None:
@@ -67,6 +67,64 @@ class TestAgyOutput(AgyCase):
             self._stream({"status": status, "structured_output": self._review()})
         )
         assert extract_results(tmp_path, self.AGY)[2] is None
+
+    def test_a_schema_checked_review_from_an_errored_turn_is_kept(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Measured: Argon's first draft overran the output-token limit, its retry gave
+        # a whole review as structured_output, and the turn still ended in ERROR.
+        self._raw(tmp_path).write_text(
+            self._stream(
+                {
+                    "status": "ERROR",
+                    "error": "Your previous response was cut off because it"
+                    " exceeded the output token limit",
+                    "structured_output": self._review(),
+                }
+            )
+        )
+        result = extract_results(tmp_path, self.AGY)[2]
+        assert result is not None and result["findings"][0]["issue"] == "dead code"
+        said = capsys.readouterr().out
+        assert "R3: agy ended its turn in ERROR" in said and "token limit" in said
+
+    def test_an_errored_turns_free_text_is_not_a_review(self, tmp_path: Path) -> None:
+        # Its response may be the draft that was cut short; only structured_output
+        # was held to the schema.
+        self._raw(tmp_path).write_text(
+            self._stream({"status": "ERROR", "response": json.dumps(self._review())})
+        )
+        assert extract_results(tmp_path, self.AGY)[2] is None
+
+    @pytest.mark.parametrize(
+        "answer",
+        [
+            {"findings": [], "overall_assessment": "no reviewer or model"},
+            {
+                "reviewer": "r",
+                "model": "m",
+                "findings": "none",
+                "overall_assessment": "",
+            },
+            {
+                "reviewer": "r",
+                "model": "m",
+                "findings": ["x"],
+                "overall_assessment": "",
+            },
+            "not an object",
+        ],
+    )
+    def test_an_errored_turn_without_a_whole_review_says_why(
+        self, tmp_path: Path, answer: object
+    ) -> None:
+        self._raw(tmp_path).write_text(
+            self._stream(
+                {"status": "ERROR", "error": "quota", "structured_output": answer}
+            )
+        )
+        assert extract_results(tmp_path, self.AGY)[2] is None
+        assert "did not finish its turn" in describe_outputs(tmp_path, self.AGY)
 
     def test_a_failed_turn_says_why(self, tmp_path: Path) -> None:
         self._raw(tmp_path).write_text(

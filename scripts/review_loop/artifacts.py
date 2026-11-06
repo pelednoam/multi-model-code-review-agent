@@ -32,7 +32,7 @@ Read `result-*.json`. Everything else is intermediate.
 | File | What it is |
 |---|---|
 | `result-N.json` | **The findings.** One object per reviewer, checked for the schema's required top-level keys and a list of finding objects (agy's `structured_output`, when it has one, is also held to `docs/ensemble_review_result_schema.json` by `--json-schema`; a free-text answer is checked only as the others are; `scripts/validate_review_results.py` checks the full schema). This is what you want. |
-| `raw-N.txt` | Whatever the CLI printed on stdout, before parsing. Empty for the codex slot on a *successful* run — see below. For agy, one stream-json event per line; the review is the final `result` event's `structured_output`, and only a turn whose status is `SUCCESS` counts. |
+| `raw-N.txt` | Whatever the CLI printed on stdout, before parsing. Empty for the codex slot on a *successful* run — see below. For agy, one stream-json event per line; the review is the final `result` event's `structured_output`, and only a turn whose status is `SUCCESS` counts -- or one agy ended in `ERROR` after a complete `structured_output`, kept with a note saying so. |
 | `codex-out-N.txt` | The codex slot's answer, its last message (`-o`), read before its `raw-N.txt`. |
 | `stderr-N.txt` | Diagnostics. Read this when a slot is missing a `result-N.json`. |
 | `prompt-N.txt` | The exact prompt that reviewer received. For agy it begins with a preamble telling it to call no tools. |

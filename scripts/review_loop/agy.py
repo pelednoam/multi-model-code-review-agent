@@ -134,7 +134,7 @@ def _picked_agy_model(also_hide: tuple[Path, ...] = ()) -> tuple[str | None, str
             " is a Gemini model; set AGY_MODEL to use one anyway"
         )
     return pick, (
-        f"AGY_MODEL is unset; picked {pick} (newest Gemini, highest effort,"
+        f"AGY_MODEL is unset; picked {pick} (newest Gemini, medium effort first,"
         f" of {len(slugs)} in `agy models`)"
     )
 
@@ -175,9 +175,14 @@ def agy_models(also_hide: tuple[Path, ...] = ()) -> list[str]:
 
 _GEMINI_VERSION = re.compile(r"gemini-(\d+(?:\.\d+)*)")
 #: Gemini models that do not answer in text: they cannot write a review, so newer is
-#: not better. ``gemini-3.9-flash-image`` must not outrank ``gemini-3.8-flash-high``.
+#: not better. ``gemini-3.9-flash-image`` must not outrank ``gemini-3.8-flash-medium``.
 _NOT_A_REVIEWER = re.compile(r"-(image|tts|audio|live|embedding|embed|computer-use)\b")
-_EFFORT = {"low": 0, "medium": 1, "high": 2}
+#: Medium first, then high, then low. Not highest first: measured on 2026-11-06, Gemini 4
+#: Argon at high effort sat six to nine minutes before its first token -- on a one-line
+#: prompt too -- and a review of a 136 KB diff took eleven minutes, past the 600-second
+#: timeout, where medium started in six seconds and finished in two and a half minutes.
+#: Low and medium answered a one-line prompt within ten seconds. AGY_MODEL can still name high.
+_EFFORT = {"low": 0, "high": 1, "medium": 2}
 
 
 def _agy_rank(slug: str) -> tuple[tuple[int, ...], int, int] | None:
@@ -187,8 +192,8 @@ def _agy_rank(slug: str) -> tuple[tuple[int, ...], int, int] | None:
     GPT models agy also offers duplicate what slots 1, 2 and 4 already run. Nor a
     Gemini model that makes images, speech or embeddings rather than text. Among
     Gemini models: newest version first; then tier, with Lite below Flash below
-    everything else (Pro, Argon, and whatever comes next); then reasoning effort, a
-    slug without one counting as medium.
+    everything else (Pro, Argon, and whatever comes next); then reasoning effort, medium
+    above high above low (``_EFFORT``), a slug without one counting as medium.
     """
     match = _GEMINI_VERSION.match(slug)
     if match is None or _NOT_A_REVIEWER.search(slug):
@@ -199,7 +204,7 @@ def _agy_rank(slug: str) -> tuple[tuple[int, ...], int, int] | None:
         version = version[:-1]
     rest = slug[match.end() :]
     tier = 0 if "lite" in rest else 1 if "flash" in rest else 2
-    effort = _EFFORT.get(rest.rsplit("-", 1)[-1], 1)
+    effort = _EFFORT.get(rest.rsplit("-", 1)[-1], _EFFORT["medium"])
     return version, tier, effort
 
 

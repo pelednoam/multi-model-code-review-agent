@@ -520,7 +520,9 @@ started as `bash scripts/run_full_review.sh`, so `command -v bash` should print 
   ```
   The model is picked for you each run: the best Gemini model `agy models`
   lists for your sign-in -- newest version, then Pro/Argon over Flash over
-  Lite, then highest effort -- and the run prints which one. Claude and GPT
+  Lite, then medium effort over high over low -- and the run prints which
+  one. Medium, not high: Argon at high effort waited six to nine minutes
+  before answering at all, and a review timed out. Claude and GPT
   models are passed over, because slots 1, 2 and 4 already cover those
   providers. Which models you get depends on your plan (Argon needs Google
   AI Ultra or an eligible Gemini Enterprise plan); when it gets Argon, the

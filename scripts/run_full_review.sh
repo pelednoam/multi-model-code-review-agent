@@ -625,12 +625,12 @@ if $HAS_CODEX; then review_helper codex-check || HAS_CODEX=false; fi
 # agy (Antigravity CLI): on wherever it is installed; REVIEW_USE_AGY set to anything but
 # 1/true/yes/on switches it off. The model is AGY_MODEL if set, else the best Gemini model
 # `agy models` lists for this sign-in (newest version, then Pro/Argon over Flash over Lite, then
-# highest effort) -- picked fresh each run, so a newer model is used once the plan has it. Only
-# true once the sandbox check has passed (no model call). A project pinned to Bedrock does not run
-# agy at all -- not even this check -- unless REVIEW_USE_AGY=1 and Hermes is not installed (Hermes
-# answers slot 3 when it is). Status lines go to stderr; the model it settled on is the only thing
-# on stdout. Its own variable, not AGY_MODEL: written back there, the pick would be taken next
-# time for a model asked for by name.
+# medium effort over high over low) -- picked fresh each run, so a newer model is used once the
+# plan has it. Only true once the sandbox check has passed (no model call). A project pinned to
+# Bedrock does not run agy at all -- not even this check -- unless REVIEW_USE_AGY=1 and Hermes is
+# not installed (Hermes answers slot 3 when it is). Status lines go to stderr; the model it settled
+# on is the only thing on stdout. Its own variable, not AGY_MODEL: written back there, the pick
+# would be taken next time for a model asked for by name.
 HAS_AGY=false AGY_SELECTED_MODEL=""
 if command -v agy &>/dev/null; then
   AGY_SELECTED_MODEL="$(review_helper agy-detect "$PREFER_HERMES")"

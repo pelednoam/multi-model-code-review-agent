@@ -96,6 +96,22 @@ class TestRunnerCli:
         done = self._cli("extract", str(raw), str(out), "3", "agy")
         assert done.returncode == 1 and "quota" in done.stderr and not out.exists()
 
+    def test_an_errored_agy_turns_schema_checked_review_is_kept(
+        self, tmp_path: Path
+    ) -> None:
+        review = {**self.REVIEW, "findings": [{"issue": "kept"}]}
+        raw = self._agy_stream(
+            tmp_path, status="ERROR", error="exceeded the output token limit",
+            structured_output=review,
+        )  # fmt: skip
+        out = tmp_path / "result-3.json"
+        done = self._cli("extract", str(raw), str(out), "3", "agy")
+        assert done.returncode == 0, done.stderr
+        assert json.loads(out.read_text())["findings"] == [{"issue": "kept"}]
+        # On stdout, which the runner writes to round.log.
+        assert done.stdout.startswith("R3: agy ended its turn in ERROR")
+        assert "token limit" in done.stdout
+
     def test_agys_shape_from_another_backend_is_not_read_as_agys(
         self, tmp_path: Path
     ) -> None:

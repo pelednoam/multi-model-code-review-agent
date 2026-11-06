@@ -758,8 +758,10 @@ publish_outputs || echo "WARNING: could not copy the reviewers' outputs into $RE
 
 # Extract review JSON from raw output, as the convergence loop does: Claude's wrapper, fences and
 # preamble; agy's stream only when agy ran the slot (any reviewer can be talked into printing a line
-# shaped like agy's), and only a turn that finished. Then the loop's own validation: the required
-# keys, findings that are a list of objects, and the reviewer named by the slot, not by the model.
+# shaped like agy's), and only a turn that finished -- or one agy ended in ERROR after a complete
+# schema-checked review, which the extractor notes on stdout, so in round.log. Then the loop's own
+# validation: the required keys, findings that are a list of objects, and the reviewer named by the
+# slot, not by the model.
 extract_json() {
   review_helper extract "$1" "$2" "$3" "${4:-}" "${5:-}" \
     2>"$REVIEW_TMP/extract-$(basename "$2" .json).err"

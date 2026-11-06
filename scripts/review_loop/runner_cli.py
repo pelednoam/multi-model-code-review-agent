@@ -35,6 +35,8 @@ from .results import (
     EXPECTED_REVIEWERS,
     agy_answer,
     agy_failure,
+    agy_kept_after_error,
+    agy_kept_note,
     agy_result,
     encode_review,
     parse_review,
@@ -168,8 +170,10 @@ def _extract(raw: str, out: str, slot: str, backend: str = "", model: str = "") 
         if failed:
             print(f"agy gave no review ({failed[:600]})", file=sys.stderr)
             return 1
+        kept_after = agy_kept_after_error(result) if result is not None else None
         text = agy_answer(result)
     else:
+        kept_after = None
         text = unwrap_envelope(text, backend)
     review = validate_result(parse_review(text), int(slot), EXPECTED_REVIEWERS)
     if review is None:
@@ -185,6 +189,9 @@ def _extract(raw: str, out: str, slot: str, backend: str = "", model: str = "") 
         print("the review is nested too deep to write", file=sys.stderr)
         return 1
     Path(out).write_text(encoded, encoding="utf-8")
+    if kept_after is not None:
+        # On stdout, which the runner logs: its stderr goes to a file no one is shown.
+        print(f"R{slot}: {agy_kept_note(kept_after)}")
     return 0
 
 

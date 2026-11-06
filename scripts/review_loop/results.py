@@ -7,7 +7,7 @@ import shutil
 import unicodedata
 from typing import TYPE_CHECKING, Any
 
-from .findings import validate_result
+from .findings import REVIEW_KEYS, validate_result
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -77,16 +77,41 @@ def agy_result(stdout: str) -> dict[str, Any] | None:
 def agy_failure(result: dict[str, Any] | None) -> str | None:
     """Why agy's ``result`` event (``agy_result``) holds no review, or None if it does.
 
-    Only a finished turn is a review. ERROR, CANCELED, INTERRUPTED and WAITING can all
-    carry review-shaped output -- a quota can run out after a whole review is drafted
-    -- and so can a stream with no result event at all.
+    Only a finished turn is a review, or a turn that ended in ERROR after giving its
+    schema-checked answer (``agy_kept_after_error``). ERROR, CANCELED, INTERRUPTED and
+    WAITING can all carry review-shaped text -- a quota can run out after a whole
+    review is drafted -- and so can a stream with no result event at all.
     """
     if result is None:
         return "no result event"
-    if result.get("status") != "SUCCESS":
+    if result.get("status") != "SUCCESS" and agy_kept_after_error(result) is None:
         error = str(result.get("error") or "no error given").strip()
         return printable(f"status {result.get('status')}: {error}")
     return None
+
+
+def agy_kept_after_error(result: dict[str, Any]) -> str | None:
+    """The error agy's turn ended on, when its review is kept anyway; else None.
+
+    agy can end a turn in ERROR after giving its answer. Measured on 2026-11-06:
+    Argon's first draft overran the output-token limit, agy asked it to retry, the
+    retry's whole review came back as ``structured_output``, and the turn still ended
+    in ERROR on the first draft's message -- thirteen minutes of review discarded.
+    ``structured_output`` is the answer agy held to ``--json-schema``, so it is kept
+    when it has a review's shape. Nothing else from a failed turn is: its free-text
+    ``response`` may be a draft cut short, and CANCELED, INTERRUPTED and WAITING end
+    before an answer.
+    """
+    review = result.get("structured_output")
+    if (
+        result.get("status") != "ERROR"
+        or not isinstance(review, dict)
+        or not REVIEW_KEYS.issubset(review)
+        or not isinstance(review["findings"], list)
+        or not all(isinstance(f, dict) for f in review["findings"])
+    ):
+        return None
+    return printable(str(result.get("error") or "no error given").strip())
 
 
 def agy_denied(result: dict[str, Any]) -> list[str]:
@@ -121,7 +146,8 @@ def agy_answer(result: dict[str, Any] | None) -> str:
     "" for anything short of a finished turn (``agy_failure``): read as plain text, a
     bare object in a stream with no result event passed as agy's verdict. Nothing in
     the schema-checked ``structured_output`` is unwrapped further: a ``result`` key the
-    diff talked agy into adding does not replace it.
+    diff talked agy into adding does not replace it. A turn kept after an ERROR gives
+    its ``structured_output`` only, never its ``response``.
     """
     if result is None or agy_failure(result):
         return ""
@@ -192,7 +218,22 @@ def _extract_from(
     if encoded is None:
         return None
     (round_dir / f"result-{slot}.json").write_text(encoded, encoding="utf-8")
+    event = agy_result(raw) if backend == "agy" else None
+    error = agy_kept_after_error(event) if event is not None else None
+    if error is not None:
+        print(f"  R{slot}: {agy_kept_note(error)}")
     return d
+
+
+def agy_kept_note(error: str) -> str:
+    """What to say of a review kept from a turn agy ended in ERROR (``error``), on
+    one line: agy's message runs over several.
+    """
+    error = " ".join(error.split())[:300]
+    return (
+        f"agy ended its turn in ERROR ({error}), but after a complete"
+        " schema-checked review; that review is kept"
+    )
 
 
 def encode_review(review: dict[str, Any], indent: int | None = 2) -> str | None:
